@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111318">
+  <title>Voice Room · 음성 통화</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <header><a class="brand" href="/" aria-label="Voice Room 홈"><span class="brand-mark">◖◗</span> VOICE ROOM</a><span class="tag">음성 통화</span></header>
+    <section class="intro"><span class="eyebrow">가볍게 연결되는 공간</span><h1>같은 방에서,<br>목소리로 만나요.</h1><p>방 이름을 정하고 함께 들어오세요.<br>복잡한 설정 없이 대화를 시작할 수 있어요.</p></section>
+    <section class="panel" aria-labelledby="panel-title">
+      <div class="panel-top"><h2 id="panel-title">통화방</h2><span id="badge" class="badge">입장 전</span></div>
+      <form id="join-form">
+        <label for="name">닉네임</label><input id="name" name="name" placeholder="어떻게 불러드릴까요?" maxlength="24" required autocomplete="nickname">
+        <label for="room">방 이름</label><input id="room" name="room" placeholder="예: our-room" maxlength="40" required autocomplete="off" spellcheck="false">
+        <p class="hint">같은 방 이름을 입력하면 함께 통화할 수 있어요. 최대 6명.</p>
+        <button id="join" class="primary" type="submit">통화방 입장 <span aria-hidden="true">↗</span></button>
+      </form>
+      <div id="call" hidden>
+        <div class="room-heading"><span class="room-icon" aria-hidden="true">◖◗</span><div><span class="eyebrow">현재 통화방</span><h3 id="room-title"></h3></div><span id="count"></span></div>
+        <ul id="participants" aria-label="통화 참여자"></ul>
+        <p id="waiting" class="hint">다른 참여자가 들어오면 통화가 연결됩니다.</p>
+        <button id="resume" class="secondary" hidden>상대방 음성 재생</button>
+        <button id="leave" class="leave">통화 나가기</button>
+      </div>
+      <p id="status" role="status" aria-live="polite">마이크는 입장할 때 켜집니다.</p>
+    </section>
+    <footer>목소리만으로 충분한 순간.</footer>
+  </main>
+  <div id="audio-container"></div>
+</body>
+</html>
