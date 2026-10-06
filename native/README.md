@@ -10,7 +10,7 @@ Windows 10 1809 이상과 .NET 10 SDK가 필요합니다.
 저장소 루트에서 서버와 앱을 각각 실행합니다.
 
 ```powershell
-node web/server.js
+node native/server/server.js
 ```
 
 ```powershell
@@ -29,7 +29,7 @@ dotnet run --project native/VoiceNative
 
 ```powershell
 $env:HOST = '0.0.0.0'
-node web/server.js
+node native/server/server.js
 ```
 
 서버의 TCP 3000 포트와 앱의 UDP 통신을 방화벽에서 허용해야 합니다.
@@ -38,7 +38,7 @@ node web/server.js
 
 ## 연결과 오디오
 
-- 기존 `web/server.js`의 방 참가·SSE·SDP/ICE 신호 API를 재사용합니다.
+- `native/server/server.js`가 방 참가·SSE·SDP/ICE 신호 API를 제공합니다. `web/` 없이 실행됩니다.
 - 최대 6명 메시 연결입니다. 각 상대와 별도 연결하며 마이크 캡처는 공유합니다.
 - 서버는 기본적으로 STUN만 제공합니다. TURN은 서버의 `ICE_SERVERS`로 설정합니다.
 - TURN이 구성되면 연결 탐색에서 중계 경로를 사용할 수 있습니다. 춘천 서버에 TURN을 설치하거나 배포한 상태는 아닙니다.
@@ -67,3 +67,4 @@ Opus 20ms 합성 음성 프레임을 SRTP로 보내고 디코딩하는지 확인
 SIPSorcery는 BSD-3-Clause 기반의 추가 지역 사용 제한을 포함합니다. NAudio는 MIT 라이선스입니다.
 각 패키지의 `LICENSE.md`를 참고하세요. 배포 시 종속 라이브러리의 라이선스 고지를 포함해야 합니다.
 소스와 API: https://github.com/sipsorcery-org/sipsorcery
+
