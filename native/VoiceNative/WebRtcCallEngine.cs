@@ -26,7 +26,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     public event Action<string>? Status;
     private sealed record Session(string Id, string Token, RemotePeer[] Peers);
     private sealed record RemotePeer(string Id, string Name);
-    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name);
+    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics);
 
     private Uri Endpoint(string path) => new(server!, path);
     private async Task<JsonElement> Post(string path, object body)
@@ -58,6 +58,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                     username = item.TryGetProperty("username", out var u) ? u.GetString() : null,
                     credential = item.TryGetProperty("credential", out var p) ? p.GetString() : null });
             }
+            Status?.Invoke($"ICE 서버 {iceServers.Count}개 · TURN 중계 " +
+                (iceServers.Any(s => s.urls.StartsWith("turn:") || s.urls.StartsWith("turns:")) ? "사용 가능" : "미설정"));
             encoder = new AudioEncoder(includeOpus: true);
             microphone = new WindowsAudioDevice(encoder, disableSink: true);
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
@@ -66,7 +68,10 @@ public sealed class WebRtcCallEngine : ICallEngine
                 lock (peers)
                     foreach (var peer in peers.Values)
                         if (peer.Connection.connectionState == RTCPeerConnectionState.connected)
+                        {
                             peer.Connection.SendAudio(960, bytes); // 20ms at the Opus 48kHz RTP clock.
+                            peer.Metrics.Sent(bytes.Length);
+                        }
             };
             session = (await Post("api/join", new { room, name })).Deserialize<Session>(Json)!;
             cancellation = new CancellationTokenSource();
@@ -100,11 +105,34 @@ public sealed class WebRtcCallEngine : ICallEngine
         var decoder = new AudioEncoder(includeOpus: true);
         var sink = new WindowsAudioDevice(decoder, disableSource: true);
         var pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers });
+        var metrics = new PeerMetrics();
+        pc.OnRtpPacketReceived += (_, media, packet) =>
+        {
+            if (media == SDPMediaTypesEnum.audio) metrics.Received(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload.Length);
+        };
+        pc.OnReceiveReport += (_, media, report) =>
+        {
+            if (media != SDPMediaTypesEnum.audio) return;
+            var samples = report.ReceiverReport?.ReceptionReports ?? report.SenderReport?.ReceptionReports;
+            var sample = samples?.FirstOrDefault();
+            if (sample is not null) metrics.ReportLoss(sample.FractionLost);
+        };
+        pc.oniceconnectionstatechange += state =>
+        {
+            Status?.Invoke($"{name}: ICE {state}");
+            if (state == RTCIceConnectionState.failed)
+                Status?.Invoke("직접 연결 경로 확인 실패 · 두 PC의 앱 방화벽 허용과 Wi-Fi 기기 간 통신 차단 설정을 확인하세요.");
+        };
+        pc.onicegatheringstatechange += state => Status?.Invoke($"{name}: 연결 후보 수집 {state}");
         pc.addTrack(new MediaStreamTrack(sink.GetAudioSinkFormats(), MediaStreamStatusEnum.SendRecv));
         pc.OnAudioFrameReceived += frame => sink.GotEncodedMediaFrame(frame);
         pc.onicecandidate += candidate =>
         {
-            if (candidate is not null) _ = SendCandidate(id, candidate);
+            if (candidate is not null)
+            {
+                Status?.Invoke($"{name}: 로컬 후보 {candidate.type} {candidate.address}:{candidate.port}");
+                _ = SendCandidate(id, candidate);
+            }
         };
         pc.onconnectionstatechange += state =>
         {
@@ -112,7 +140,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (state == RTCPeerConnectionState.connected) _ = StartSink(sink);
         };
         sink.OnAudioSinkError += message => Status?.Invoke("출력 오류: " + message);
-        var peer = new Peer(pc, sink, decoder, name);
+        var peer = new Peer(pc, sink, decoder, name, metrics);
         lock (peers) peers.Add(id, peer);
         return peer;
     }
@@ -150,6 +178,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             var element = signal.GetProperty("candidate");
             if (element.ValueKind == JsonValueKind.Null) return;
             var candidate = element.Deserialize<RTCIceCandidateInit>(Json)!;
+            Status?.Invoke($"상대 후보 수신: {candidate.candidate}");
             Peer? peer;
             lock (peers) peers.TryGetValue(from, out peer);
             if (peer?.Connection.remoteDescription is not null) peer.Connection.addIceCandidate(candidate);
@@ -160,6 +189,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         var result = connection.setRemoteDescription(new RTCSessionDescriptionInit {
             type = type == "offer" ? RTCSdpType.offer : RTCSdpType.answer, sdp = signal.GetProperty("sdp").GetString() });
         if (result != SetDescriptionResultEnum.OK) throw new InvalidOperationException("SDP 협상 실패: " + result);
+        Status?.Invoke($"{data.GetProperty("name").GetString()}: {type} 수신 · SDP 협상 완료");
         if (pending.Remove(from, out var candidates)) foreach (var candidate in candidates) connection.addIceCandidate(candidate);
         if (type == "offer")
         {
@@ -230,4 +260,22 @@ public sealed class WebRtcCallEngine : ICallEngine
         finally { cleanupGate.Release(); }
     }
     public async ValueTask DisposeAsync() { await LeaveAsync(); http.Dispose(); streamHttp.Dispose(); }
+
+    public CallDiagnostics GetDiagnostics()
+    {
+        KeyValuePair<string, Peer>[] current;
+        lock (peers) current = peers.ToArray();
+        var snapshots = current.Select(entry =>
+        {
+            var peer = entry.Value;
+            var sample = peer.Metrics.Sample();
+            var nominated = peer.Connection.GetRtpChannel().NominatedEntry;
+            return new PeerDiagnostics(entry.Key, peer.Name, peer.Connection.connectionState.ToString(), peer.Connection.iceConnectionState.ToString(),
+                nominated is null ? "경로 미선정" : nominated.LocalCandidate.type == RTCIceCandidateType.relay || nominated.RemoteCandidate.type == RTCIceCandidateType.relay ? "TURN 중계" : "직접 연결",
+                nominated is null ? null : $"{nominated.LocalCandidate.address}:{nominated.LocalCandidate.port}",
+                nominated is null ? null : $"{nominated.RemoteCandidate.address}:{nominated.RemoteCandidate.port}",
+                sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, sample.Loss, sample.Age, peer.Sink.Snapshot());
+        }).ToArray();
+        return new CallDiagnostics(DateTimeOffset.Now, session is not null, microphone?.Snapshot(), snapshots);
+    }
 }

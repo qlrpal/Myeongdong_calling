@@ -1,19 +1,24 @@
 using NAudio.Wave;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
+using System.Diagnostics;
+using NAudio.CoreAudioApi;
 
 namespace VoiceNative;
 
 // Prototype device adapter. Keep the negotiated Opus SDP separate from mono PCM.
-// A later WASAPI adapter can replace this WaveIn/WaveOut implementation.
+// Capture uses WaveIn; playback uses shared, event-driven WASAPI.
 internal sealed class WindowsAudioDevice
 {
     private readonly AudioEncoder encoder;
     private readonly WaveIn? input;
-    private readonly WaveOut? output;
-    private readonly BufferedWaveProvider? buffer;
+    private readonly WasapiPlayer? output;
+    private readonly PcmPlayoutBuffer? buffer;
     private readonly object audioLock = new();
     private bool closed;
+    private long processedFrames;
+    private double totalProcessingMs;
+    private double? level;
     private readonly AudioFormat pcmFormat = new(AudioCodecsEnum.OPUS, 111, 48000, 1);
     public event Action<uint, byte[]>? OnAudioSourceEncodedSample;
     public event Action<string>? OnAudioSourceError;
@@ -32,9 +37,8 @@ internal sealed class WindowsAudioDevice
             }
             if (!disableSink)
             {
-                buffer = new BufferedWaveProvider(new WaveFormat(48000, 16, 1), TimeSpan.FromMilliseconds(120))
-                { DiscardOnBufferOverflow = true, ReadFully = true };
-                output = new WaveOut { DeviceNumber = -1, BufferMilliseconds = 20, NumberOfBuffers = 2 };
+                buffer = new PcmPlayoutBuffer();
+                output = new WasapiPlayerBuilder().WithSharedMode().WithEventSync().WithLatency(40).Build();
                 output.Init(buffer);
                 output.PlaybackStopped += (_, args) => { if (args.Exception is not null) OnAudioSinkError?.Invoke(args.Exception.Message); };
             }
@@ -55,7 +59,11 @@ internal sealed class WindowsAudioDevice
                 {
                     var bytes = captureBytes.GetRange(0, 1920).ToArray(); captureBytes.RemoveRange(0, 1920);
                     var pcm = new short[960]; Buffer.BlockCopy(bytes, 0, pcm, 0, bytes.Length);
-                    OnAudioSourceEncodedSample?.Invoke(960, encoder.EncodeAudio(pcm, pcmFormat));
+                    level = Level(pcm);
+                    var started = Stopwatch.GetTimestamp();
+                    var encoded = encoder.EncodeAudio(pcm, pcmFormat);
+                    totalProcessingMs += Stopwatch.GetElapsedTime(started).TotalMilliseconds; processedFrames++;
+                    OnAudioSourceEncodedSample?.Invoke(960, encoded);
                 }
             }
             catch (Exception ex) { OnAudioSourceError?.Invoke(ex.Message); }
@@ -69,13 +77,30 @@ internal sealed class WindowsAudioDevice
             if (closed || buffer is null) return;
             try
             {
+                var started = Stopwatch.GetTimestamp();
                 var pcm = encoder.DecodeAudio(frame.EncodedAudio, pcmFormat);
+                totalProcessingMs += Stopwatch.GetElapsedTime(started).TotalMilliseconds; processedFrames++;
+                level = Level(pcm);
                 var bytes = new byte[pcm.Length * 2]; Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
-                // Bound stale queued audio instead of accumulating latency after a stall.
-                if (buffer.BufferedDuration.TotalMilliseconds > 80) buffer.ClearBuffer();
-                buffer.AddSamples(bytes, 0, bytes.Length);
+                buffer.AddSamples(bytes);
             }
             catch (Exception ex) { OnAudioSinkError?.Invoke(ex.Message); }
+        }
+    }
+    private static double Level(short[] pcm)
+    {
+        var meanSquare = pcm.Length == 0 ? 0 : pcm.Sum(x => (double)x * x) / pcm.Length;
+        return Math.Max(-120, 10 * Math.Log10(Math.Max(meanSquare, 0.000001) / (32768.0 * 32768)));
+    }
+    public AudioDiagnostics Snapshot()
+    {
+        lock (audioLock)
+        {
+            var playback = buffer?.Snapshot();
+            return new AudioDiagnostics(closed ? null : playback?.QueueMs,
+                playback?.Trims ?? 0, level, processedFrames > 0 ? totalProcessingMs / processedFrames : null,
+                playback?.Underruns, playback?.DecodedMs, buffer is null ? null : processedFrames,
+                playback?.ConsumedMs, playback?.RequestedMs);
         }
     }
     public Task StartAudio() { input?.StartRecording(); return Task.CompletedTask; }
