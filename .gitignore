@@ -7,4 +7,10 @@ node_modules/
 native/.dotnet/
 native/.nuget/
 *.csproj.user
-native/dist/
+native/dist*/
+native/dist*.zip
+native/.local/
+native/artifacts/
+
+# The native branch keeps the previous web checkout as a local archive.
+/web/

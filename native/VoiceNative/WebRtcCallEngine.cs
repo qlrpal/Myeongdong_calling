@@ -23,10 +23,19 @@ public sealed class WebRtcCallEngine : ICallEngine
     private Session? session;
     private WindowsAudioDevice? microphone;
     private AudioEncoder? encoder;
+    private AudioSendQueue? sendQueue;
+    private CancellationTokenSource? sendCancellation;
+    private Task? sendTask;
     public event Action<string>? Status;
     private sealed record Session(string Id, string Token, RemotePeer[] Peers);
     private sealed record RemotePeer(string Id, string Name);
-    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics);
+    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision)
+    {
+        public long LastSentSequence { get; set; }
+        public long FirstSequence { get; set; }
+        public uint TimestampBase { get; set; }
+        public int PayloadTypeId { get; set; } = 111;
+    }
 
     private Uri Endpoint(string path) => new(server!, path);
     private async Task<JsonElement> Post(string path, object body)
@@ -63,16 +72,11 @@ public sealed class WebRtcCallEngine : ICallEngine
             encoder = new AudioEncoder(includeOpus: true);
             microphone = new WindowsAudioDevice(encoder, disableSink: true);
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
-            microphone.OnAudioSourceEncodedSample += (_, bytes) =>
-            {
-                lock (peers)
-                    foreach (var peer in peers.Values)
-                        if (peer.Connection.connectionState == RTCPeerConnectionState.connected)
-                        {
-                            peer.Connection.SendAudio(960, bytes); // 20ms at the Opus 48kHz RTP clock.
-                            peer.Metrics.Sent(bytes.Length);
-                        }
-            };
+            sendQueue = new AudioSendQueue(); sendCancellation = new CancellationTokenSource();
+            var activeQueue = sendQueue;
+            microphone.OnAudioSourceEncodedSample += (_, bytes) => activeQueue.Enqueue(bytes);
+            var sendToken = sendCancellation.Token;
+            sendTask = Task.Run(() => DispatchAudio(activeQueue, sendToken));
             session = (await Post("api/join", new { room, name })).Deserialize<Session>(Json)!;
             cancellation = new CancellationTokenSource();
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -106,17 +110,21 @@ public sealed class WebRtcCallEngine : ICallEngine
         var sink = new WindowsAudioDevice(decoder, disableSource: true);
         var pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers });
         var metrics = new PeerMetrics();
+        var precision = new RtcpMetrics();
         pc.OnRtpPacketReceived += (_, media, packet) =>
         {
-            if (media == SDPMediaTypesEnum.audio) metrics.Received(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload.Length);
+            if (media == SDPMediaTypesEnum.audio)
+            {
+                metrics.Received(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload.Length);
+                precision.Packet(packet.Header.SyncSource, packet.Header.SequenceNumber);
+            }
         };
         pc.OnReceiveReport += (_, media, report) =>
         {
             if (media != SDPMediaTypesEnum.audio) return;
-            var samples = report.ReceiverReport?.ReceptionReports ?? report.SenderReport?.ReceptionReports;
-            var sample = samples?.FirstOrDefault();
-            if (sample is not null) metrics.ReportLoss(sample.FractionLost);
+            precision.Incoming(report);
         };
+        pc.OnSendReport += (media, report) => { if (media == SDPMediaTypesEnum.audio) precision.Outgoing(report); };
         pc.oniceconnectionstatechange += state =>
         {
             Status?.Invoke($"{name}: ICE {state}");
@@ -140,7 +148,9 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (state == RTCPeerConnectionState.connected) _ = StartSink(sink);
         };
         sink.OnAudioSinkError += message => Status?.Invoke("출력 오류: " + message);
-        var peer = new Peer(pc, sink, decoder, name, metrics);
+        sink.OnAudioSinkRecovered += message => Status?.Invoke(name + ": " + message);
+        var peer = new Peer(pc, sink, decoder, name, metrics, precision);
+        pc.OnAudioFormatsNegotiated += formats => peer.PayloadTypeId = formats.First().FormatID;
         lock (peers) peers.Add(id, peer);
         return peer;
     }
@@ -245,6 +255,9 @@ public sealed class WebRtcCallEngine : ICallEngine
         try
         {
             if (microphone is not null) { await microphone.Close(); microphone = null; }
+            sendQueue?.Complete(); sendCancellation?.Cancel();
+            if (sendTask is not null) await sendTask;
+            sendCancellation?.Dispose(); sendCancellation = null; sendTask = null; sendQueue = null;
             encoder?.Dispose(); encoder = null;
             Peer[] closing;
             lock (peers) { closing = peers.Values.ToArray(); peers.Clear(); }
@@ -260,6 +273,21 @@ public sealed class WebRtcCallEngine : ICallEngine
         finally { cleanupGate.Release(); }
     }
     public async ValueTask DisposeAsync() { await LeaveAsync(); http.Dispose(); streamHttp.Dispose(); }
+    public async Task RestartOutputAsync()
+    {
+        await gate.WaitAsync();
+        try
+        {
+            Peer[] current;
+            lock (peers) current = peers.Values.ToArray();
+            foreach (var peer in current)
+            {
+                try { await peer.Sink.RestartOutputAsync(); Status?.Invoke(peer.Name + ": 출력 재시작 완료"); }
+                catch (Exception ex) { Status?.Invoke(peer.Name + ": 출력 재시작 실패: " + ex.Message); }
+            }
+        }
+        finally { gate.Release(); }
+    }
 
     public CallDiagnostics GetDiagnostics()
     {
@@ -269,13 +297,44 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             var peer = entry.Value;
             var sample = peer.Metrics.Sample();
+            var detail = peer.Precision.Snapshot();
             var nominated = peer.Connection.GetRtpChannel().NominatedEntry;
             return new PeerDiagnostics(entry.Key, peer.Name, peer.Connection.connectionState.ToString(), peer.Connection.iceConnectionState.ToString(),
                 nominated is null ? "경로 미선정" : nominated.LocalCandidate.type == RTCIceCandidateType.relay || nominated.RemoteCandidate.type == RTCIceCandidateType.relay ? "TURN 중계" : "직접 연결",
-                nominated is null ? null : $"{nominated.LocalCandidate.address}:{nominated.LocalCandidate.port}",
-                nominated is null ? null : $"{nominated.RemoteCandidate.address}:{nominated.RemoteCandidate.port}",
-                sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, sample.Loss, sample.Age, peer.Sink.Snapshot());
+                nominated is null ? null : FormatEndpoint(nominated.LocalCandidate),
+                nominated is null ? null : FormatEndpoint(nominated.RemoteCandidate),
+                sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, peer.Sink.Snapshot(), detail);
         }).ToArray();
-        return new CallDiagnostics(DateTimeOffset.Now, session is not null, microphone?.Snapshot(), snapshots);
+        return new CallDiagnostics(DateTimeOffset.Now, session is not null, microphone?.Snapshot(), snapshots,
+            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sendQueue?.Snapshot());
     }
+    private async Task DispatchAudio(AudioSendQueue queue, CancellationToken token)
+    {
+        try
+        {
+            await foreach (var frame in queue.Read(token))
+            {
+                queue.Observe(frame);
+                lock (peers)
+                {
+                    foreach (var peer in peers.Values)
+                    {
+                        if (peer.Connection.connectionState != RTCPeerConnectionState.connected) continue;
+                        try
+                        {
+                            if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
+                            var timestamp = AudioSendQueue.Timestamp(peer.TimestampBase, peer.FirstSequence, frame.Sequence);
+                            peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,
+                                peer.LastSentSequence == 0 || frame.Sequence != peer.LastSentSequence + 1 ? 1 : 0, peer.PayloadTypeId);
+                            peer.LastSentSequence = frame.Sequence; peer.Metrics.Sent(frame.Payload.Length);
+                        }
+                        catch (Exception ex) { Status?.Invoke(peer.Name + ": 음성 송신 오류: " + ex.Message); }
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+    private static string FormatEndpoint(RTCIceCandidate candidate) =>
+        candidate.address.Contains(':') ? $"[{candidate.address}]:{candidate.port}" : $"{candidate.address}:{candidate.port}";
 }

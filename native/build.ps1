@@ -8,6 +8,7 @@ if ($NoRestore) { $publishArguments += '--no-restore' }
 & dotnet @publishArguments
 if ($LASTEXITCODE -ne 0) { throw 'Native application build failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $PSScriptRoot 'dist/README.md')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'STATUS.md') -Destination (Join-Path $PSScriptRoot 'dist/STATUS.md')
 if ($Package) {
     Compress-Archive -Path (Join-Path $PSScriptRoot 'dist/*') -DestinationPath (Join-Path $PSScriptRoot 'dist.zip') -Force
 }

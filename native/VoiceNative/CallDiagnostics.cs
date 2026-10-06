@@ -4,12 +4,19 @@ namespace VoiceNative;
 
 public sealed record AudioDiagnostics(double? QueueMs, long QueueResets, double? LevelDbFs, double? ProcessingMs,
     long? Underruns = null, double? DecodedMs = null, long? DecodedFrames = null,
-    double? ConsumedMs = null, double? RequestedMs = null);
+    double? ConsumedMs = null, double? RequestedMs = null,
+    double? DeviceLatencyMs = null, double? DeviceAverageLatencyMs = null, string? Device = null, string? DeviceFormat = null,
+    double? ProcessingP95Ms = null, double? ProcessingMaxMs = null, double? LastFrameAgeMs = null,
+    string? PlaybackState = null, string? DeviceError = null, long DeviceRestarts = 0,
+    double? CaptureGapP95Ms = null, double? CaptureGapMaxMs = null,
+    double? CaptureWorkP95Ms = null, double? CaptureWorkMaxMs = null,
+    long CaptureDiscontinuities = 0, long CaptureTimestampErrors = 0,
+    double? UnderfillMs = null, double? MaxUnderfillMs = null);
 public sealed record PeerDiagnostics(string Id, string Name, string State, string IceState, string Route,
     string? LocalEndpoint, string? RemoteEndpoint, long TxFrames, long RxPackets,
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,
-    double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio);
-public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers);
+    double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio, NetworkPrecision? Precision = null);
+public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null);
 
 internal sealed class PeerMetrics
 {

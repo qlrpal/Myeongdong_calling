@@ -6,4 +6,5 @@ public interface ICallEngine : IAsyncDisposable
     Task JoinAsync(Uri server, string room, string name);
     Task LeaveAsync();
     CallDiagnostics GetDiagnostics();
+    Task RestartOutputAsync();
 }
