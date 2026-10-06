@@ -1,0 +1,321 @@
+{
+  "date": "2026-10-06",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "architecture": "x64",
+  "package": {
+    "name": "voice-room",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+      "start": "node server.js",
+      "test": "node --test --test-isolation=none"
+    },
+    "engines": {
+      "node": ">=22"
+    }
+  },
+  "results": [
+    {
+      "nodeRequested": "22.0.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v22.0.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "10.5.1\n"
+      },
+      "npmTest": {
+        "exitCode": 9,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\nnode: bad option: --test-isolation=none\n"
+      },
+      "versionSpecificCommand": "node --test",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "TAP version 13\n# Subtest: client negotiates audio, buffers early ICE, and releases resources on leave\nok 1 - client negotiates audio, buffers early ICE, and releases resources on leave\n  ---\n  duration_ms: 7.9189\n  ...\n# Subtest: client closes microphone when joining fails\nok 2 - client closes microphone when joining fails\n  ---\n  duration_ms: 1.243\n  ...\n# Subtest: client handles denied microphone access without joining\nok 3 - client handles denied microphone access without joining\n  ---\n  duration_ms: 1.2241\n  ...\n# Subtest: client answers incoming peers and removes departed connections\nok 4 - client answers incoming peers and removes departed connections\n  ---\n  duration_ms: 2.3004\n  ...\n# Subtest: server disconnect releases microphone and permits another join\nok 5 - server disconnect releases microphone and permits another join\n  ---\n  duration_ms: 1.1134\n  ...\n# Subtest: does not connect to a peer who leaves before the event stream is ready\nok 6 - does not connect to a peer who leaves before the event stream is ready\n  ---\n  duration_ms: 1.8871\n  ...\n# Subtest: serves the app and ICE configuration\nok 7 - serves the app and ICE configuration\n  ---\n  duration_ms: 79.5505\n  ...\n# Subtest: joins, relays offer/answer/candidates, and notifies leave\nok 8 - joins, relays offer/answer/candidates, and notifies leave\n  ---\n  duration_ms: 32.3758\n  ...\n# Subtest: isolates rooms and requires member credentials\nok 9 - isolates rooms and requires member credentials\n  ---\n  duration_ms: 11.5992\n  ...\n# Subtest: rejects invalid input and enforces six participants\nok 10 - rejects invalid input and enforces six participants\n  ---\n  duration_ms: 14.5923\n  ...\n# Subtest: removes participants when their event connection closes\nok 11 - removes participants when their event connection closes\n  ---\n  duration_ms: 9.9818\n  ...\n1..11\n# tests 11\n# suites 0\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 238.3241\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "22.7.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v22.7.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "10.8.2\n"
+      },
+      "npmTest": {
+        "exitCode": 9,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\nnode: bad option: --test-isolation=none\n"
+      },
+      "versionSpecificCommand": "node --test",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "TAP version 13\n# Subtest: client negotiates audio, buffers early ICE, and releases resources on leave\nok 1 - client negotiates audio, buffers early ICE, and releases resources on leave\n  ---\n  duration_ms: 6.7166\n  ...\n# Subtest: client closes microphone when joining fails\nok 2 - client closes microphone when joining fails\n  ---\n  duration_ms: 0.936\n  ...\n# Subtest: client handles denied microphone access without joining\nok 3 - client handles denied microphone access without joining\n  ---\n  duration_ms: 0.8163\n  ...\n# Subtest: client answers incoming peers and removes departed connections\nok 4 - client answers incoming peers and removes departed connections\n  ---\n  duration_ms: 3.1534\n  ...\n# Subtest: server disconnect releases microphone and permits another join\nok 5 - server disconnect releases microphone and permits another join\n  ---\n  duration_ms: 0.905\n  ...\n# Subtest: does not connect to a peer who leaves before the event stream is ready\nok 6 - does not connect to a peer who leaves before the event stream is ready\n  ---\n  duration_ms: 0.9889\n  ...\n# Subtest: serves the app and ICE configuration\nok 7 - serves the app and ICE configuration\n  ---\n  duration_ms: 50.6046\n  ...\n# Subtest: joins, relays offer/answer/candidates, and notifies leave\nok 8 - joins, relays offer/answer/candidates, and notifies leave\n  ---\n  duration_ms: 27.6367\n  ...\n# Subtest: isolates rooms and requires member credentials\nok 9 - isolates rooms and requires member credentials\n  ---\n  duration_ms: 12.5256\n  ...\n# Subtest: rejects invalid input and enforces six participants\nok 10 - rejects invalid input and enforces six participants\n  ---\n  duration_ms: 12.4574\n  ...\n# Subtest: removes participants when their event connection closes\nok 11 - removes participants when their event connection closes\n  ---\n  duration_ms: 8.6941\n  ...\n1..11\n# tests 11\n# suites 0\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 243.4373\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "22.8.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v22.8.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "10.8.2\n"
+      },
+      "npmTest": {
+        "exitCode": 9,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\nnode: bad option: --test-isolation=none\n"
+      },
+      "versionSpecificCommand": "node --test --experimental-test-isolation=none",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "TAP version 13\n# Subtest: client negotiates audio, buffers early ICE, and releases resources on leave\nok 1 - client negotiates audio, buffers early ICE, and releases resources on leave\n  ---\n  duration_ms: 5.8754\n  ...\n# Subtest: client closes microphone when joining fails\nok 2 - client closes microphone when joining fails\n  ---\n  duration_ms: 0.8242\n  ...\n# Subtest: client handles denied microphone access without joining\nok 3 - client handles denied microphone access without joining\n  ---\n  duration_ms: 0.8246\n  ...\n# Subtest: client answers incoming peers and removes departed connections\nok 4 - client answers incoming peers and removes departed connections\n  ---\n  duration_ms: 1.9547\n  ...\n# Subtest: server disconnect releases microphone and permits another join\nok 5 - server disconnect releases microphone and permits another join\n  ---\n  duration_ms: 0.6884\n  ...\n# Subtest: does not connect to a peer who leaves before the event stream is ready\nok 6 - does not connect to a peer who leaves before the event stream is ready\n  ---\n  duration_ms: 0.8071\n  ...\n# Subtest: serves the app and ICE configuration\nok 7 - serves the app and ICE configuration\n  ---\n  duration_ms: 51.5457\n  ...\n# Subtest: joins, relays offer/answer/candidates, and notifies leave\nok 8 - joins, relays offer/answer/candidates, and notifies leave\n  ---\n  duration_ms: 29.7347\n  ...\n# Subtest: isolates rooms and requires member credentials\nok 9 - isolates rooms and requires member credentials\n  ---\n  duration_ms: 9.6363\n  ...\n# Subtest: rejects invalid input and enforces six participants\nok 10 - rejects invalid input and enforces six participants\n  ---\n  duration_ms: 10.7857\n  ...\n# Subtest: removes participants when their event connection closes\nok 11 - removes participants when their event connection closes\n  ---\n  duration_ms: 11.1728\n  ...\n1..11\n# tests 11\n# suites 0\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 157.2333\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "22.23.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v22.23.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "10.9.8\n"
+      },
+      "npmTest": {
+        "exitCode": 9,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\nnode: bad option: --test-isolation=none\n"
+      },
+      "versionSpecificCommand": "node --test --experimental-test-isolation=none",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "TAP version 13\n# Subtest: client negotiates audio, buffers early ICE, and releases resources on leave\nok 1 - client negotiates audio, buffers early ICE, and releases resources on leave\n  ---\n  duration_ms: 4.8141\n  type: 'test'\n  ...\n# Subtest: client closes microphone when joining fails\nok 2 - client closes microphone when joining fails\n  ---\n  duration_ms: 1.0443\n  type: 'test'\n  ...\n# Subtest: client handles denied microphone access without joining\nok 3 - client handles denied microphone access without joining\n  ---\n  duration_ms: 0.7171\n  type: 'test'\n  ...\n# Subtest: client answers incoming peers and removes departed connections\nok 4 - client answers incoming peers and removes departed connections\n  ---\n  duration_ms: 2.3879\n  type: 'test'\n  ...\n# Subtest: server disconnect releases microphone and permits another join\nok 5 - server disconnect releases microphone and permits another join\n  ---\n  duration_ms: 0.98\n  type: 'test'\n  ...\n# Subtest: does not connect to a peer who leaves before the event stream is ready\nok 6 - does not connect to a peer who leaves before the event stream is ready\n  ---\n  duration_ms: 1.7622\n  type: 'test'\n  ...\n# Subtest: serves the app and ICE configuration\nok 7 - serves the app and ICE configuration\n  ---\n  duration_ms: 54.5883\n  type: 'test'\n  ...\n# Subtest: joins, relays offer/answer/candidates, and notifies leave\nok 8 - joins, relays offer/answer/candidates, and notifies leave\n  ---\n  duration_ms: 80.7486\n  type: 'test'\n  ...\n# Subtest: isolates rooms and requires member credentials\nok 9 - isolates rooms and requires member credentials\n  ---\n  duration_ms: 74.0225\n  type: 'test'\n  ...\n# Subtest: rejects invalid input and enforces six participants\nok 10 - rejects invalid input and enforces six participants\n  ---\n  duration_ms: 124.504\n  type: 'test'\n  ...\n# Subtest: removes participants when their event connection closes\nok 11 - removes participants when their event connection closes\n  ---\n  duration_ms: 31.0817\n  type: 'test'\n  ...\n1..11\n# tests 11\n# suites 0\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 422.0887\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "23.6.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v23.6.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "10.9.2\n"
+      },
+      "npmTest": {
+        "exitCode": 1,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\n✖ client negotiates audio, buffers early ICE, and releases resources on leave\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client closes microphone when joining fails\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client handles denied microphone access without joining\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client answers incoming peers and removes departed connections\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ server disconnect releases microphone and permits another join\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ does not connect to a peer who leaves before the event stream is ready\n  'Promise resolution is still pending but the event loop has already resolved'\n\nℹ tests 6\nℹ suites 0\nℹ pass 0\nℹ fail 0\nℹ cancelled 6\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 17.58\n\n✖ failing tests:\n\ntest at test\\client.test.js:61:1\n✖ client negotiates audio, buffers early ICE, and releases resources on leave\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:88:1\n✖ client closes microphone when joining fails\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:97:1\n✖ client handles denied microphone access without joining\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:105:1\n✖ client answers incoming peers and removes departed connections\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:119:1\n✖ server disconnect releases microphone and permits another join\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:131:1\n✖ does not connect to a peer who leaves before the event stream is ready\n  'Promise resolution is still pending but the event loop has already resolved'\n"
+      },
+      "versionSpecificCommand": "node --test --test-isolation=none",
+      "versionSpecificTest": {
+        "exitCode": 1,
+        "output": "✖ client negotiates audio, buffers early ICE, and releases resources on leave\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client closes microphone when joining fails\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client handles denied microphone access without joining\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ client answers incoming peers and removes departed connections\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ server disconnect releases microphone and permits another join\n  'Promise resolution is still pending but the event loop has already resolved'\n\n✖ does not connect to a peer who leaves before the event stream is ready\n  'Promise resolution is still pending but the event loop has already resolved'\n\nℹ tests 6\nℹ suites 0\nℹ pass 0\nℹ fail 0\nℹ cancelled 6\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 17.2356\n\n✖ failing tests:\n\ntest at test\\client.test.js:61:1\n✖ client negotiates audio, buffers early ICE, and releases resources on leave\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:88:1\n✖ client closes microphone when joining fails\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:97:1\n✖ client handles denied microphone access without joining\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:105:1\n✖ client answers incoming peers and removes departed connections\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:119:1\n✖ server disconnect releases microphone and permits another join\n  'Promise resolution is still pending but the event loop has already resolved'\n\ntest at test\\client.test.js:131:1\n✖ does not connect to a peer who leaves before the event stream is ready\n  'Promise resolution is still pending but the event loop has already resolved'\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "24.0.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v24.0.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "11.3.0\n"
+      },
+      "npmTest": {
+        "exitCode": 0,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\n✔ client negotiates audio, buffers early ICE, and releases resources on leave (4.3026ms)\n✔ client closes microphone when joining fails (0.6403ms)\n✔ client handles denied microphone access without joining (0.5268ms)\n✔ client answers incoming peers and removes departed connections (1.0019ms)\n✔ server disconnect releases microphone and permits another join (0.7965ms)\n✔ does not connect to a peer who leaves before the event stream is ready (0.6702ms)\n✔ serves the app and ICE configuration (45.7969ms)\n✔ joins, relays offer/answer/candidates, and notifies leave (31.8266ms)\n✔ isolates rooms and requires member credentials (9.2728ms)\n✔ rejects invalid input and enforces six participants (15.3213ms)\n✔ removes participants when their event connection closes (12.5842ms)\nℹ tests 11\nℹ suites 0\nℹ pass 11\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 156.2209\n"
+      },
+      "versionSpecificCommand": "node --test --test-isolation=none",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "✔ client negotiates audio, buffers early ICE, and releases resources on leave (3.6447ms)\n✔ client closes microphone when joining fails (0.6989ms)\n✔ client handles denied microphone access without joining (0.5291ms)\n✔ client answers incoming peers and removes departed connections (0.9762ms)\n✔ server disconnect releases microphone and permits another join (0.9189ms)\n✔ does not connect to a peer who leaves before the event stream is ready (0.6585ms)\n✔ serves the app and ICE configuration (47.5731ms)\n✔ joins, relays offer/answer/candidates, and notifies leave (28.9039ms)\n✔ isolates rooms and requires member credentials (8.2703ms)\n✔ rejects invalid input and enforces six participants (10.021ms)\n✔ removes participants when their event connection closes (9.5159ms)\nℹ tests 11\nℹ suites 0\nℹ pass 11\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 142.7695\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    },
+    {
+      "nodeRequested": "24.15.0",
+      "node": {
+        "exitCode": 0,
+        "output": "v24.15.0\n"
+      },
+      "npm": {
+        "exitCode": 0,
+        "output": "11.12.1\n"
+      },
+      "npmTest": {
+        "exitCode": 0,
+        "output": "\n> voice-room@0.1.0 test\n> node --test --test-isolation=none\n\n✔ client negotiates audio, buffers early ICE, and releases resources on leave (3.7503ms)\n✔ client closes microphone when joining fails (0.7795ms)\n✔ client handles denied microphone access without joining (0.6587ms)\n✔ client answers incoming peers and removes departed connections (1.087ms)\n✔ server disconnect releases microphone and permits another join (0.6849ms)\n✔ does not connect to a peer who leaves before the event stream is ready (0.7511ms)\n✔ serves the app and ICE configuration (46.196ms)\n✔ joins, relays offer/answer/candidates, and notifies leave (27.7723ms)\n✔ isolates rooms and requires member credentials (10.2168ms)\n✔ rejects invalid input and enforces six participants (10.6783ms)\n✔ removes participants when their event connection closes (7.7968ms)\nℹ tests 11\nℹ suites 0\nℹ pass 11\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 145.8552\n"
+      },
+      "versionSpecificCommand": "node --test --test-isolation=none",
+      "versionSpecificTest": {
+        "exitCode": 0,
+        "output": "✔ client negotiates audio, buffers early ICE, and releases resources on leave (3.7811ms)\n✔ client closes microphone when joining fails (0.7673ms)\n✔ client handles denied microphone access without joining (0.669ms)\n✔ client answers incoming peers and removes departed connections (1.0924ms)\n✔ server disconnect releases microphone and permits another join (0.7333ms)\n✔ does not connect to a peer who leaves before the event stream is ready (0.8747ms)\n✔ serves the app and ICE configuration (42.7698ms)\n✔ joins, relays offer/answer/candidates, and notifies leave (28.9085ms)\n✔ isolates rooms and requires member credentials (8.2735ms)\n✔ rejects invalid input and enforces six participants (9.4663ms)\n✔ removes participants when their event connection closes (8.3485ms)\nℹ tests 11\nℹ suites 0\nℹ pass 11\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 140.4036\n"
+      },
+      "startup": {
+        "passed": true,
+        "checks": [
+          "server.js entry point",
+          "HOST",
+          "PORT",
+          "ICE_SERVERS",
+          "HTTP page",
+          "HTTP config"
+        ]
+      },
+      "builtinImports": {
+        "exitCode": 0,
+        "output": "builtins OK\n"
+      },
+      "syntax:server.js": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "syntax:public/app.js": {
+        "exitCode": 0,
+        "output": ""
+      }
+    }
+  ]
+}

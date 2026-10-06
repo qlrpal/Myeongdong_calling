@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<title>Voice Room · 브라우저 호환성 검증</title>
+<style>body{font:15px system-ui;background:#111318;color:#eee;padding:24px}h1{font-size:24px}button{padding:12px 18px;background:#b3a5ff;border:0;border-radius:8px;cursor:pointer}pre{white-space:pre-wrap;line-height:1.7}section{display:flex;gap:16px}iframe{width:50%;height:720px;border:1px solid #444;border-radius:12px}#result{color:#a5dfb8}</style>
+<h1>브라우저 호환성 검증</h1>
+<p>합성 음원으로 실제 WebRTC 음성 패킷을 양방향 전송합니다. 실제 마이크는 사용하지 않습니다.</p>
+<button id="run">호환성 테스트 실행</button>
+<pre id="result" role="status">실행 대기 중</pre>
+<section><iframe id="a" src="/diagnostic-client" title="참여자 A"></iframe><iframe id="b" src="/diagnostic-client" title="참여자 B"></iframe></section>
+<script type="module">
+const button = document.getElementById('run');
+const output = document.getElementById('result');
+const frames = ['a', 'b'].map(id => document.getElementById(id));
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(predicate, message) {
+  const deadline = performance.now() + 15000;
+  while (performance.now() < deadline) { if (await predicate()) return; await pause(100); }
+  throw new Error(message);
+}
+function check(condition, message) { if (!condition) throw new Error(message); }
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  output.textContent = '실제 WebRTC 연결과 RTP 패킷 수신을 확인하고 있습니다…';
+  const report = { date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(new Date()), userAgent: navigator.userAgent, secureContext: isSecureContext,
+    microphone: 'synthetic AudioContext stream; no physical microphone', iceServers: [],
+    checks: [], passed: false };
+  const windows = frames.map(frame => frame.contentWindow);
+  try {
+    check(isSecureContext, '보안 컨텍스트가 아닙니다.');
+    check(windows.every(win => win.diagnostic), '테스트 프레임이 준비되지 않았습니다.');
+    const room = 'browser-check-' + Date.now();
+    for (const [index, win] of windows.entries()) {
+      win.document.getElementById('name').value = '참여자 ' + (index + 1);
+      win.document.getElementById('room').value = room;
+      win.document.getElementById('join-form').requestSubmit();
+      await until(() => !win.document.getElementById('call').hidden, '방 입장 실패');
+    }
+    report.checks.push('fetch/SSE: 두 클라이언트의 동일 방 입장 및 신호 교환');
+    await until(() => windows.every(win => win.diagnostic.connections.length === 1 && win.diagnostic.connections[0].connectionState === 'connected'), 'WebRTC 연결 실패');
+    report.checks.push('RTCPeerConnection: 양쪽 연결 상태 connected');
+    const sample = async win => {
+      const stats = await win.diagnostic.connections[0].getStats();
+      return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' && stat.kind === 'audio').map(stat => ({ packetsReceived: stat.packetsReceived, bytesReceived: stat.bytesReceived }));
+    };
+    await until(async () => (await Promise.all(windows.map(sample))).every(stats => stats.some(stat => stat.packetsReceived > 0 && stat.bytesReceived > 0)), '양방향 음성 패킷 수신 실패');
+    report.inboundAudio = await Promise.all(windows.map(sample));
+    report.checks.push('실제 WebRTC RTP: 양쪽 음성 패킷 및 바이트 수신');
+    for (const win of windows) {
+      const options = win.diagnostic.constraints[0];
+      check(options.audio.echoCancellation === false && options.audio.noiseSuppression === false && options.audio.autoGainControl === false && options.video === false, '음성 처리 옵션 불일치');
+      check(win.document.querySelectorAll('#audio-container audio').length === 1, '수신 오디오 요소 누락');
+    }
+    report.checks.push('음성 처리 비활성화 요청 및 수신 오디오 요소 연결');
+    windows[0].document.getElementById('leave').click();
+    await until(() => windows[1].document.getElementById('count').textContent === '1 / 6', '나간 참여자 제거 실패');
+    check(windows[0].diagnostic.connections.every(pc => pc.connectionState === 'closed'), 'WebRTC 연결 해제 실패');
+    check(windows[0].diagnostic.streams.every(stream => stream.getTracks().every(track => track.readyState === 'ended')), '송신 트랙 종료 실패');
+    report.checks.push('나가기: 연결/송신 트랙 종료 및 상대 참여자 목록 갱신');
+    report.passed = true;
+  } catch (error) { report.error = error.message; }
+  finally { for (const win of windows) if (win.diagnostic && !win.document.getElementById('call').hidden) win.document.getElementById('leave').click(); }
+  await fetch('/diagnostic-results', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) });
+  output.textContent = (report.passed ? 'PASS · 브라우저 호환성 검증 통과\n' : 'FAIL · ' + report.error + '\n') + report.checks.join('\n') + '\n' + report.userAgent;
+});
+</script>
+</html>
