@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Room · 통화 디버그</title>
+  <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/debug.css">
+  <script type="module" src="/debug.js"></script>
+</head>
+<body><main class="debug-main">
+  <header><a class="brand" href="/" target="_blank" rel="noopener"><span class="brand-mark">◖◗</span> VOICE ROOM</a><span class="tag">통화 디버그</span></header>
+  <section class="debug-intro"><span class="eyebrow">실시간 연결 상태</span><h1>통화하면서 확인하세요.</h1><p>같은 브라우저의 통화 탭을 열어 두세요. 이 페이지는 마이크를 켜거나 통화에 입장하지 않습니다.</p></section>
+  <section class="panel debug-controls"><label for="call-tab">확인할 통화 탭</label><select id="call-tab"><option value="">통화 탭을 기다리고 있습니다</option></select><button id="download" class="secondary" disabled>현재 통계 JSON 저장</button><p id="debug-status" role="status">1초마다 갱신합니다.</p></section>
+  <section class="panel buffer-panel" aria-labelledby="buffer-title"><h2 id="buffer-title">수신 버퍼 비교</h2><p>선택한 통화 탭에서 내가 받는 모든 상대의 음성에 즉시 적용합니다. 새 상대에게도 유지되며, 퇴장하면 기본 20ms로 돌아갑니다.</p><div class="buffer-options" role="group" aria-label="수신 버퍼 요청값"><button type="button" data-buffer="0" aria-pressed="false" disabled>0ms · 최소 요청</button><button type="button" data-buffer="5" aria-pressed="false" disabled>5ms</button><button type="button" data-buffer="10" aria-pressed="false" disabled>10ms</button><button type="button" data-buffer="20" aria-pressed="false" disabled>20ms · 기본</button></div><p id="buffer-status" role="status">통화에 입장한 뒤 값을 선택하세요.</p><p class="hint">0ms도 실제 지연 0을 보장하지 않습니다. 값을 바꾼 뒤 10~30초 동안 실제 버퍼 대기와 소리 끊김을 비교하세요. 끊김이 생기면 20ms로 복원하세요.</p></section>
+  <section id="connections" aria-label="상대별 수신 통계"><div class="panel empty">통화 페이지를 새로고침한 뒤 입장하고, 상대방이 연결되면 통계가 표시됩니다.</div></section>
+  <aside class="debug-notes"><p><strong>버퍼 3개를 구분하세요.</strong> 요청값은 앱 설정, 수신기 설정값은 실제 JavaScript 속성, 목표·실제 대기는 최근 측정 구간의 통계입니다. 설정값이 20ms여도 실제 대기는 더 클 수 있습니다.</p><p>비트레이트·버퍼·손실·추가 끊김은 직전 갱신 이후의 값입니다. 첫 측정 또는 미지원 항목은 —로 표시합니다. RTT와 버퍼를 더해 전체 음성 지연으로 해석하지 마세요. 상대별 통계는 내 PC가 받는 음성입니다.</p><p>다른 브라우저·프로필·시크릿 창의 통화는 표시되지 않습니다. 상대방 PC에서도 이 페이지를 열면 반대 방향을 확인할 수 있습니다.</p></aside>
+  <p class="hint">패킷 요청값은 통화 입장 전에 10/20ms로 선택합니다. SDP 수락은 실제 전송 간격을 보장하지 않습니다. 계속 말할 때 약 100개/s면 10ms, 약 50개/s면 20ms에 해당합니다. 평균 수신 간격은 패킷 빈도로 추정하므로 무음·손실·도착 몰림의 영향을 받습니다. 마이크 보고 지연도 전체 통화 지연은 아닙니다.</p>
+</main></body></html>

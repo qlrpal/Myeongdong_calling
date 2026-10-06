@@ -10,32 +10,32 @@
     "실제 WebRTC RTP: 양쪽 음성 패킷 및 바이트 수신",
     "양쪽 Opus 협상과 실제 송신 설정: 510000 bits/s",
     "양쪽 실제 수신기 버퍼 목표: 20ms (재생 지연 보장값 아님)",
-    "실측 수신 패킷 빈도: 51.0 / 51.0개/s · 요청 20ms",
-    "합성 음원 실측 수신량: 260.272 / 260.272 kbps (실제 두 PC의 마이크 측정과 별개)",
-    "합성 음원 실측 버퍼: 31.4 / 34.4 ms (실제 PC 통화와 별개)",
+    "실측 수신 패킷 빈도: 100.9 / 101.0개/s · 요청 10ms",
+    "합성 음원 실측 수신량: 260.662 / 260.923 kbps (실제 두 PC의 마이크 측정과 별개)",
+    "합성 음원 실측 버퍼: 31.7 / 34.7 ms (실제 PC 통화와 별개)",
     "음성 처리 비활성화 요청 및 수신 오디오 요소 연결",
     "나가기: 연결/송신 트랙 종료 및 상대 참여자 목록 갱신"
   ],
   "passed": true,
-  "requestedPacketTimeMs": 20,
+  "requestedPacketTimeMs": 10,
   "inboundAudio": [
     [
       {
-        "packetsReceived": 21,
-        "bytesReceived": 3161,
-        "jitterBufferDelay": 38.4,
-        "jitterBufferTargetDelay": 307.2,
-        "jitterBufferEmittedCount": 3840,
+        "packetsReceived": 22,
+        "bytesReceived": 2778,
+        "jitterBufferDelay": 43.2,
+        "jitterBufferTargetDelay": 268.8,
+        "jitterBufferEmittedCount": 3360,
         "packetsLost": 0
       }
     ],
     [
       {
-        "packetsReceived": 21,
-        "bytesReceived": 3163,
-        "jitterBufferDelay": 38.4,
-        "jitterBufferTargetDelay": 230.4,
-        "jitterBufferEmittedCount": 2880,
+        "packetsReceived": 22,
+        "bytesReceived": 2859,
+        "jitterBufferDelay": 52.8,
+        "jitterBufferTargetDelay": 153.6,
+        "jitterBufferEmittedCount": 1920,
         "packetsLost": 0
       }
     ]
@@ -61,30 +61,30 @@
     ]
   ],
   "packetsPerSecond": [
-    50.97502223909145,
-    50.97502223909145
+    100.94649835590145,
+    101.0464453839766
   ],
   "estimatedPacketCadenceMs": [
-    19.61745098039654,
-    19.61745098039654
+    9.906237623759425,
+    9.896439169136519
   ],
   "syntheticAudioKbps": [
-    260.272,
-    260.272
+    260.662,
+    260.923
   ],
   "observedAudioBufferMs": [
     [
       {
-        "delayMs": 31.36,
-        "targetMs": 20,
+        "delayMs": 31.74825174825175,
+        "targetMs": 28.17182817182817,
         "packetsLost": 0,
         "interruptionCount": null
       }
     ],
     [
       {
-        "delayMs": 34.4,
-        "targetMs": 20,
+        "delayMs": 34.66533466533467,
+        "targetMs": 28.171828171828174,
         "packetsLost": 0,
         "interruptionCount": null
       }

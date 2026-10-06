@@ -1,5 +1,9 @@
 const $ = id => document.getElementById(id);
 const peers = new Map();
+const AUDIO_BITRATE = 510_000;
+const AUDIO_BUFFER_TARGET_MS = 20;
+let audioBufferTargetMs = AUDIO_BUFFER_TARGET_MS;
+let audioPacketTimeMs = 10;
 let session = null;
 let stream = null;
 let events = null;
@@ -42,6 +46,88 @@ function send(to, signal) {
   if (!session) return Promise.resolve();
   return post('/api/signal', { id: session.id, token: session.token, to, signal });
 }
+// Opus advertises a receive bitrate preference; each sender also gets its own cap.
+// These settings permit 510 kbps, rather than guaranteeing a constant wire rate.
+function withOpusBitrate(description) {
+  const newline = description.sdp.includes('\r\n') ? '\r\n' : '\n';
+  const sections = description.sdp.split(/(?=^m=)/m);
+  const sdp = sections.map(section => {
+    if (!section.startsWith('m=audio ')) return section;
+    const lines = section.split(newline);
+    const opus = lines.map(line => /^a=rtpmap:(\d+) opus\/48000(?:\/\d+)?$/i.exec(line)).filter(Boolean);
+    for (const [, payload] of opus) {
+      const prefix = `a=fmtp:${payload} `;
+      const index = lines.findIndex(line => line.startsWith(prefix));
+      if (index < 0) {
+        const mapIndex = lines.findIndex(line => line.startsWith(`a=rtpmap:${payload} `));
+        lines.splice(mapIndex + 1, 0, `${prefix}maxaveragebitrate=${AUDIO_BITRATE}`);
+      } else {
+        const parameters = lines[index].slice(prefix.length).split(';').map(value => value.trim()).filter(value => value && !/^maxaveragebitrate\s*=/i.test(value));
+        parameters.push(`maxaveragebitrate=${AUDIO_BITRATE}`);
+        lines[index] = prefix + parameters.join(';');
+      }
+    }
+    return lines.join(newline);
+  }).join('');
+  return { type: description.type, sdp };
+}
+async function configureAudioBitrate(peer) {
+  try {
+    for (const sender of peer.pc.getSenders()) {
+      if (sender.track?.kind !== 'audio') continue;
+      const parameters = sender.getParameters();
+      if (!parameters.encodings?.length) throw new Error('No audio encoding');
+      for (const encoding of parameters.encodings) encoding.maxBitrate = AUDIO_BITRATE;
+      await sender.setParameters(parameters);
+    }
+    peer.bitrateConfigured = true;
+  } catch {
+    peer.bitrateConfigured = false;
+    status('이 브라우저에서 510kbps 설정을 적용하지 못했습니다. 기본 설정으로 통화를 계속합니다.', true);
+  }
+}
+function configureAudioReceiver(receiver) {
+  // A hint, not a guaranteed end-to-end delay. Leave unsupported receivers alone.
+  if (receiver?.track?.kind !== 'audio' || !('jitterBufferTarget' in receiver)) return false;
+  try {
+    receiver.jitterBufferTarget = audioBufferTargetMs;
+    return receiver.jitterBufferTarget === audioBufferTargetMs;
+  } catch { return false; }
+}
+function withAudioPacketTime(description) {
+  const newline = description.sdp.includes('\r\n') ? '\r\n' : '\n';
+  const sdp = description.sdp.split(/(?=^m=)/m).map(section => {
+    if (!section.startsWith('m=audio ') || !/^a=rtpmap:\d+ opus\/48000/m.test(section)) return section;
+    const lines = section.split(newline).filter(line => !/^a=(?:max)?ptime:/.test(line));
+    const end = lines.at(-1) === '' ? lines.length - 1 : lines.length;
+    lines.splice(end, 0, `a=ptime:${audioPacketTimeMs}`, `a=maxptime:${audioPacketTimeMs}`);
+    return lines.join(newline);
+  }).join('');
+  return { type: description.type, sdp };
+}
+async function setLocalAudioDescription(peer, description) {
+  const bitrateDescription = withOpusBitrate(description);
+  try {
+    await peer.pc.setLocalDescription(withAudioPacketTime(bitrateDescription));
+    peer.packetTimeAccepted = true;
+  } catch {
+    await peer.pc.setLocalDescription(bitrateDescription);
+    peer.packetTimeAccepted = false;
+  }
+}
+function setAudioBufferTarget(value) {
+  if (![0, 5, 10, 20].includes(value)) return { error: '허용되지 않는 버퍼 값입니다.' };
+  if (!session) return { error: '먼저 통화방에 입장하세요.' };
+  audioBufferTargetMs = value;
+  let applied = 0, total = 0;
+  for (const peer of peers.values()) {
+    if (!peer.receiver) continue;
+    total++;
+    peer.lowDelayConfigured = configureAudioReceiver(peer.receiver);
+    if (peer.lowDelayConfigured) applied++;
+  }
+  return { requestedBufferMs: value, applied, total };
+}
 function makePeer(id, name) {
   if (peers.has(id)) return peers.get(id);
   const pc = new RTCPeerConnection({ iceServers });
@@ -56,7 +142,9 @@ function makePeer(id, name) {
       if (peers.get(id) === peer && session) status(error.message, true);
     });
   };
-  pc.ontrack = ({ streams }) => {
+  pc.ontrack = ({ streams, receiver }) => {
+    peer.receiver = receiver;
+    peer.lowDelayConfigured = configureAudioReceiver(receiver);
     audio.srcObject = streams[0];
     audio.play().catch(() => { if (session && peers.get(id) === peer) $('resume').hidden = false; });
   };
@@ -64,14 +152,18 @@ function makePeer(id, name) {
     if (peers.get(id) !== peer) return;
     render();
     if (pc.connectionState === 'failed') status('상대방과 연결하지 못했습니다. 다시 입장해 주세요. 다른 네트워크에서는 중계 서버가 필요할 수 있습니다.', true);
-    else if (pc.connectionState === 'connected') status('통화가 연결되었습니다.');
+    else if (pc.connectionState === 'connected') {
+      if (peer.bitrateConfigured === false) status('통화가 연결됐지만 이 브라우저의 510kbps 설정은 적용하지 못했습니다.', true);
+      else if (peer.lowDelayConfigured === false) status('통화가 연결됐지만 이 브라우저는 저지연 버퍼 설정을 지원하지 않아 기본 설정을 사용합니다.');
+      else status('통화가 연결되었습니다.');
+    }
   };
   render();
   return peer;
 }
 async function offer(id, name) {
   const peer = makePeer(id, name);
-  await peer.pc.setLocalDescription(await peer.pc.createOffer());
+  await setLocalAudioDescription(peer, await peer.pc.createOffer());
   await send(id, { type: 'offer', sdp: peer.pc.localDescription.sdp });
 }
 async function receive({ from, name, signal }) {
@@ -84,9 +176,10 @@ async function receive({ from, name, signal }) {
   await peer.pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
   for (const candidate of peer.candidates.splice(0)) await peer.pc.addIceCandidate(candidate);
   if (signal.type === 'offer') {
-    await peer.pc.setLocalDescription(await peer.pc.createAnswer());
+    await setLocalAudioDescription(peer, await peer.pc.createAnswer());
+    await configureAudioBitrate(peer);
     await send(from, { type: 'answer', sdp: peer.pc.localDescription.sdp });
-  }
+  } else await configureAudioBitrate(peer);
 }
 function removePeer(id) {
   const peer = peers.get(id);
@@ -99,6 +192,7 @@ function leave(message = '통화를 종료했습니다. 마이크가 꺼졌습�
   generation++;
   const old = session;
   session = null;
+  audioBufferTargetMs = AUDIO_BUFFER_TARGET_MS;
   events?.close(); events = null;
   for (const id of [...peers.keys()]) removePeer(id);
   stream?.getTracks().forEach(track => track.stop()); stream = null;
@@ -124,9 +218,10 @@ $('join-form').addEventListener('submit', async event => {
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('마이크를 사용하려면 localhost 또는 HTTPS 주소에서 접속하세요.');
     const name = $('name').value.trim(), room = $('room').value.trim();
+    audioPacketTimeMs = $('packet-time').value === '20' ? 20 : 10;
     if (!name || !/^[\p{L}\p{N}_-]{1,40}$/u.test(room)) throw new Error('닉네임과 방 이름을 확인하세요. 방 이름에는 문자·숫자·밑줄·하이픈을 사용할 수 있습니다.');
     status('마이크 접근을 허용해 주세요.');
-    const acquired = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false });
+    const acquired = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: { ideal: 0 }, sampleRate: { ideal: 48000 } }, video: false });
     if (version !== generation) { acquired.getTracks().forEach(track => track.stop()); return; }
     stream = acquired;
     for (const track of stream.getAudioTracks()) track.onended = () => leave('마이크 연결이 끊겼습니다. 장치를 확인하고 다시 입장하세요.');
@@ -178,3 +273,14 @@ $('resume').addEventListener('click', async () => {
   $('resume').hidden = results.every(result => result.status === 'fulfilled');
 });
 window.addEventListener('pagehide', () => leave());
+// The diagnostics module reads connection objects locally; credentials never leave this module.
+window.addEventListener('voice-debug-request', event => {
+  const settings = stream?.getAudioTracks()[0]?.getSettings?.() || {};
+  event.detail({ room: session?.room || null, bitrate: AUDIO_BITRATE, bufferTarget: audioBufferTargetMs,
+    packetTimeMs: audioPacketTimeMs, capture: { latencyMs: Number.isFinite(settings.latency) ? settings.latency * 1000 : null,
+      sampleRate: settings.sampleRate ?? null, channelCount: settings.channelCount ?? null },
+    peers: [...peers.entries()].map(([id, peer]) => ({ id, name: peer.name, pc: peer.pc, receiver: peer.receiver, packetTimeAccepted: peer.packetTimeAccepted })) });
+});
+window.addEventListener('voice-debug-buffer', event => {
+  event.detail.reply(setAudioBufferTarget(event.detail.value));
+});

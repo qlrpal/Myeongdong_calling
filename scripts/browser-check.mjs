@@ -7,7 +7,7 @@ const appHandler = server.listeners('request')[0];
 server.removeAllListeners('request');
 server.on('request', async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/diagnostic') {
+    if (req.method === 'GET' && req.url.split('?')[0] === '/diagnostic') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(await readFile(new URL('./browser-check.html', import.meta.url)));
     }

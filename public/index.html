@@ -7,6 +7,7 @@
   <title>Voice Room · 음성 통화</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
+  <script type="module" src="/debug-source.js"></script>
 </head>
 <body>
   <main>
@@ -18,6 +19,8 @@
         <label for="name">닉네임</label><input id="name" name="name" placeholder="어떻게 불러드릴까요?" maxlength="24" required autocomplete="nickname">
         <label for="room">방 이름</label><input id="room" name="room" placeholder="예: our-room" maxlength="40" required autocomplete="off" spellcheck="false">
         <p class="hint">같은 방 이름을 입력하면 함께 통화할 수 있어요. 최대 6명.</p>
+        <label for="packet-time">음성 패킷 간격 요청</label><select id="packet-time"><option value="10">10ms · 저지연 실험</option><option value="20">20ms · 기존 설정 비교</option></select>
+        <p class="hint">양쪽에서 10ms를 선택해 비교하세요. 실제 적용 여부는 디버그에서 확인할 수 있어요.</p>
         <button id="join" class="primary" type="submit">통화방 입장 <span aria-hidden="true">↗</span></button>
       </form>
       <div id="call" hidden>
@@ -29,7 +32,7 @@
       </div>
       <p id="status" role="status" aria-live="polite">마이크는 입장할 때 켜집니다.</p>
     </section>
-    <footer>목소리만으로 충분한 순간.</footer>
+    <footer>목소리만으로 충분한 순간. · <a href="/debug" target="_blank" rel="noopener">통화 디버그 ↗</a></footer>
   </main>
   <div id="audio-container"></div>
 </body>

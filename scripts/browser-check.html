@@ -26,6 +26,7 @@ button.addEventListener('click', async () => {
     microphone: 'synthetic AudioContext stream; no physical microphone', iceServers: [],
     checks: [], passed: false };
   const windows = frames.map(frame => frame.contentWindow);
+  report.requestedPacketTimeMs = new URL(location.href).searchParams.get('ptime') === '20' ? 20 : 10;
   try {
     check(isSecureContext, '보안 컨텍스트가 아닙니다.');
     check(windows.every(win => win.diagnostic), '테스트 프레임이 준비되지 않았습니다.');
@@ -33,6 +34,7 @@ button.addEventListener('click', async () => {
     for (const [index, win] of windows.entries()) {
       win.document.getElementById('name').value = '참여자 ' + (index + 1);
       win.document.getElementById('room').value = room;
+      win.document.getElementById('packet-time').value = String(report.requestedPacketTimeMs);
       win.document.getElementById('join-form').requestSubmit();
       await until(() => !win.document.getElementById('call').hidden, '방 입장 실패');
     }
@@ -41,11 +43,46 @@ button.addEventListener('click', async () => {
     report.checks.push('RTCPeerConnection: 양쪽 연결 상태 connected');
     const sample = async win => {
       const stats = await win.diagnostic.connections[0].getStats();
-      return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' && stat.kind === 'audio').map(stat => ({ packetsReceived: stat.packetsReceived, bytesReceived: stat.bytesReceived }));
+      return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' && stat.kind === 'audio').map(stat => ({ packetsReceived: stat.packetsReceived, bytesReceived: stat.bytesReceived, jitterBufferDelay: stat.jitterBufferDelay, jitterBufferTargetDelay: stat.jitterBufferTargetDelay, jitterBufferEmittedCount: stat.jitterBufferEmittedCount, packetsLost: stat.packetsLost, interruptionCount: stat.interruptionCount }));
     };
     await until(async () => (await Promise.all(windows.map(sample))).every(stats => stats.some(stat => stat.packetsReceived > 0 && stat.bytesReceived > 0)), '양방향 음성 패킷 수신 실패');
     report.inboundAudio = await Promise.all(windows.map(sample));
     report.checks.push('실제 WebRTC RTP: 양쪽 음성 패킷 및 바이트 수신');
+    report.audioBitrateParameters = windows.map(win => {
+      const pc = win.diagnostic.connections[0];
+      const encodings = pc.getSenders().filter(sender => sender.track?.kind === 'audio').flatMap(sender => sender.getParameters().encodings);
+      check(encodings.length > 0 && encodings.every(encoding => encoding.maxBitrate === 510000), '510kbps 송신 설정 불일치');
+      check(pc.localDescription.sdp.includes('maxaveragebitrate=510000') && pc.remoteDescription.sdp.includes('maxaveragebitrate=510000'), 'Opus 510kbps 협상 불일치');
+      return encodings.map(encoding => ({ maxBitrate: encoding.maxBitrate }));
+    });
+    report.checks.push('양쪽 Opus 협상과 실제 송신 설정: 510000 bits/s');
+    report.audioBufferTargetsMs = windows.map(win => {
+      const receivers = win.diagnostic.connections[0].getReceivers().filter(receiver => receiver.track.kind === 'audio');
+      check(receivers.length > 0 && receivers.every(receiver => receiver.jitterBufferTarget === 20), '20ms 수신 버퍼 목표 미적용');
+      return receivers.map(receiver => receiver.jitterBufferTarget);
+    });
+    report.checks.push('양쪽 실제 수신기 버퍼 목표: 20ms (재생 지연 보장값 아님)');
+    await pause(5000); // Exclude startup buffer adaptation from the comparison.
+    const before = await Promise.all(windows.map(sample));
+    const sampleStarted = performance.now();
+    await pause(10000);
+    const after = await Promise.all(windows.map(sample));
+    const seconds = (performance.now() - sampleStarted) / 1000;
+    report.packetsPerSecond = after.map((stats, index) => (stats.reduce((sum, stat) => sum + stat.packetsReceived, 0) - before[index].reduce((sum, stat) => sum + stat.packetsReceived, 0)) / seconds);
+    report.estimatedPacketCadenceMs = report.packetsPerSecond.map(rate => rate > 0 ? 1000 / rate : null);
+    report.checks.push('실측 수신 패킷 빈도: ' + report.packetsPerSecond.map(rate => rate.toFixed(1)).join(' / ') + '개/s · 요청 ' + report.requestedPacketTimeMs + 'ms');
+    report.syntheticAudioKbps = after.map((stats, index) => stats.reduce((sum, stat) => sum + stat.bytesReceived, 0) - before[index].reduce((sum, stat) => sum + stat.bytesReceived, 0)).map(bytes => Math.round(bytes * 8 / seconds) / 1000);
+    report.checks.push('합성 음원 실측 수신량: ' + report.syntheticAudioKbps.join(' / ') + ' kbps (실제 두 PC의 마이크 측정과 별개)');
+    report.observedAudioBufferMs = after.map((stats, index) => stats.map((stat, i) => {
+      const count = stat.jitterBufferEmittedCount - before[index][i].jitterBufferEmittedCount;
+      return {
+        delayMs: count > 0 ? (stat.jitterBufferDelay - before[index][i].jitterBufferDelay) / count * 1000 : null,
+        targetMs: count > 0 ? (stat.jitterBufferTargetDelay - before[index][i].jitterBufferTargetDelay) / count * 1000 : null,
+        packetsLost: stat.packetsLost - before[index][i].packetsLost,
+        interruptionCount: stat.interruptionCount - before[index][i].interruptionCount,
+      };
+    }));
+    report.checks.push('합성 음원 실측 버퍼: ' + report.observedAudioBufferMs.map(stats => stats.map(stat => stat.delayMs?.toFixed(1)).join(',')).join(' / ') + ' ms (실제 PC 통화와 별개)');
     for (const win of windows) {
       const options = win.diagnostic.constraints[0];
       check(options.audio.echoCancellation === false && options.audio.noiseSuppression === false && options.audio.autoGainControl === false && options.video === false, '음성 처리 옵션 불일치');

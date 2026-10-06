@@ -7,6 +7,11 @@ const files = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/debug', ['debug.html', 'text/html; charset=utf-8']],
+  ['/debug.js', ['debug.js', 'text/javascript; charset=utf-8']],
+  ['/debug-source.js', ['debug-source.js', 'text/javascript; charset=utf-8']],
+  ['/debug-stats.js', ['debug-stats.js', 'text/javascript; charset=utf-8']],
+  ['/debug.css', ['debug.css', 'text/css; charset=utf-8']],
 ]);
 
 export function createVoiceServer({ iceServers = [{ urls: 'stun:stun.l.google.com:19302' }] } = {}) {
