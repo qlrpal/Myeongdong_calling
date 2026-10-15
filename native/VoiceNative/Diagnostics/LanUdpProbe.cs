@@ -34,13 +34,13 @@ internal static class LanUdpProbe
                 catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset) { continue; }
                 if (!incoming.RemoteEndPoint.Address.Equals(remote) || incoming.RemoteEndPoint.Port != 42000) continue;
                 var message = Encoding.ASCII.GetString(incoming.Buffer);
-                if (message.StartsWith("VOICE-LAN-PING|") && message.Length < 100)
+                if (message.StartsWith("VOICE-LAN-PING|", StringComparison.Ordinal) && message.Length < 100)
                 {
                     if (++requests == 1) report("LAN UDP: 상대 요청 수신 성공");
                     var bytes = Encoding.ASCII.GetBytes(message.Replace("VOICE-LAN-PING|", "VOICE-LAN-PONG|"));
                     await udp.SendAsync(bytes, incoming.RemoteEndPoint, deadline.Token);
                 }
-                else if (message.StartsWith("VOICE-LAN-PONG|" + nonce))
+                else if (message.StartsWith("VOICE-LAN-PONG|" + nonce, StringComparison.Ordinal))
                 {
                     if (++replies == 1) report("LAN UDP: 왕복 응답 성공");
                 }

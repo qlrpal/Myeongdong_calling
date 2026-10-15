@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.NetworkInformation;
 namespace VoiceNative;
+
 internal static class NetworkProbe
 {
     public static async Task RunAsync(string address, Action<string> report, CancellationToken token)

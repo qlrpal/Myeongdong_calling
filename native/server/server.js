@@ -1,8 +1,9 @@
 import http from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createIceConfig } from './ice-config.js';
 
-export function createVoiceServer({ iceServers = [{ urls: 'stun:stun.l.google.com:19302' }] } = {}) {
+export function createVoiceServer({ iceServers = [{ urls: 'stun:stun.l.google.com:19302' }], iceConfig = () => ({ iceServers }) } = {}) {
   const members = new Map();
   function send(member, event, data) {
     const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -46,7 +47,7 @@ export function createVoiceServer({ iceServers = [{ urls: 'stun:stun.l.google.co
         return json(res, 403, { error: '다른 사이트에서 요청할 수 없습니다.' });
       }
       if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, service: 'native-signaling' });
-      if (req.method === 'GET' && url.pathname === '/api/config') return json(res, 200, { iceServers });
+      if (req.method === 'GET' && url.pathname === '/api/config') return json(res, 200, iceConfig());
       if (req.method === 'POST' && url.pathname === '/api/join') {
         const data = await body(req);
         const room = typeof data.room === 'string' ? data.room.trim() : '';
@@ -105,13 +106,12 @@ export function createVoiceServer({ iceServers = [{ urls: 'stun:stun.l.google.co
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  let iceServers;
-  try { iceServers = process.env.ICE_SERVERS ? JSON.parse(process.env.ICE_SERVERS) : undefined; }
-  catch { console.error('ICE_SERVERS 환경 변수는 JSON 배열이어야 합니다.'); process.exit(1); }
-  const server = createVoiceServer({ iceServers });
+  let iceConfig;
+  try { iceConfig = createIceConfig(); }
+  catch { console.error('ICE/TURN 설정이 잘못됐습니다. URL·secret 파일·TTL을 확인하세요.'); process.exit(1); }
+  const server = createVoiceServer({ iceConfig });
   const port = Number(process.env.PORT || 3000);
   server.listen(port, process.env.HOST || '127.0.0.1', () => console.log(`Voice Room: http://localhost:${port}`));
   process.on('SIGINT', () => server.shutdown());
   process.on('SIGTERM', () => server.shutdown());
 }
-

@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{js,json,sh}]
+indent_size = 2
+
+[native/VoiceNative/UI/CallForm.cs]
+# Keep the intentional UI/engine abstraction for future engine replacement.
+dotnet_diagnostic.CA1859.severity = none
+
+[native/VoiceNative/Audio/WindowsAudioDevice.cs]
+# Close asynchronously releases native audio resources. The managed semaphore has no
+# WaitHandle and stays valid for queued recovery operations after Close.
+dotnet_diagnostic.CA1001.severity = none

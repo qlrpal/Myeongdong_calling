@@ -1,22 +1,16 @@
 # 명동 콜링 Native
 
-Windows 네이티브 음성 통화 앱과 Ubuntu 연결 관리 서버입니다.
-현재 개발 기준점은 **0.3.3**입니다. 이 `native` 브랜치는 네이티브 프로젝트를 관리합니다.
-
-- [실행·빌드·진단 안내](native/README.md)
-- [완료 내역·검증 범위·다음 개발 순서](native/STATUS.md)
+지연을 우선하는 Windows 음성 통화 앱과 OCI Ubuntu 연결 관리/TURN 서버입니다. 현재 작업 버전은0.4.9입니다.
 
 ```powershell
-node native/server/server.js
 ./native/run.ps1
-```
-
-배포 빌드와 ZIP 생성:
-
-```powershell
 ./native/build.ps1 -Package
+./native/verify.ps1
 ```
 
-소스는 `native/VoiceNative/`, 검증 도구는 `native/TransportProbe/`, 서버는 `native/server/`입니다.
-실행 결과는 `native/dist/`, 배포 ZIP은 `native/dist.zip`에 생성하며 Git에 포함하지 않습니다.
-기존 웹 자료는 로컬 `web/`에 보관하고, 이 브랜치에서는 Git에 추가하지 않습니다.
+- [실행·빌드·소스 구조](native/README.md)
+- [정적 분석·Git 준비 상태](native/docs/STATIC-ANALYSIS.md)
+- [서버 운영](native/server/README.md)
+- [최근 두 PC 비교 결과](native/docs/reports/OPUS-AB-REPORT.md)
+
+소스와 재현 도구는 `native/`에 있습니다. 이전 웹은 로컬 `web/`에 보존하며 이 브랜치에 추가하지 않습니다. 배포 파일·진단 원본·실험 자료·캐시·비밀 키는 Git에서 제외합니다.
