@@ -2,7 +2,7 @@ using System.Threading.Channels;
 using System.Diagnostics;
 namespace VoiceNative;
 
-internal sealed record OutgoingAudio(long Sequence, long Created, byte[] Payload, string? TraceHash = null);
+internal sealed record OutgoingAudio(long Sequence, long Created, byte[] Payload, string? TraceHash = null, CaptureOrigin? Origin = null);
 public sealed record SendDiagnostics(int PendingFrames, long DroppedFrames, double MaxWaitMs, double? LastWaitMs = null);
 internal sealed class AudioSendQueue
 {
@@ -15,7 +15,7 @@ internal sealed class AudioSendQueue
         channel = Channel.CreateBounded<OutgoingAudio>(new BoundedChannelOptions(3)
         { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.DropOldest }, _ => Interlocked.Increment(ref dropped));
     }
-    public void Enqueue(byte[] payload, string? traceHash = null) => channel.Writer.TryWrite(new(Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), payload, traceHash));
+    public void Enqueue(byte[] payload, string? traceHash = null, CaptureOrigin? origin = null) => channel.Writer.TryWrite(new(Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), payload, traceHash, origin));
     public IAsyncEnumerable<OutgoingAudio> Read(CancellationToken token) => channel.Reader.ReadAllAsync(token);
     public void Observe(OutgoingAudio frame)
     {

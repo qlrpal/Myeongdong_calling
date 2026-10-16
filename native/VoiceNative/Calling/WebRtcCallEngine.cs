@@ -32,6 +32,16 @@ public sealed class WebRtcCallEngine : ICallEngine
     private AcousticLatencyResult? acousticResult;
     private int outputLatencyMs = 40;
     private bool preferLowLatency = true;
+    private bool useRtpPlayout = true;
+    private bool adaptivePlayout;
+    private PlayoutPolicy playoutPolicy;
+    // Individual overrides are for diagnostic comparisons; the UI selects a policy.
+    internal bool FixedReserveClockTarget { get; init; }
+    internal bool TransientEmptyQueueHold { get; init; }
+    internal bool FreshRestart { get; init; }
+    private readonly PipelineTrace pipeline = new();
+    internal void StartPipelineTrace(int seconds) => pipeline.Start(seconds);
+    internal PipelineTraceSnapshot StopPipelineTrace() { pipeline.Stop(); return pipeline.Snapshot(); }
     private LoopbackLatencyCapture? loopback;
     private sealed record ProbeReply(ProbeMessage Message, double ReceivedAt);
     public event Action<string>? Status;
@@ -85,11 +95,11 @@ public sealed class WebRtcCallEngine : ICallEngine
                 (iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)) ? "사용 가능" : "미설정"));
             encoder = new OpusAudioEncoder(opusProfile);
             Status?.Invoke("송신 코덱 · " + OpusAudioEncoder.Label(opusProfile));
-            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: 10);
+            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: 10, pipeline: pipeline);
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
             sendQueue = new AudioSendQueue(); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
-            microphone.OnAudioSourceEncodedSample += (_, bytes) => activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash);
+            microphone.OnAudioSourceEncodedSample += (_, bytes) => activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
             var sendToken = sendCancellation.Token;
             sendTask = Task.Run(() => DispatchAudio(activeQueue, sendToken));
             session = (await Post("api/join", new { room, name })).Deserialize<Session>(Json)!;
@@ -123,10 +133,12 @@ public sealed class WebRtcCallEngine : ICallEngine
     {
         lock (peers) if (peers.TryGetValue(id, out var existing)) return existing;
         var decoder = new AudioEncoder(includeOpus: true);
-        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10);
+        var lowDelay = playoutPolicy == PlayoutPolicy.LowLatency;
+        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay);
         var pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers });
         var metrics = new PeerMetrics();
         var precision = new RtcpMetrics();
+        var receivedPayloadType = 111;
         pc.OnRtpPacketReceived += (_, media, packet) =>
         {
             if (media == SDPMediaTypesEnum.audio)
@@ -135,6 +147,13 @@ public sealed class WebRtcCallEngine : ICallEngine
                 if (sink.Timeline.Enabled) sink.Timeline.Update(AudioFrameTimeline.Hash(packet.Payload), old => old with { ReceivedAt = old.ReceivedAt ?? receivedAt, RtpNotificationAt = receivedAt, Receipts = old.Receipts + 1 });
                 metrics.Received(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload.Length);
                 precision.Packet(packet.Header.SyncSource, packet.Header.SequenceNumber);
+                if (useRtpPlayout && packet.Header.PayloadType == Volatile.Read(ref receivedPayloadType))
+                {
+                    var bufferCallAt = pipeline.Enabled ? ProbeClock.Now : 0;
+                    sink.GotRtpAudioPacket(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload);
+                    if (pipeline.Enabled) pipeline.Received(new(id, packet.Header.SyncSource, packet.Header.Timestamp,
+                        packet.Header.SequenceNumber, receivedAt, bufferCallAt, ProbeClock.Now));
+                }
             }
         };
         pc.OnReceiveReport += (_, media, report) =>
@@ -151,7 +170,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         };
         pc.onicegatheringstatechange += state => Status?.Invoke($"{name}: 연결 후보 수집 {state}");
         pc.addTrack(new MediaStreamTrack(sink.GetAudioSinkFormats(), MediaStreamStatusEnum.SendRecv));
-        pc.OnAudioFrameReceived += frame => sink.GotEncodedMediaFrame(frame);
+        if (!useRtpPlayout) pc.OnAudioFrameReceived += frame => sink.GotEncodedMediaFrame(frame);
         pc.onicecandidate += candidate =>
         {
             if (candidate is not null)
@@ -169,7 +188,11 @@ public sealed class WebRtcCallEngine : ICallEngine
         sink.OnAudioSinkRecovered += message => Status?.Invoke(name + ": " + message);
         var peer = new Peer(pc, sink, decoder, name, metrics, precision);
         pc.ondatachannel += channel => { if (channel.label == "voice-latency-v1") AttachTelemetry(peer, channel); };
-        pc.OnAudioFormatsNegotiated += formats => peer.PayloadTypeId = formats.First().FormatID;
+        pc.OnAudioFormatsNegotiated += formats =>
+        {
+            peer.PayloadTypeId = formats.First().FormatID;
+            Volatile.Write(ref receivedPayloadType, peer.PayloadTypeId);
+        };
         lock (peers) peers.Add(id, peer);
         return peer;
     }
@@ -323,6 +346,42 @@ public sealed class WebRtcCallEngine : ICallEngine
         finally { gate.Release(); }
     }
 
+    public void SetRtpPlayoutPreference(bool enabled)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 재생 모드를 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("재생 모드는 통화에서 나간 뒤 변경하세요.");
+            useRtpPlayout = enabled;
+            Status?.Invoke(enabled ? "RTP 시간축 재생 · 20ms 목표 여유·PLC 활성" : "기존 PCM 재생 경로 사용");
+        }
+        finally { gate.Release(); }
+    }
+    public void SetAdaptivePlayoutPreference(bool enabled)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 적응 여유를 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("적응 여유는 통화에서 나간 뒤 변경하세요.");
+            if (enabled && playoutPolicy == PlayoutPolicy.LowLatency) throw new InvalidOperationException("지터 적응은 기존 재생 정책에서 선택하세요.");
+            adaptivePlayout = enabled;
+            Status?.Invoke(enabled ? "지터 적응 여유 · 20~40ms" : "고정 여유 · 20ms, 소비율 보정 유지");
+        }
+        finally { gate.Release(); }
+    }
+    public void SetPlayoutPolicy(PlayoutPolicy policy)
+    {
+        if (!Enum.IsDefined(policy)) throw new ArgumentOutOfRangeException(nameof(policy));
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 재생 정책을 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("재생 정책은 통화에서 나간 뒤 변경하세요.");
+            playoutPolicy = policy;
+            if (policy == PlayoutPolicy.LowLatency) adaptivePlayout = false;
+            Status?.Invoke(policy == PlayoutPolicy.LowLatency ? "저지연 재생 · 20ms 목표·짧은 공백 보류·최신 큐 복귀" : "기존 재생 · 시작 여유 학습");
+        }
+        finally { gate.Release(); }
+    }
     public void SetOpusProfile(OpusProfile profile)
     {
         if (!Enum.IsDefined(profile)) throw new ArgumentOutOfRangeException(nameof(profile));
@@ -401,7 +460,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                 sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, audio, detail, view);
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
-            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, 10, encoder?.Snapshot());
+            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, 10, encoder?.Snapshot(),
+            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString());
     }
     private void AttachTelemetry(Peer peer, RTCDataChannel channel)
     {
@@ -506,6 +566,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                 var stagesReply = await RequestProbe(target, new("stages", probeId, PayloadHash: injectedHash), "stageReply", token);
                 receiverStages = stagesReply.Message.Stages;
             }
+            if (useLoopback && !AudioFrameTimeline.HasVerifiedPlayout(sourceStages, receiverStages))
+                throw new InvalidOperationException("테스트 시작 패킷의 정상 디코딩·출력 제출을 확인하지 못해 루프백 측정에서 제외합니다. 지연 도착·폐기·중복 또는 추적 누락을 확인하세요.");
             if (receiverStages?.OutputSubmittedAt is { } submittedAt && !AudioFrameTimeline.IsDetectionCoherent(submittedAt, arrival.Message.A, useLoopback))
                 throw new InvalidOperationException("검출 시각이 해당 테스트 패킷의 출력 시각과 일치하지 않습니다. 배경 신호 오검출 또는 캡처 시각 이상으로 측정에서 제외합니다.");
             var stageBreakdown = sourceStages is not null && receiverStages is { Receipts: 1, Discarded: false } && sourceStages.Hash == receiverStages.Hash
@@ -533,6 +595,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             await foreach (var frame in queue.Read(token))
             {
                 queue.Observe(frame);
+                var dequeuedAt = pipeline.Enabled ? ProbeClock.Now : 0;
                 lock (peers)
                 {
                     foreach (var peer in peers.Values)
@@ -546,6 +609,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                             if (frame.TraceHash is { } traceHash) microphone?.Timeline.Update(traceHash, old => old with { SentAt = sentAt });
                             peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,
                                 peer.LastSentSequence == 0 || frame.Sequence != peer.LastSentSequence + 1 ? 1 : 0, peer.PayloadTypeId);
+                            if (pipeline.Enabled) pipeline.Sent(new(peer.Connection.AudioLocalTrack.Ssrc, timestamp, frame.Sequence,
+                                frame.Created / (double)System.Diagnostics.Stopwatch.Frequency, dequeuedAt, sentAt, ProbeClock.Now, frame.Origin));
                             peer.LastSentSequence = frame.Sequence; peer.Metrics.Sent(frame.Payload.Length);
                         }
                         catch (Exception ex) { Status?.Invoke(peer.Name + ": 음성 송신 오류: " + ex.Message); }

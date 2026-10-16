@@ -2,7 +2,7 @@ using NAudio.Wave;
 namespace VoiceNative;
 
 // Bounded PCM ring. Preserve a startup reserve, but don't retain stale speech after a burst.
-internal sealed class PcmPlayoutBuffer : IWaveProvider
+internal sealed class PcmPlayoutBuffer : IPlayoutBuffer
 {
     private readonly object sync = new();
     private readonly byte[] audio = new byte[32768];

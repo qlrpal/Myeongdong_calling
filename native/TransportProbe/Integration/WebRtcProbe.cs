@@ -16,7 +16,8 @@ internal static class WebRtcProbe
         var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
         var configuration = new RTCConfiguration();
         var turnProbe = args is ["--turn-integration", _];
-        var tenMsProbe = args is ["--ten-ms-rtcp-integration"] || turnProbe || profileProbe;
+        var rtpPlayoutProbe = args is ["--rtp-playout-integration"];
+        var tenMsProbe = args is ["--ten-ms-rtcp-integration"] || turnProbe || profileProbe || rtpPlayoutProbe;
         var probeFrameSamples = tenMsProbe ? 480 : 960;
         var rtcpIntegration = args is ["--rtcp-integration"] || tenMsProbe;
         if (turnProbe || args.Length > 0 && !rtcpIntegration)
@@ -160,6 +161,39 @@ internal static class WebRtcProbe
                 Console.WriteLine($"PASS: live native RTCP correlation; left RTT={lhs.RtcpRttMs:F2}ms inbound loss={lhs.ReceiveLossPercent:F2}%; right RTT={rhs.RtcpRttMs:F2}ms inbound loss={rhs.ReceiveLossPercent:F2}%.");
             }
             Console.WriteLine($"PASS: two native peers negotiated Opus, connected via ICE/DTLS, and delivered a decodable {probeFrameSamples / 48}ms SRTP audio frame.");
+            if (rtpPlayoutProbe)
+            {
+                using var playout = new VoiceNative.RtpOpusPlayoutBuffer(new());
+                var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var count = 0;
+                RTPPacket? held = null;
+                right.OnRtpPacketReceived += (_, media, packet) =>
+                {
+                    if (media != SDPMediaTypesEnum.audio || arrived.Task.IsCompleted) return;
+                    var index = count++;
+                    if (index == 0) held = packet;
+                    else if (index != 4) playout.Add(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload);
+                    if (index == 1 && held is { } first)
+                    {
+                        playout.Add(first.Header.SyncSource, first.Header.Timestamp, first.Payload);
+                        playout.Add(first.Header.SyncSource, first.Header.Timestamp, first.Payload);
+                    }
+                    if (count == 10) arrived.TrySetResult();
+                };
+                var start = previousRtpTimestamp!.Value + 480;
+                for (var i = 0; i < 10; i++)
+                {
+                    left.SendRtpRaw(SDPMediaTypesEnum.audio, encoder.EncodeAudio(samples, format), unchecked(start + (uint)i * 480), 0, format.FormatID);
+                    await Task.Delay(10);
+                }
+                await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var pcm = new byte[960];
+                for (var i = 0; i < 10; i++) playout.Read(pcm);
+                var state = playout.Details();
+                if (state.DecodedPackets != 9 || state.ConcealedMs != 10 || state.DuplicatePackets != 1 || playout.Snapshot().Underruns != 0)
+                    throw new InvalidOperationException("SRTP-to-RTP-playout order/loss integration failed.");
+                Console.WriteLine("PASS: decrypted SRTP feeds RTP playout; reordered packets, duplicate and a missing 10ms deadline handled without underfill.");
+            }
         }
         finally { left.Close("probe complete"); right.Close("probe complete"); }
 

@@ -17,6 +17,14 @@ native/dist*/
 native/dist*.zip
 native/.local/
 native/artifacts/
+__pycache__/
+*.pyc
+**/TestResults/
+*.etl
+*.etl.zip
+*.pcap
+*.pcapng
+*.dmp
 
 # The native branch keeps the previous web checkout as a local archive.
 /web/

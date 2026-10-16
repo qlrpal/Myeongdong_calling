@@ -1,5 +1,26 @@
 # 코드 정리와 정적 분석 · 2026-10-16
 
+## 현재 Git 반영 기준 · 0.5.5 / 2026-10-17
+
+현재 기능·검증 기준은 [0.5.5 적용 보고서](reports/LOW-LATENCY-055.md)입니다. 아래 0.4.9 분석 내용은 당시 정리 기록이며 현재 구현 범위를 뜻하지 않습니다.
+
+Git 대상은 앱(`VoiceNative/`), 서버(`server/`), 재현 가능한 검증 도구(`TransportProbe/`와 PowerShell 스크립트), 문서(`docs/`), 솔루션·프로젝트·의존성 잠금 파일입니다. 검증 소스도 함께 올려야 새 체크아웃에서 `verify.ps1`을 실행할 수 있습니다.
+
+빌드 결과(`dist/`, ZIP, `bin/`, `obj/`), 캐시, `.local/` 실험 자료, 개인 진단 JSON·ETL·패킷 캡처·덤프, 환경 파일·키, 이전 `web/`은 제외합니다. 원본은 로컬에 보존합니다. 기존에 추적 중인 생성 파일이 없는지와 신규 파일 후보의 암호·개인 키 패턴을 확인했고, `git diff --check`를 통과했습니다. 이는 전체 보안 감사 결과가 아닙니다.
+
+저장소 루트에서 반영할 파일을 검토할 때는 다음 명령을 사용합니다.
+
+```powershell
+git status --short
+git add .gitignore .gitattributes .editorconfig README.md native/
+git diff --cached --stat
+git diff --cached --check
+```
+
+커밋 메시지 예: `feat: adopt low-latency native playout policy (0.5.5)`
+
+## 이전 정리 기록 · 0.4.9
+
 0.4.9의 통화 파라미터와 기존 코덱 기본값을 유지한 정리입니다. 새 지터 버퍼·음질 처리·OCI 운영 배포는 포함하지 않습니다. 커밋·푸시·스테이징은 수행하지 않았습니다.
 
 ## 정리 내용

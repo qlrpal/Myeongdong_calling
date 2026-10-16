@@ -1,4 +1,4 @@
-param([switch]$NoRestore, [switch]$Integration)
+param([switch]$NoRestore, [switch]$Integration, [switch]$Stress)
 $ErrorActionPreference = 'Stop'
 $env:DOTNET_CLI_HOME = Join-Path $PSScriptRoot '.dotnet'
 $env:NUGET_PACKAGES = Join-Path $PSScriptRoot '.nuget'
@@ -14,10 +14,16 @@ $probe = Join-Path $PSScriptRoot 'TransportProbe/bin/Release/net10.0-windows10.0
 $checks = @('--native-converter-test', '--codec-delay-test', '--frame-timeline-test', '--latency-summary-test',
     '--acoustic-probe-test', '--ten-ms-acoustic-probe-test', '--latency-model-test', '--send-queue-test',
     '--buffer-recovery-test', '--precision-self-test', '--period-buffer-test', '--low-latency-buffer-test',
-    '--playout-self-test', '--metrics-self-test')
+    '--playout-self-test', '--metrics-self-test', '--rtp-playout-test', '--pipeline-trace-test', '--playout-policy-test')
 foreach ($check in $checks) {
     & $probe $check
     if ($LASTEXITCODE -ne 0) { throw "Check failed: $check" }
+}
+if ($Stress) {
+    & $probe --rtp-stress-test (Join-Path $PSScriptRoot '.local/reports/rtp-stress-verify.json')
+    if ($LASTEXITCODE -ne 0) { throw 'RTP clock/backlog stress checks failed.' }
+    & $probe --playout-target-test (Join-Path $PSScriptRoot '.local/reports/playout-target-simulation.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Playout target comparison failed.' }
 }
 & $probe --opus-comparison (Join-Path $PSScriptRoot '.local/reports/opus-comparison-verify.json')
 if ($LASTEXITCODE -ne 0) { throw 'Opus comparison failed.' }
@@ -33,7 +39,7 @@ try {
 }
 finally { Pop-Location }
 if ($Integration) {
-    foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration')) {
+    foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration', '--rtp-playout-integration')) {
         & $probe $check
         if ($LASTEXITCODE -ne 0) { throw "Integration failed: $check" }
     }

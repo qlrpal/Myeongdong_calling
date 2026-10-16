@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="VoiceNative">
+  <Profiles>
+    <SystemCollector Id="VoiceKernel" Name="VoiceNative scheduling">
+      <BufferSize Value="1024" />
+      <Buffers Value="64" />
+    </SystemCollector>
+    <SystemProvider Id="VoiceKernelProvider">
+      <Keywords>
+        <Keyword Value="ProcessThread" />
+        <Keyword Value="Loader" />
+        <Keyword Value="DPC" />
+        <Keyword Value="Interrupt" />
+        <Keyword Value="CSwitch" />
+        <Keyword Value="ReadyThread" />
+      </Keywords>
+    </SystemProvider>
+    <Profile Id="VoiceScheduling.Light.File" Name="VoiceScheduling" Description="DPC ISR and scheduling; network captured in a separate metadata session" LoggingMode="File" DetailLevel="Light">
+      <Collectors>
+        <SystemCollectorId Value="VoiceKernel"><SystemProviderId Value="VoiceKernelProvider" /></SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

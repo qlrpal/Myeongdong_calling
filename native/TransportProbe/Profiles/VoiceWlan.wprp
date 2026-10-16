@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="VoiceNative">
+  <Profiles>
+    <EventCollector Id="VoiceWlanCollector" Name="VoiceNative WLAN metadata">
+      <BufferSize Value="64" />
+      <Buffers Value="16" />
+    </EventCollector>
+    <EventProvider Id="VoiceWlanProvider" Name="9580d7dd-0379-4658-9870-d5be7d52d6de" Level="4">
+      <EventFilters FilterIn="true">
+        <EventId Value="14000" />
+        <EventId Value="14008" />
+        <EventId Value="14011" />
+        <EventId Value="14025" />
+        <EventId Value="14036" />
+        <EventId Value="14040" />
+        <EventId Value="14054" />
+        <EventId Value="14067" />
+        <EventId Value="14068" />
+        <EventId Value="14071" />
+        <EventId Value="14072" />
+        <EventId Value="20022" />
+        <EventId Value="20023" />
+        <EventId Value="30019" />
+      </EventFilters>
+    </EventProvider>
+    <Profile Id="VoiceWlan.Light.File" Name="VoiceWlan" Description="Only WLAN scan, power and connection state metadata; no SSID/BSSID or packet data" LoggingMode="File" DetailLevel="Light">
+      <Collectors>
+        <EventCollectorId Value="VoiceWlanCollector"><EventProviders><EventProviderId Value="VoiceWlanProvider" /></EventProviders></EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

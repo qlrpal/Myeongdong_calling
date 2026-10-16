@@ -11,12 +11,12 @@ public sealed record AudioDiagnostics(double? QueueMs, long QueueResets, double?
     double? CaptureGapP95Ms = null, double? CaptureGapMaxMs = null,
     double? CaptureWorkP95Ms = null, double? CaptureWorkMaxMs = null,
     long CaptureDiscontinuities = 0, long CaptureTimestampErrors = 0,
-    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null);
+    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null);
 public sealed record PeerDiagnostics(string Id, string Name, string State, string IceState, string Route,
     string? LocalEndpoint, string? RemoteEndpoint, long TxFrames, long RxPackets,
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,
     double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio, NetworkPrecision? Precision = null, LatencyView? Latency = null);
-public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, int FrameMs = 20, EncoderDiagnostics? Encoder = null);
+public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, int FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible");
 
 internal sealed class PeerMetrics
 {

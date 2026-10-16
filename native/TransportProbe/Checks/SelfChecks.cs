@@ -7,6 +7,21 @@ internal static class SelfChecks
 {
     public static async Task<bool> TryRunAsync(string[] args)
     {
+        if (args is ["--probe-first-use-profile"])
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var probe = new VoiceNative.AcousticCaptureProbe();
+            var constructed = watch.Elapsed.TotalMilliseconds;
+            _ = probe.Inject(); var injected = watch.Elapsed.TotalMilliseconds;
+            var pcm = new short[480]; probe.Process(pcm, VoiceNative.ProbeClock.Now);
+            var first = watch.Elapsed.TotalMilliseconds;
+            probe.Process(pcm, VoiceNative.ProbeClock.Now); var second = watch.Elapsed.TotalMilliseconds;
+            Console.WriteLine($"construct={constructed:F3}ms inject={injected - constructed:F3}ms firstProcess={first - injected:F3}ms secondProcess={second - first:F3}ms");
+            probe.Cancel(); return true;
+        }
+        if (args is ["--pipeline-trace-test"]) { PipelineTraceChecks.Run(); return true; }
+        if (args is ["--rtp-playout-test"]) { RtpPlayoutChecks.Run(); return true; }
+        if (args is ["--rtp-device-test"]) { await RtpPlayoutChecks.DeviceAsync(); return true; }
         if (args is ["--opus-comparison", var codecReport])
         {
             OpusComparison.Run(codecReport);
@@ -73,6 +88,14 @@ internal static class SelfChecks
             var source = new VoiceNative.AudioFrameStages("A", CaptureAt: 10, EncodeStart: 10.02, EncodeEnd: 10.021, SentAt: 10.022);
             var target = new VoiceNative.AudioFrameStages("A", ReceivedAt: 30.024, DecodeStart: 30.025, DecodeEnd: 30.026,
                 QueuedAt: 30.027, OutputSubmittedAt: 30.067, Receipts: 1);
+            if (!VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target)
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target with { OutputSubmittedAt = null })
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target with { DecodeStart = null })
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target with { Discarded = true })
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target with { Receipts = 2 })
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(source, target with { Hash = "B" })
+                || VoiceNative.AudioFrameTimeline.HasVerifiedPlayout(null, target))
+                throw new InvalidOperationException("Loopback measurement must reject incomplete, discarded, duplicated or mismatched start-frame traces.");
             var split = VoiceNative.AudioFrameTimeline.Breakdown(source, target, 19.999, 20.001, 30.077);
             if (Math.Abs(split.PcmQueueMs!.Value - 40) > 0.001 || Math.Abs(split.NetworkMinimumMs!.Value - 1) > 0.001
                 || Math.Abs(split.NetworkMaximumMs!.Value - 3) > 0.001) throw new InvalidOperationException("Frame stage breakdown clock math is incorrect.");

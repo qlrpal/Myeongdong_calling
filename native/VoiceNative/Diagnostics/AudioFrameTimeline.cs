@@ -38,6 +38,10 @@ internal sealed class AudioFrameTimeline
     public AudioFrameStages? Find(string hash) => frames.TryGetValue(hash, out var frame) ? frame : null;
     public static bool IsDetectionCoherent(double submittedAt, double detectedAt, bool loopback)
         => double.IsFinite(submittedAt) && double.IsFinite(detectedAt) && detectedAt >= submittedAt && (!loopback || detectedAt - submittedAt <= 0.6);
+    public static bool HasVerifiedPlayout(AudioFrameStages? source, AudioFrameStages? target) =>
+        source is { CaptureAt: not null, SentAt: not null }
+        && target is { Receipts: 1, Discarded: false, DecodeStart: not null, DecodeEnd: not null, QueuedAt: not null, OutputSubmittedAt: not null }
+        && source.Hash == target.Hash;
     public static AudioStageBreakdown Breakdown(AudioFrameStages? source, AudioFrameStages? target,
         double lowOffset, double highOffset, double detectedAt)
     {

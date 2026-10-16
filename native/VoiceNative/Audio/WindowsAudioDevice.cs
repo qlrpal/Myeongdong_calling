@@ -20,7 +20,7 @@ internal sealed class WindowsAudioDevice
     private int requestedOutputMs;
     private readonly bool preferLowLatency;
     private readonly int frameSamples;
-    private readonly PcmPlayoutBuffer? buffer;
+    private readonly IPlayoutBuffer? buffer;
     private readonly object audioLock = new();
     private bool closed;
     private bool sinkStarted, sinkFailed, automaticRecoveryUsed;
@@ -41,13 +41,16 @@ internal sealed class WindowsAudioDevice
     public string? EncodedTraceHash { get; private set; }
     private double? frameCaptureAt;
     private long captureDiscontinuities, captureTimestampErrors;
+    private readonly PipelineTrace? pipeline;
+    private double frameFirstCallbackAt;
+    public CaptureOrigin? LastCaptureOrigin { get; private set; }
     private readonly AudioFormat pcmFormat = new(AudioCodecsEnum.OPUS, 111, 48000, 1);
     public event Action<uint, byte[]>? OnAudioSourceEncodedSample;
     public event Action<string>? OnAudioSourceError;
     public event Action<string>? OnAudioSinkError;
     public event Action<string>? OnAudioSinkRecovered;
 
-    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, int frameMs = 20)
+    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, int frameMs = 20, bool useRtpPlayout = false, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false)
     {
         if (outputLatencyMs is not (20 or 40)) throw new ArgumentOutOfRangeException(nameof(outputLatencyMs));
         requestedOutputMs = outputLatencyMs;
@@ -55,6 +58,7 @@ internal sealed class WindowsAudioDevice
         if (frameMs is not (10 or 20)) throw new ArgumentOutOfRangeException(nameof(frameMs));
         frameSamples = frameMs * 48; captureFrameBytes = new byte[frameSamples * 2]; capturePcm = new short[frameSamples];
         this.encoder = encoder;
+        this.pipeline = pipeline;
         try
         {
             if (!disableSource)
@@ -91,6 +95,8 @@ internal sealed class WindowsAudioDevice
                 }
                 input.DataAvailable += (data, flags, devicePosition, qpcPosition) =>
                 {
+                    var callbackAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
+                    var callbackSamples = data.Length / input.WaveFormat.BlockAlign;
                     if ((flags & AudioClientBufferFlags.DataDiscontinuity) != 0)
                     {
                         Interlocked.Increment(ref captureDiscontinuities);
@@ -99,7 +105,7 @@ internal sealed class WindowsAudioDevice
                     if ((flags & AudioClientBufferFlags.TimestampError) != 0) Interlocked.Increment(ref captureTimestampErrors);
                     var capturedAt = qpcPosition / 10000000.0;
                     double? stamp = (flags & AudioClientBufferFlags.TimestampError) == 0 && ProbeClock.Now - capturedAt is >= 0 and < 1 ? capturedAt : null;
-                    if (captureConverter is null) Capture(data, stamp);
+                    if (captureConverter is null) Capture(data, stamp, callbackAt, callbackSamples, (int)flags);
                     else
                     {
                         for (var offset = 0; offset < data.Length;)
@@ -108,7 +114,7 @@ internal sealed class WindowsAudioDevice
                             if (frames == 0) break;
                             var count = frames * captureConverter.BlockAlign;
                             var bytes = captureConverter.Convert(data.Slice(offset, count), convertedCapture);
-                            Capture(convertedCapture.AsSpan(0, bytes), stamp is { } at ? at + offset / (double)captureConverter.BlockAlign / 48000 : null);
+                            Capture(convertedCapture.AsSpan(0, bytes), stamp is { } at ? at + offset / (double)captureConverter.BlockAlign / 48000 : null, callbackAt, callbackSamples, (int)flags);
                             offset += count;
                         }
                     }
@@ -117,12 +123,12 @@ internal sealed class WindowsAudioDevice
             }
             if (!disableSink)
             {
-                buffer = new PcmPlayoutBuffer();
+                buffer = useRtpPlayout ? new RtpOpusPlayoutBuffer(Timeline, adaptiveReserve: adaptiveReserve, pipeline: pipeline, tracePeer: tracePeer, fixedReserveClockTarget: fixedReserveClockTarget, transientEmptyQueueHold: transientEmptyQueueHold, freshRestart: freshRestart) : new PcmPlayoutBuffer();
                 buffer.OnFrameSubmitted = (hash, at, discarded) => Timeline.Update(hash, old => old with { OutputSubmittedAt = discarded ? null : at, Discarded = discarded });
                 output = CreateOutput();
             }
         }
-        catch { input?.Dispose(); output?.Dispose(); throw; }
+        catch { input?.Dispose(); output?.Dispose(); (buffer as IDisposable)?.Dispose(); throw; }
     }
     private WasapiPlayer CreateOutput()
     {
@@ -171,11 +177,12 @@ internal sealed class WindowsAudioDevice
     }
     public string OutputDeviceId => output?.DeviceId ?? throw new InvalidOperationException("출력 장치가 없습니다.");
     public List<AudioFormat> GetAudioSinkFormats() => encoder.SupportedFormats.Where(f => f.Codec == AudioCodecsEnum.OPUS).ToList();
-    private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt)
+    private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt, double callbackAt, int callbackSamples, int flags)
     {
         var callbackStarted = Stopwatch.GetTimestamp();
         lock (audioLock)
         {
+            var lockAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
             if (closed) return;
             var captureAt = Stopwatch.GetTimestamp();
             if (lastCaptureAt is { } previousCapture) captureGaps.Add(Stopwatch.GetElapsedTime(previousCapture, captureAt).TotalMilliseconds);
@@ -185,11 +192,16 @@ internal sealed class WindowsAudioDevice
                 var offset = 0;
                 while (offset < captured.Length)
                 {
-                    if (captureFrameCount == 0) frameCaptureAt = packetCaptureAt is { } packetAt ? packetAt + offset / 96000.0 : null;
+                    if (captureFrameCount == 0)
+                    {
+                        frameCaptureAt = packetCaptureAt is { } packetAt ? packetAt + offset / 96000.0 : null;
+                        frameFirstCallbackAt = callbackAt;
+                    }
                     var take = Math.Min(captureFrameBytes.Length - captureFrameCount, captured.Length - offset);
                     captured.Slice(offset, take).CopyTo(captureFrameBytes.AsSpan(captureFrameCount));
                     captureFrameCount += take; offset += take;
                     if (captureFrameCount < captureFrameBytes.Length) continue;
+                    var frameReadyAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
                     captureFrameCount = 0;
                     var pcm = capturePcm;
                     Buffer.BlockCopy(captureFrameBytes, 0, pcm, 0, captureFrameBytes.Length);
@@ -201,6 +213,9 @@ internal sealed class WindowsAudioDevice
                     var started = Stopwatch.GetTimestamp();
                     var encoded = encoder.EncodeAudio(pcm, pcmFormat);
                     var duration = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                    LastCaptureOrigin = pipeline?.Enabled == true && frameFirstCallbackAt > 0 ? new(capturedAt, frameFirstCallbackAt,
+                        callbackAt, callbackStarted / (double)Stopwatch.Frequency, lockAt, frameReadyAt,
+                        started / (double)Stopwatch.Frequency, ProbeClock.Now, callbackSamples, flags) : null;
                     var hash = firstProbeFrame ? AudioFrameTimeline.Hash(encoded) : null;
                     if (hash is not null) Timeline.Update(hash, old => old with { CaptureAt = capturedAt, EncodeStart = started / (double)Stopwatch.Frequency, EncodeEnd = ProbeClock.Now });
                     EncodedTraceHash = hash;
@@ -220,7 +235,7 @@ internal sealed class WindowsAudioDevice
     {
         lock (audioLock)
         {
-            if (closed || buffer is null) return;
+            if (closed || buffer is not PcmPlayoutBuffer pcmBuffer) return;
             try
             {
                 var started = Stopwatch.GetTimestamp();
@@ -232,10 +247,14 @@ internal sealed class WindowsAudioDevice
                 level = Level(pcm);
                 var bytes = new byte[pcm.Length * 2]; Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
                 if (hash is not null) Timeline.Update(hash, old => old with { QueuedAt = ProbeClock.Now });
-                buffer.AddSamples(bytes, hash);
+                pcmBuffer.AddSamples(bytes, hash);
             }
             catch (Exception ex) { OnAudioSinkError?.Invoke(ex.Message); }
         }
+    }
+    public void GotRtpAudioPacket(uint source, uint timestamp, byte[] payload)
+    {
+        if (buffer is RtpOpusPlayoutBuffer rtp) rtp.Add(source, timestamp, payload);
     }
     private static double Level(short[] pcm)
     {
@@ -265,6 +284,20 @@ internal sealed class WindowsAudioDevice
                 sinkError, recoveries, captureGaps.Snapshot().P95, captureGaps.Snapshot().Max,
                 work.P95, work.Max, Interlocked.Read(ref captureDiscontinuities), Interlocked.Read(ref captureTimestampErrors),
                 playback?.UnderfillMs, playback?.MaxUnderfillMs);
+        }
+        if (buffer is RtpOpusPlayoutBuffer rtp)
+        {
+            var detail = rtp.Details();
+            snapshot = snapshot with
+            {
+                DecodedFrames = detail.DecodedPackets,
+                ProcessingMs = detail.DecodeMeanMs,
+                ProcessingP95Ms = detail.DecodeP95Ms,
+                ProcessingMaxMs = detail.DecodeMaxMs,
+                LastFrameAgeMs = detail.LastPacketAgeMs,
+                LevelDbFs = detail.LevelDbFs,
+                RtpPlayout = detail
+            };
         }
         // Core Audio calls can block during device reconfiguration. Never hold
         // the capture/decoder callback lock across these diagnostic-only queries.
@@ -338,6 +371,6 @@ internal sealed class WindowsAudioDevice
             lock (audioLock) { old = output; output = null; }
             old?.Stop(); old?.Dispose();
         }
-        finally { playbackGate.Release(); }
+        finally { (buffer as IDisposable)?.Dispose(); playbackGate.Release(); }
     }
 }

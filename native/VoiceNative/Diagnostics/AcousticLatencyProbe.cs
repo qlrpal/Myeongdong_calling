@@ -33,6 +33,9 @@ internal sealed class AcousticCaptureProbe
     public bool IsFirstInjectionFrame { get { lock (sync) return injected is not null && toneFrame == 0; } }
     public Task<double> Inject()
     {
+        // Prepare the first-use waveform on the requesting thread, before enabling injection.
+        // Lazy static initialization inside Process otherwise blocks the capture callback.
+        if (Signal.Length != 19200) throw new InvalidOperationException("Invalid diagnostic waveform length.");
         lock (sync)
         {
             if (injected is not null) throw new InvalidOperationException("이미 테스트 신호를 생성 중입니다.");

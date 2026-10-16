@@ -1,0 +1,72 @@
+namespace VoiceNative;
+
+internal readonly record struct CaptureOrigin(double? FirstSampleAt, double FirstCallbackAt,
+    double CallbackAt, double LockRequestedAt, double LockAcquiredAt, double FrameReadyAt,
+    double EncodeStart, double EncodeEnd, int CallbackSamples, int Flags);
+internal sealed record PipelineSend(uint Ssrc, uint Timestamp, long Sequence, double QueuedAt,
+    double DequeuedAt, double SendStart, double SendEnd, CaptureOrigin? Capture);
+internal sealed record PipelineReceive(string Peer, uint Ssrc, uint Timestamp, ushort Sequence,
+    double At, double BufferCallAt, double BufferReturnAt);
+internal sealed record PipelineAdmission(string Peer, uint Ssrc, uint Timestamp, double CalledAt,
+    double LockAt, double ReturnedAt, string Outcome, double QueueMs);
+internal sealed record PipelinePlayout(string Peer, uint Ssrc, uint Timestamp, double At, double? DecodeStart,
+    double? DecodeEnd, double? SubmittedAt, string Outcome, double QueueMs);
+internal sealed record PipelineRead(string Peer, double CalledAt, double LockAt, double ReturnedAt,
+    int RequestedSamples, int ProvidedSamples, long PlcFrames, double QueueBeforeMs, double QueueAfterMs, bool PlayoutStarted);
+internal sealed record PipelineTraceSnapshot(PipelineSend[] Sends, PipelineReceive[] Receives,
+    PipelineAdmission[] Admissions, PipelinePlayout[] Playout, PipelineRead[] Reads,
+    long EvictedRecords, double MaxRecorderMs);
+
+// Opt-in, bounded timestamp metadata only. No payload bytes, audio, tokens or raw datagrams.
+internal sealed class PipelineTrace
+{
+    private readonly int capacity;
+    public PipelineTrace(int capacity = 24000)
+    {
+        if (capacity is < 1 or > 24000) throw new ArgumentOutOfRangeException(nameof(capacity));
+        this.capacity = capacity;
+    }
+    private readonly object sync = new();
+    private readonly Queue<PipelineSend> sends = new();
+    private readonly Queue<PipelineReceive> receives = new();
+    private readonly Queue<PipelineAdmission> admissions = new();
+    private readonly Queue<PipelinePlayout> playout = new();
+    private readonly Queue<PipelineRead> reads = new();
+    private double until, maxRecorderMs;
+    private long evicted;
+    public bool Enabled => ProbeClock.Now < Volatile.Read(ref until);
+    public void Start(int seconds)
+    {
+        if (seconds is < 1 or > 180) throw new ArgumentOutOfRangeException(nameof(seconds));
+        lock (sync)
+        {
+            Volatile.Write(ref until, 0);
+            sends.Clear(); receives.Clear(); admissions.Clear(); playout.Clear(); reads.Clear();
+            evicted = 0; maxRecorderMs = 0;
+            Volatile.Write(ref until, ProbeClock.Now + seconds);
+        }
+    }
+    public void Stop() => Volatile.Write(ref until, 0);
+    private void Add<T>(Queue<T> queue, T record)
+    {
+        if (!Enabled) return;
+        var began = ProbeClock.Now;
+        lock (sync)
+        {
+            if (!Enabled) return;
+            if (queue.Count == capacity) { queue.Dequeue(); evicted++; }
+            queue.Enqueue(record);
+            maxRecorderMs = Math.Max(maxRecorderMs, (ProbeClock.Now - began) * 1000);
+        }
+    }
+    public void Sent(PipelineSend record) => Add(sends, record);
+    public void Received(PipelineReceive record) => Add(receives, record);
+    public void Admitted(PipelineAdmission record) => Add(admissions, record);
+    public void Played(PipelinePlayout record) => Add(playout, record);
+    public void Read(PipelineRead record) => Add(reads, record);
+    public PipelineTraceSnapshot Snapshot()
+    {
+        lock (sync) return new(sends.ToArray(), receives.ToArray(), admissions.ToArray(),
+            playout.ToArray(), reads.ToArray(), evicted, maxRecorderMs);
+    }
+}

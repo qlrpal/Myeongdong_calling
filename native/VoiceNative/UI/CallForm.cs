@@ -8,13 +8,16 @@ namespace VoiceNative;
 
 public sealed class CallForm : Form
 {
-    private static readonly string[] ReportNotes = new[] { "Payload bitrate excludes network headers.", "ICMP/RTCP RTT is not end-to-end audio latency.", "Remote loss is outbound; local RTCP loss is inbound. Both are last report interval; inspect age.", "Queue is application PCM queue, not device or network delay.", "Device API latency is an implementation estimate, not physical mouth-to-ear latency.", "Latency model assumes RTT/2 and the sender frame duration. Device buffering may overlap; codec and physical delays are unverified. Not an end-to-end measurement.", "Processing percentiles cover the most recent 256 frames. Sequence duplicate window is bounded." };
+    private static readonly string[] ReportNotes = new[] { "Payload bitrate excludes network headers.", "ICMP/RTCP RTT is not end-to-end audio latency.", "Remote loss is outbound; local RTCP loss is inbound. Both are last report interval; inspect age.", "Queue is application compressed RTP plus remaining decoded PCM in RTP mode, or PCM in legacy mode; excludes device buffering. PLC duration is separate from decoded duration and zero-fill underflow.", "Device API latency is an implementation estimate, not physical mouth-to-ear latency.", "Latency model assumes RTT/2 and the sender frame duration. Device buffering may overlap; codec and physical delays are unverified. Not an end-to-end measurement.", "Processing percentiles cover the most recent 256 frames. Sequence duplicate window is bounded." };
     private readonly ICallEngine engine = new WebRtcCallEngine();
     private readonly TextBox server = new() { Text = "https://qlrpal.ddns.net/", Dock = DockStyle.Fill };
     private readonly TextBox room = new() { Text = "test", Dock = DockStyle.Fill };
     private readonly TextBox nickname = new() { Text = Environment.UserName, Dock = DockStyle.Fill };
     private readonly CheckBox lowLatencyMode = new() { Text = "공유 저지연 우선 (검증)", AutoSize = true, Checked = true };
     private readonly ComboBox opusProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 255 };
+    private readonly CheckBox rtpMode = new() { Text = "RTP 순서 재생·손실 보정 (검증)", AutoSize = true, Checked = true };
+    private readonly CheckBox adaptiveMode = new() { Text = "지터 적응 20~40ms", AutoSize = true };
+    private readonly ComboBox playbackPolicy = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
     private readonly Button join = new() { Text = "통화 참가", AutoSize = true };
     private readonly Button leave = new() { Text = "나가기", AutoSize = true, Enabled = false };
     private readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill };
@@ -38,7 +41,7 @@ public sealed class CallForm : Form
         fields.Controls.Add(new Label { Text = "연결 서버", AutoSize = true }, 0, 0); fields.Controls.Add(server, 1, 0);
         fields.Controls.Add(new Label { Text = "방 이름", AutoSize = true }, 0, 1); fields.Controls.Add(room, 1, 1);
         fields.Controls.Add(new Label { Text = "닉네임", AutoSize = true }, 0, 2); fields.Controls.Add(nickname, 1, 2); layout.Controls.Add(fields, 0, 0);
-        var controls = new FlowLayoutPanel { Dock = DockStyle.Fill };
+        var controls = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
         opusProfile.Items.AddRange(Enum.GetValues<OpusProfile>().Select(p => (object)OpusAudioEncoder.Label(p)).ToArray());
         opusProfile.SelectedIndex = 0;
         opusProfile.SelectedIndexChanged += (_, _) =>
@@ -52,6 +55,23 @@ public sealed class CallForm : Form
         controls.Controls.Add(opusProfile);
         restartOutput.Click += async (_, _) => { restartOutput.Enabled = false; try { await engine.RestartOutputAsync(); } catch (Exception ex) { AppendLog("출력 재시작 오류: " + ex.Message); } finally { if (!IsDisposed) restartOutput.Enabled = true; } };
         controls.Controls.Add(lowLatencyMode);
+        controls.Controls.Add(rtpMode);
+        playbackPolicy.Items.AddRange(["재생: 저지연 우선", "재생: 기존 방식"]);
+        playbackPolicy.SelectedIndex = 0;
+        engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
+        controls.Controls.Add(playbackPolicy);
+        playbackPolicy.SelectedIndexChanged += (_, _) =>
+        {
+            try
+            {
+                engine.SetPlayoutPolicy(playbackPolicy.SelectedIndex == 0 ? PlayoutPolicy.LowLatency : PlayoutPolicy.Compatible);
+                if (playbackPolicy.SelectedIndex == 0) adaptiveMode.Checked = false;
+            }
+            catch (Exception ex) { AppendLog(ex.Message); }
+        };
+        controls.Controls.Add(adaptiveMode);
+        adaptiveMode.CheckedChanged += (_, _) => { try { engine.SetAdaptivePlayoutPreference(adaptiveMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
+        rtpMode.CheckedChanged += (_, _) => { try { engine.SetRtpPlayoutPreference(rtpMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
         lowLatencyMode.CheckedChanged += (_, _) => { try { engine.SetLowLatencyPreference(lowLatencyMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
         var outputLatency = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 165 };
         outputLatency.Items.AddRange(["일반·복귀 출력 40ms", "일반·복귀 출력 20ms"]);
@@ -114,7 +134,7 @@ public sealed class CallForm : Form
         routeCheck.Click += async (_, _) => { routeCheck.Enabled = false; try { await NetworkProbe.RunAsync(peerAddress.Text.Trim(), AppendLog, diagnosticsCancellation.Token); } catch (Exception ex) { if (!closeRequested) AppendLog("경로 검사 오류: " + ex.Message); } finally { if (!IsDisposed && !closeRequested) routeCheck.Enabled = true; } };
         join.Click += async (_, _) =>
         {
-            join.Enabled = lowLatencyMode.Enabled = opusProfile.Enabled = false;
+            join.Enabled = lowLatencyMode.Enabled = opusProfile.Enabled = rtpMode.Enabled = adaptiveMode.Enabled = playbackPolicy.Enabled = false;
             try { var address = new Uri(server.Text.Trim().TrimEnd('/') + "/"); if (address.Scheme is not ("http" or "https")) throw new InvalidOperationException("HTTP 또는 HTTPS 주소를 입력하세요."); joinOperation = engine.JoinAsync(address, room.Text.Trim(), nickname.Text.Trim()); await joinOperation; if (!closeRequested) leave.Enabled = true; }
             catch (Exception ex) { AppendLog(ex.Message); if (!closeRequested) join.Enabled = true; }
         };
@@ -151,8 +171,11 @@ public sealed class CallForm : Form
         try
         {
             var snapshot = engine.GetDiagnostics();
-            lowLatencyMode.Enabled = opusProfile.Enabled = !snapshot.InCall && join.Enabled; history.Enqueue(snapshot); if (history.Count > 1200) history.Dequeue();
+            lowLatencyMode.Enabled = opusProfile.Enabled = rtpMode.Enabled = !snapshot.InCall && join.Enabled; history.Enqueue(snapshot); if (history.Count > 1200) history.Dequeue();
+            playbackPolicy.Enabled = !snapshot.InCall && join.Enabled && rtpMode.Checked;
+            adaptiveMode.Enabled = !snapshot.InCall && join.Enabled && rtpMode.Checked && playbackPolicy.SelectedIndex == 1;
             var text = new StringBuilder(); text.AppendLine(CultureInfo.CurrentCulture, $"{snapshot.Timestamp:HH:mm:ss} · {(snapshot.InCall ? "방 참가 중" : "대기")} · Opus 48kHz / 모노 / {snapshot.FrameMs}ms 프레임");
+            text.AppendLine(snapshot.PlaybackPolicy == "LowLatency" ? "재생 정책: 저지연 우선" : "재생 정책: 기존 방식");
             if (snapshot.Encoder is { } codec)
                 text.AppendLine(CultureInfo.CurrentCulture, $"송신 코덱 {codec.Profile} · {codec.Application} · 목표 {codec.TargetBitrate?.ToString(CultureInfo.CurrentCulture) ?? "기존 기본값"} bps · 코덱 선행 대기 {Number(codec.LookaheadMs, " ms")} · {codec.Backend}");
             text.AppendLine(CultureInfo.CurrentCulture, $"마이크 RMS {Number(snapshot.Microphone?.LevelDbFs, " dBFS")} · 평균 인코딩 {Number(snapshot.Microphone?.ProcessingMs, " ms")}");
@@ -176,6 +199,14 @@ public sealed class CallForm : Form
                 text.AppendLine(CultureInfo.CurrentCulture, $"수신 보고 경과 {Number(precision?.ReceiveReportAgeSeconds, " 초")} · 상대 수신 지터 {Number(precision?.RemoteJitterMs, " ms")} · 마지막 수신 {Number(precision?.LastPacketAgeSeconds, " 초 전")} · 순서 뒤바뀜 {precision?.ReorderedPackets} / 중복 {precision?.DuplicatePackets}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"최근 패킷 도착 간격 P95/최대 {Number(precision?.ArrivalGapP95Ms)}/{Number(precision?.ArrivalGapMaxMs, " ms")} · 송신 프레임 {snapshot.FrameMs}ms · 수신은 상대 설정에 따름");
                 text.AppendLine(CultureInfo.CurrentCulture, $"재생 큐 {Number(peer.Audio.QueueMs, " ms")} · 초과 큐 정리 {peer.Audio.QueueResets}회 · 버퍼 부족 {peer.Audio.Underruns}회");
+                if (peer.Audio.RtpPlayout is { } rtp)
+                {
+                    text.AppendLine(CultureInfo.CurrentCulture, $"RTP 재생 · 목표 여유 {rtp.TargetReserveMs}ms · 대기 {rtp.BufferedPackets}패킷 · PLC {rtp.PlcFrames}회 / {rtp.ConcealedMs:F1}ms");
+                    text.AppendLine(CultureInfo.CurrentCulture, $"적응 여유 {(rtp.AdaptiveReserve ? "켜짐" : "꺼짐")} · 도착 간격 초과 P95 {Number(rtp.ArrivalJitterP95Ms, " ms")} · PLC 중 대기 삽입 {rtp.HeldMs:F1}ms · 최대 연속 PLC {rtp.MaxConsecutivePlcMs:F1}ms");
+                    text.AppendLine(CultureInfo.CurrentCulture, $"소비율 보정 {rtp.RateCorrectionPpm:+0;-0;0}ppm · 출력 요청 P95/최대 {Number(rtp.ReadRequestP95Ms, " ms")}/{Number(rtp.ReadRequestMaxMs, " ms")} · 읽기 직후 큐 {Number(rtp.QueueAfterReadMs, " ms")}");
+                    text.AppendLine(CultureInfo.CurrentCulture, $"지연 도착 {rtp.LatePackets} · 중복 {rtp.DuplicatePackets} · 잘못된 패킷 {rtp.InvalidPackets} · 재동기화 {rtp.Resyncs} · 재버퍼링 {rtp.Rebuffers}");
+                    if (rtp.RecoveryDiscardedPackets > 0) text.AppendLine(CultureInfo.CurrentCulture, $"지연 회복을 위해 생략한 음성 {rtp.RecoveryDiscardedMs:F1}ms / {rtp.RecoveryDiscardedPackets}패킷");
+                }
                 text.AppendLine(CultureInfo.CurrentCulture, $"부족으로 채운 무음 합계 {Number(peer.Audio.UnderfillMs, " ms")} · 가장 긴 연속 부족 {Number(peer.Audio.MaxUnderfillMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"디코딩 {peer.Audio.DecodedFrames}프레임 / {Number(peer.Audio.DecodedMs, " ms")} · 출력 RMS {Number(peer.Audio.LevelDbFs, " dBFS")} · 평균 디코딩 {Number(peer.Audio.ProcessingMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"WASAPI 공유/이벤트 재생 · 큐 소비 {Number(peer.Audio.ConsumedMs, " ms")} · 장치 요청 {Number(peer.Audio.RequestedMs, " ms")}");
@@ -189,7 +220,7 @@ public sealed class CallForm : Form
                     if (seconds > 0)
                     {
                         var rate = (peer.Audio.ConsumedMs - before.Peer.Audio.ConsumedMs) / seconds;
-                        text.AppendLine(CultureInfo.CurrentCulture, $"구간 재생 소비 {Number(rate, " ms/s")} · 프레임 정상 속도 기준 약 1000ms/s");
+                        text.AppendLine(CultureInfo.CurrentCulture, $"구간 재생 소비 {Number(rate, " ms/s")} · 기준 약 1000ms/s · 소비율 보정 중 달라질 수 있음");
                     }
                     var trims = peer.Audio.QueueResets - before.Peer.Audio.QueueResets;
                     var underruns = peer.Audio.Underruns - before.Peer.Audio.Underruns;

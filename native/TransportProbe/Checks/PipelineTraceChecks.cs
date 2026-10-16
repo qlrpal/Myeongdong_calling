@@ -1,0 +1,42 @@
+using VoiceNative;
+using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
+
+internal static class PipelineTraceChecks
+{
+    public static void Run()
+    {
+        var limited = new PipelineTrace(2); limited.Start(5);
+        for (var i = 0; i < 3; i++) limited.Sent(new(1, (uint)i, i, 1, 2, 3, 4, null));
+        var bounded = limited.Snapshot();
+        if (bounded.Sends.Length != 2 || bounded.Sends[0].Timestamp != 1 || bounded.EvictedRecords != 1)
+            throw new InvalidOperationException("Pipeline trace must expose eviction and retain bounded metadata.");
+        limited.Stop(); limited.Sent(new(1, 99, 99, 1, 2, 3, 4, null));
+        if (limited.Snapshot().Sends.Length != 2) throw new InvalidOperationException("Stopped trace accepted records.");
+        limited.Start(5);
+        if (limited.Snapshot().Sends.Length != 0 || limited.Snapshot().EvictedRecords != 0) throw new InvalidOperationException("Trace restart retained previous session.");
+        using var encoder = new AudioEncoder(includeOpus: true);
+        var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
+        var payloads = Enumerable.Range(0, 3).Select(frame => encoder.EncodeAudio(
+            Enumerable.Range(0, 480).Select(i => (short)(3000 * Math.Sin((frame * 480 + i) * 2 * Math.PI * 440 / 48000))).ToArray(), format)).ToArray();
+        var trace = new PipelineTrace(); trace.Start(10);
+        using var recorded = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false, pipeline: trace, tracePeer: "test");
+        using var plain = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false);
+        for (var i = 0; i < 3; i++) { recorded.Add(7, 1000 + (uint)i * 480, payloads[i]); plain.Add(7, 1000 + (uint)i * 480, payloads[i]); }
+        recorded.Add(7, 1480, payloads[1]);
+        var left = new byte[960]; var right = new byte[960];
+        for (var i = 0; i < 3; i++)
+        {
+            recorded.Read(left); plain.Read(right);
+            if (!left.SequenceEqual(right)) throw new InvalidOperationException("Tracing changed PCM output.");
+        }
+        recorded.Add(7, 1000, payloads[0]); trace.Stop(); var snapshot = trace.Snapshot();
+        if (snapshot.Admissions.Count(a => a.Outcome == "queued") != 3 || snapshot.Admissions.Count(a => a.Outcome == "duplicate") != 1
+            || snapshot.Admissions.Count(a => a.Outcome == "late") != 1 || snapshot.Playout.Count(p => p.Outcome == "played") != 3)
+            throw new InvalidOperationException("Trace confused admission, duplicates, late drops and actual playout.");
+        if (snapshot.Reads.Length != 3 || snapshot.Reads.Any(r => r.ProvidedSamples != 480 || r.ReturnedAt < r.LockAt || r.LockAt < r.CalledAt)
+            || snapshot.Playout.Any(p => p.DecodeStart > p.DecodeEnd || p.DecodeEnd > p.SubmittedAt))
+            throw new InvalidOperationException("Trace stage chronology or render sample count failed.");
+        Console.WriteLine("PASS: bounded opt-in metadata, stop/reset, packet identity/outcome, timing order and unchanged PCM output.");
+    }
+}

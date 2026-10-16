@@ -10,6 +10,9 @@ public interface ICallEngine : IAsyncDisposable
     Task SetOutputLatencyAsync(int milliseconds);
     void SetLowLatencyPreference(bool enabled);
     void SetOpusProfile(OpusProfile profile);
+    void SetRtpPlayoutPreference(bool enabled);
+    void SetAdaptivePlayoutPreference(bool enabled);
+    void SetPlayoutPolicy(PlayoutPolicy policy);
     Task MeasureAcousticLatencyAsync();
     Task MeasureLoopbackLatencyAsync();
 }
