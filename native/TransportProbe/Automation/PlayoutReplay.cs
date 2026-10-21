@@ -7,7 +7,7 @@ namespace VoiceNative;
 internal static class PlayoutReplay
 {
     private sealed record Event(double At, int Index, bool Read);
-    private sealed record Mode(string Name, bool Fixed, bool Adaptive, bool TransientHold = false, bool FreshRestart = false);
+    private sealed record Mode(string Name, bool Fixed, bool Adaptive, bool TransientHold = false, bool FreshRestart = false, bool FreshInitialStart = false, int ReserveMs = 20, bool Responsive = false, int RecoveryReserveMs = 0, bool Contiguous = false, bool Repeated = false);
     private sealed record Point(double At, double QueueMs, long Plc, long Late, long Rebuffers, double UnderfillMs);
     private static object Summary(IEnumerable<double> values)
     {
@@ -16,7 +16,7 @@ internal static class PlayoutReplay
         return new { count = sorted.Length, p50 = At(.5), p95 = At(.95), p99 = At(.99), max = At(1) };
     }
 
-    public static void Run(string input, string output)
+    public static void Run(string input, string output, bool compareReserve = false, bool compareRecovery = false, bool compareRestart = false, bool comparePressure = false)
     {
         if (string.Equals(Path.GetFullPath(input), Path.GetFullPath(output), StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Replay output must not overwrite its input.");
@@ -47,11 +47,22 @@ internal static class PlayoutReplay
         var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
         var payload = encoder.EncodeAudio(new short[480], format);
         var results = new List<object>();
-        foreach (var mode in new Mode[] { new("learned-fixed-reserve", false, false), new("fixed-target", true, false), new("fixed-target-adaptive-reserve", true, true), new("fixed-target-transient-hold", true, false, true), new("fixed-target-hold-fresh-restart", true, false, true, true) })
+        Mode[] modes = comparePressure
+            ? [new("responsive", true, false, true, true, ReserveMs: 15, Responsive: true), new("pressure-restart10", true, false, true, true, ReserveMs: 15, Responsive: true, RecoveryReserveMs: 10, Repeated: true), new("pressure-restart10-tail", true, false, true, true, ReserveMs: 15, Responsive: true, RecoveryReserveMs: 10, Repeated: true, Contiguous: true)]
+            : compareRestart
+            ? [new("current20", true, false, true, true), new("restart10", true, false, true, true, RecoveryReserveMs: 10), new("restart15", true, false, true, true, RecoveryReserveMs: 15),
+               new("responsive", true, false, true, true, ReserveMs: 15, Responsive: true), new("responsive-restart10", true, false, true, true, ReserveMs: 15, Responsive: true, RecoveryReserveMs: 10), new("responsive-restart15", true, false, true, true, ReserveMs: 15, Responsive: true, RecoveryReserveMs: 15),
+               new("responsive-restart10-tail", true, false, true, true, ReserveMs: 15, Responsive: true, RecoveryReserveMs: 10, Contiguous: true)]
+            : compareRecovery
+            ? [new("current20", true, false, true, true), new("responsive15-30", true, false, true, true, ReserveMs: 15, Responsive: true)]
+            : compareReserve
+            ? [new("reserve20", true, false, true, true), new("reserve10", true, false, true, true, ReserveMs: 10)]
+            : [new("learned-fixed-reserve", false, false), new("fixed-target", true, false), new("fixed-target-adaptive-reserve", true, true), new("fixed-target-transient-hold", true, false, true), new("fixed-target-hold-fresh-restart", true, false, true, true), new("fixed-target-hold-fresh-initial", true, false, true, true, true)];
+        foreach (var mode in modes)
         {
             var recorder = new PipelineTrace(); recorder.Start(180);
-            using var buffer = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: mode.Adaptive, pipeline: recorder,
-                tracePeer: "replay", fixedReserveClockTarget: mode.Fixed, transientEmptyQueueHold: mode.TransientHold, freshRestart: mode.FreshRestart);
+            using var buffer = new RtpOpusPlayoutBuffer(new(), targetReserveMs: mode.ReserveMs, adaptiveReserve: mode.Adaptive, pipeline: recorder,
+                tracePeer: "replay", fixedReserveClockTarget: mode.Fixed, transientEmptyQueueHold: mode.TransientHold, freshRestart: mode.FreshRestart, freshInitialStart: mode.FreshInitialStart, responsiveReserve: mode.Responsive, recoveryReserveMs: mode.RecoveryReserveMs, contiguousRestart: mode.Contiguous, boundedRestartWait: mode.Contiguous, repeatedGapRecovery: mode.Repeated);
             var points = new List<Point>(); var readTimes = new List<double>();
             var arrivals = new Dictionary<(uint, uint), double>();
             var destination = new byte[11520];
@@ -95,8 +106,16 @@ internal static class PlayoutReplay
                     plcMs = (last.Plc - first.Plc) * 10, latePackets = last.Late - first.Late,
                     rebuffers = last.Rebuffers - first.Rebuffers, underfillMs = last.UnderfillMs - first.UnderfillMs });
             }
+            var startupPoints = points.Where(p => p.At < events[0].At + 5).ToArray();
+            var startupMetrics = new {
+                queueAfterReadMs = Summary(startupPoints.Select(p => p.QueueMs)),
+                admissionToDecodeRenderMs = Summary(delays.Where(p => p.Arrived < events[0].At + 5).Select(p => p.Delay)),
+                underfillMs = startupPoints.LastOrDefault()?.UnderfillMs,
+                plcMs = (startupPoints.LastOrDefault()?.Plc ?? 0) * 10,
+                rebuffers = startupPoints.LastOrDefault()?.Rebuffers ?? 0
+            };
             var final = buffer.Snapshot();
-            results.Add(new { mode.Name, windows, final = buffer.Details(),
+            results.Add(new { mode.Name, mode.ReserveMs, mode.RecoveryReserveMs, startup = startupMetrics, windows, final = buffer.Details(),
                 final.Trims, final.Underruns, final.UnderfillMs });
             Console.WriteLine($"Replay {mode.Name}: PLC={buffer.Details().ConcealedMs:F0}ms late={buffer.Details().LatePackets} rebuffer={buffer.Details().Rebuffers}");
         }

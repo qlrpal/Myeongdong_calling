@@ -6,7 +6,7 @@ using System.Net.NetworkInformation;
 
 namespace VoiceNative;
 
-public sealed class CallForm : Form
+public sealed partial class CallForm : Form
 {
     private static readonly string[] ReportNotes = new[] { "Payload bitrate excludes network headers.", "ICMP/RTCP RTT is not end-to-end audio latency.", "Remote loss is outbound; local RTCP loss is inbound. Both are last report interval; inspect age.", "Queue is application compressed RTP plus remaining decoded PCM in RTP mode, or PCM in legacy mode; excludes device buffering. PLC duration is separate from decoded duration and zero-fill underflow.", "Device API latency is an implementation estimate, not physical mouth-to-ear latency.", "Latency model assumes RTT/2 and the sender frame duration. Device buffering may overlap; codec and physical delays are unverified. Not an end-to-end measurement.", "Processing percentiles cover the most recent 256 frames. Sequence duplicate window is bounded." };
     private readonly ICallEngine engine = new WebRtcCallEngine();
@@ -18,6 +18,9 @@ public sealed class CallForm : Form
     private readonly CheckBox rtpMode = new() { Text = "RTP 순서 재생·손실 보정 (검증)", AutoSize = true, Checked = true };
     private readonly CheckBox adaptiveMode = new() { Text = "지터 적응 20~40ms", AutoSize = true };
     private readonly ComboBox playbackPolicy = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
+    private readonly CheckBox shortCapture = new() { Text = "짧은 공유 입력 주기 우선", AutoSize = true, Checked = true };
+    private readonly ComboBox mediaInterface = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 270 };
+    private readonly CheckBox rawOutput = new() { Text = "통화 출력 효과 우회 우선", Checked = true, AutoSize = true };
     private readonly Button join = new() { Text = "통화 참가", AutoSize = true };
     private readonly Button leave = new() { Text = "나가기", AutoSize = true, Enabled = false };
     private readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill };
@@ -30,9 +33,10 @@ public sealed class CallForm : Form
     private Task? joinOperation, leaveOperation, localMeasurement;
     private readonly List<LocalLatencyTrial> localTrials = new();
     private readonly Dictionary<string, (double At, PeerDiagnostics Peer)> previousDiagnostics = new();
-    public CallForm()
+    public CallForm() : this(null) { }
+    public CallForm(string? initialMediaAddress)
     {
-        Text = "명동 콜링 · 통화 진단"; ClientSize = new Size(840, 760); MinimumSize = new Size(650, 650); Font = new Font("맑은 고딕", 10);
+        Text = "명동 콜링"; ClientSize = new Size(900, 780); MinimumSize = new Size(740, 680); Font = new Font("맑은 고딕", 10);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 6 };
         foreach (var size in new[] { 112, 150, 75 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, size));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
@@ -43,7 +47,7 @@ public sealed class CallForm : Form
         fields.Controls.Add(new Label { Text = "닉네임", AutoSize = true }, 0, 2); fields.Controls.Add(nickname, 1, 2); layout.Controls.Add(fields, 0, 0);
         var controls = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
         opusProfile.Items.AddRange(Enum.GetValues<OpusProfile>().Select(p => (object)OpusAudioEncoder.Label(p)).ToArray());
-        opusProfile.SelectedIndex = 0;
+        opusProfile.SelectedIndex = (int)OpusAudioEncoder.DefaultProfile;
         opusProfile.SelectedIndexChanged += (_, _) =>
         {
             try { engine.SetOpusProfile((OpusProfile)opusProfile.SelectedIndex); }
@@ -55,8 +59,29 @@ public sealed class CallForm : Form
         controls.Controls.Add(opusProfile);
         restartOutput.Click += async (_, _) => { restartOutput.Enabled = false; try { await engine.RestartOutputAsync(); } catch (Exception ex) { AppendLog("출력 재시작 오류: " + ex.Message); } finally { if (!IsDisposed) restartOutput.Enabled = true; } };
         controls.Controls.Add(lowLatencyMode);
+        controls.Controls.Add(shortCapture);
+        rawOutput.CheckedChanged += (_, _) =>
+        {
+            try { engine.SetRawOutputPreference(rawOutput.Checked); }
+            catch (Exception ex) { AppendLog(ex.Message); }
+        };
+        controls.Controls.Add(rawOutput);
+        mediaInterface.Items.AddRange(MediaInterfaceSelection.Choices().Cast<object>().ToArray());
+        mediaInterface.SelectedIndex = 0;
+        mediaInterface.SelectedIndexChanged += (_, _) =>
+        {
+            try { engine.SetMediaInterface((mediaInterface.SelectedItem as MediaInterfaceChoice)?.Address); }
+            catch (Exception ex) { AppendLog(ex.Message); }
+        };
+        controls.Controls.Add(mediaInterface);
+        if (initialMediaAddress is not null)
+        {
+            var selected = MediaInterfaceSelection.Resolve(initialMediaAddress)!;
+            mediaInterface.SelectedItem = mediaInterface.Items.Cast<MediaInterfaceChoice>().First(c => c.Address == selected.Address);
+        }
+        shortCapture.CheckedChanged += (_, _) => { try { engine.SetShortCapturePreference(shortCapture.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
         controls.Controls.Add(rtpMode);
-        playbackPolicy.Items.AddRange(["재생: 저지연 우선", "재생: 기존 방식"]);
+        playbackPolicy.Items.AddRange(["재생: 저지연 우선", "재생: 기존 방식", "재생: 자동 저지연 (시험)"]);
         playbackPolicy.SelectedIndex = 0;
         engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
         controls.Controls.Add(playbackPolicy);
@@ -64,8 +89,13 @@ public sealed class CallForm : Form
         {
             try
             {
-                engine.SetPlayoutPolicy(playbackPolicy.SelectedIndex == 0 ? PlayoutPolicy.LowLatency : PlayoutPolicy.Compatible);
-                if (playbackPolicy.SelectedIndex == 0) adaptiveMode.Checked = false;
+                engine.SetPlayoutPolicy(playbackPolicy.SelectedIndex switch
+                {
+                    0 => PlayoutPolicy.LowLatency,
+                    2 => PlayoutPolicy.ResponsiveLowLatency,
+                    _ => PlayoutPolicy.Compatible
+                });
+                if (playbackPolicy.SelectedIndex != 1) adaptiveMode.Checked = false;
             }
             catch (Exception ex) { AppendLog(ex.Message); }
         };
@@ -108,7 +138,7 @@ public sealed class CallForm : Form
         controls.Controls.Add(local);
         local.Click += async (_, _) =>
         {
-            if (engine.GetDiagnostics().InCall || joinOperation is { IsCompleted: false })
+            if (engine.GetDiagnostics().InCall || callSession?.WantsCall == true || callSession?.IsBusy == true || joinOperation is { IsCompleted: false })
             { AppendLog("로컬 기준 측정은 통화에서 나간 뒤 실행하세요."); return; }
             local.Enabled = join.Enabled = false;
             try
@@ -134,11 +164,9 @@ public sealed class CallForm : Form
         routeCheck.Click += async (_, _) => { routeCheck.Enabled = false; try { await NetworkProbe.RunAsync(peerAddress.Text.Trim(), AppendLog, diagnosticsCancellation.Token); } catch (Exception ex) { if (!closeRequested) AppendLog("경로 검사 오류: " + ex.Message); } finally { if (!IsDisposed && !closeRequested) routeCheck.Enabled = true; } };
         join.Click += async (_, _) =>
         {
-            join.Enabled = lowLatencyMode.Enabled = opusProfile.Enabled = rtpMode.Enabled = adaptiveMode.Enabled = playbackPolicy.Enabled = false;
-            try { var address = new Uri(server.Text.Trim().TrimEnd('/') + "/"); if (address.Scheme is not ("http" or "https")) throw new InvalidOperationException("HTTP 또는 HTTPS 주소를 입력하세요."); joinOperation = engine.JoinAsync(address, room.Text.Trim(), nickname.Text.Trim()); await joinOperation; if (!closeRequested) leave.Enabled = true; }
-            catch (Exception ex) { AppendLog(ex.Message); if (!closeRequested) join.Enabled = true; }
+            joinOperation = ConnectFromUiAsync(); await joinOperation;
         };
-        leave.Click += async (_, _) => { leave.Enabled = false; leaveOperation = engine.LeaveAsync(); try { await leaveOperation; } catch (Exception ex) { AppendLog("종료 오류: " + ex.Message); } if (!closeRequested) join.Enabled = true; };
+        leave.Click += async (_, _) => { leaveOperation = DisconnectFromUiAsync(); await leaveOperation; };
         copy.Click += (_, _) => { try { Clipboard.SetText(ReportJson()); AppendLog("진단 보고서 복사 완료"); } catch (Exception ex) { AppendLog("복사 실패: " + ex.Message); } };
         save.Click += async (_, _) =>
         {
@@ -147,20 +175,23 @@ public sealed class CallForm : Form
             var report = ReportJson(); try { await File.WriteAllTextAsync(dialog.FileName, report, Encoding.UTF8); AppendLog("진단 저장 완료: " + dialog.FileName); } catch (Exception ex) { AppendLog("저장 실패: " + ex.Message); }
         };
         timer.Tick += (_, _) => RefreshStats(); timer.Start();
-        Shown += (_, _) => { AppendLog("진단 보고서에는 IP·닉네임이 포함됩니다. 음성과 세션 토큰은 저장하지 않습니다."); RefreshStats(); };
+        Shown += (_, _) => { AppendLog("진단과 로컬 로그에는 IP·닉네임이 포함됩니다. 음성과 세션 토큰은 저장하지 않습니다."); RefreshStats(); };
         FormClosing += async (_, args) =>
         {
             if (closing) return; args.Cancel = true; if (closeRequested) return;
             closeRequested = true; timer.Stop(); diagnosticsCancellation.Cancel(); join.Enabled = leave.Enabled = false;
-            try { if (localMeasurement is not null) { try { await localMeasurement; } catch { } } if (joinOperation is not null) { try { await joinOperation; } catch { } } if (leaveOperation is not null) { try { await leaveOperation; } catch { } } await engine.DisposeAsync(); }
+            try { SaveUserSettings(); if (callSession is not null) await callSession.DisposeAsync(); if (localMeasurement is not null) { try { await localMeasurement; } catch { } } if (joinOperation is not null) { try { await joinOperation; } catch { } } if (leaveOperation is not null) { try { await leaveOperation; } catch { } } await engine.DisposeAsync(); }
+            catch (Exception ex) { AppLog.Write("종료 오류: " + ex.Message); }
             finally { timer.Dispose(); closing = true; Close(); }
         };
+        BuildProductView(layout, fields);
     }
     private void AppendLog(string message)
     {
         if (IsDisposed || closeRequested || !IsHandleCreated) return;
         if (InvokeRequired) { try { BeginInvoke(() => AppendLog(message)); } catch (InvalidOperationException) { } return; }
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}"; logLines.Enqueue(line);
+        AppLog.Write(message);
         if (logLines.Count > 2000) { logLines.Dequeue(); log.Lines = logLines.ToArray(); } else log.AppendText(line + Environment.NewLine);
         if (message.StartsWith("통화 종료", StringComparison.Ordinal)) { join.Enabled = true; leave.Enabled = false; }
     }
@@ -171,15 +202,25 @@ public sealed class CallForm : Form
         try
         {
             var snapshot = engine.GetDiagnostics();
+            UpdateProductView(snapshot);
             lowLatencyMode.Enabled = opusProfile.Enabled = rtpMode.Enabled = !snapshot.InCall && join.Enabled; history.Enqueue(snapshot); if (history.Count > 1200) history.Dequeue();
             playbackPolicy.Enabled = !snapshot.InCall && join.Enabled && rtpMode.Checked;
+            shortCapture.Enabled = !snapshot.InCall && join.Enabled && lowLatencyMode.Checked;
+            rawOutput.Enabled = !snapshot.InCall && join.Enabled && lowLatencyMode.Checked;
+            mediaInterface.Enabled = !snapshot.InCall && join.Enabled;
             adaptiveMode.Enabled = !snapshot.InCall && join.Enabled && rtpMode.Checked && playbackPolicy.SelectedIndex == 1;
             var text = new StringBuilder(); text.AppendLine(CultureInfo.CurrentCulture, $"{snapshot.Timestamp:HH:mm:ss} · {(snapshot.InCall ? "방 참가 중" : "대기")} · Opus 48kHz / 모노 / {snapshot.FrameMs}ms 프레임");
-            text.AppendLine(snapshot.PlaybackPolicy == "LowLatency" ? "재생 정책: 저지연 우선" : "재생 정책: 기존 방식");
+            text.AppendLine(snapshot.PlaybackPolicy switch
+            {
+                "ResponsiveLowLatency" => "재생 정책: 자동 저지연 (시험)",
+                "LowLatency" => "재생 정책: 저지연 우선",
+                _ => "재생 정책: 기존 방식"
+            });
             if (snapshot.Encoder is { } codec)
                 text.AppendLine(CultureInfo.CurrentCulture, $"송신 코덱 {codec.Profile} · {codec.Application} · 목표 {codec.TargetBitrate?.ToString(CultureInfo.CurrentCulture) ?? "기존 기본값"} bps · 코덱 선행 대기 {Number(codec.LookaheadMs, " ms")} · {codec.Backend}");
             text.AppendLine(CultureInfo.CurrentCulture, $"마이크 RMS {Number(snapshot.Microphone?.LevelDbFs, " dBFS")} · 평균 인코딩 {Number(snapshot.Microphone?.ProcessingMs, " ms")}");
             text.AppendLine(CultureInfo.CurrentCulture, $"입력 API 지연(참고) {Number(snapshot.Microphone?.DeviceLatencyMs, " ms")} · 인코딩 최근 P95/최대 {Number(snapshot.Microphone?.ProcessingP95Ms)}/{Number(snapshot.Microphone?.ProcessingMaxMs, " ms")} · 마지막 입력 {Number(snapshot.Microphone?.LastFrameAgeMs, " ms 전")}");
+            text.AppendLine(CultureInfo.CurrentCulture, $"미디어 네트워크: {snapshot.MediaAddress ?? "OS 자동 (VPN 경로 유지)"}");
             text.AppendLine(CultureInfo.CurrentCulture, $"WASAPI 입력 · 입력 콜백 간격 P95/최대 {Number(snapshot.Microphone?.CaptureGapP95Ms)}/{Number(snapshot.Microphone?.CaptureGapMaxMs, " ms")}");
             text.AppendLine(CultureInfo.CurrentCulture, $"입력 콜백 전체 처리 P95/최대 {Number(snapshot.Microphone?.CaptureWorkP95Ms)}/{Number(snapshot.Microphone?.CaptureWorkMaxMs, " ms")} · 입력 불연속 {snapshot.Microphone?.CaptureDiscontinuities} / 타임스탬프 오류 {snapshot.Microphone?.CaptureTimestampErrors}");
             text.AppendLine(CultureInfo.CurrentCulture, $"송신 대기 {snapshot.Sender?.PendingFrames ?? 0}프레임 · 초과 프레임 버림 {snapshot.Sender?.DroppedFrames ?? 0} · 최대 송신 대기 {Number(snapshot.Sender?.MaxWaitMs, " ms")}");
@@ -206,12 +247,15 @@ public sealed class CallForm : Form
                     text.AppendLine(CultureInfo.CurrentCulture, $"소비율 보정 {rtp.RateCorrectionPpm:+0;-0;0}ppm · 출력 요청 P95/최대 {Number(rtp.ReadRequestP95Ms, " ms")}/{Number(rtp.ReadRequestMaxMs, " ms")} · 읽기 직후 큐 {Number(rtp.QueueAfterReadMs, " ms")}");
                     text.AppendLine(CultureInfo.CurrentCulture, $"지연 도착 {rtp.LatePackets} · 중복 {rtp.DuplicatePackets} · 잘못된 패킷 {rtp.InvalidPackets} · 재동기화 {rtp.Resyncs} · 재버퍼링 {rtp.Rebuffers}");
                     if (rtp.RecoveryDiscardedPackets > 0) text.AppendLine(CultureInfo.CurrentCulture, $"지연 회복을 위해 생략한 음성 {rtp.RecoveryDiscardedMs:F1}ms / {rtp.RecoveryDiscardedPackets}패킷");
+                    if (rtp.RecoveryReserveMs is { } recoveryReserve) text.AppendLine(CultureInfo.CurrentCulture, $"반복 공백 빠른 재시작 {rtp.ShortReserveRestarts}회 · 재개 여유 {recoveryReserve}ms (정상 목표와 별도)");
                 }
                 text.AppendLine(CultureInfo.CurrentCulture, $"부족으로 채운 무음 합계 {Number(peer.Audio.UnderfillMs, " ms")} · 가장 긴 연속 부족 {Number(peer.Audio.MaxUnderfillMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"디코딩 {peer.Audio.DecodedFrames}프레임 / {Number(peer.Audio.DecodedMs, " ms")} · 출력 RMS {Number(peer.Audio.LevelDbFs, " dBFS")} · 평균 디코딩 {Number(peer.Audio.ProcessingMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"WASAPI 공유/이벤트 재생 · 큐 소비 {Number(peer.Audio.ConsumedMs, " ms")} · 장치 요청 {Number(peer.Audio.RequestedMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"출력 장치: {peer.Audio.Device} · {peer.Audio.DeviceFormat}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"출력 상태 {peer.Audio.PlaybackState} · 재시작 {peer.Audio.DeviceRestarts}회 · 오류 {peer.Audio.DeviceError ?? "없음"}");
+                if (peer.Audio.Render is { } render)
+                    text.AppendLine(CultureInfo.CurrentCulture, $"출력 버퍼 · 제한 공급 {render.BoundedActive} · 목표 {Number(render.TargetPaddingMs, " ms")} / 용량 {Number(render.CapacityMs, " ms")} · 장치 버퍼 소진 관측 {render.EmptyEvents}회 · 안전 복귀 {render.SafetyFallbacks}회 · 출력 효과 우회 {render.RawActive}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"출력 공유 저지연: {peer.Audio.LowLatencyActive} · 주기 {Number(peer.Audio.EnginePeriodMs, " ms")} · 복귀 사유 {peer.Audio.LowLatencyUnavailableReason ?? "없음"}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"출력 요청 {peer.Audio.RequestedOutputMs}ms · 출력 API 지연(참고) {Number(peer.Audio.DeviceLatencyMs, " ms")} · 디코딩 최근 P95/최대 {Number(peer.Audio.ProcessingP95Ms)}/{Number(peer.Audio.ProcessingMaxMs, " ms")}");
                 if (previousDiagnostics.TryGetValue(peer.Id, out var before))
@@ -246,8 +290,10 @@ public sealed class CallForm : Form
         samples = history.ToArray(),
         events = logLines.ToArray()
     }, VoiceNative.DiagnosticJson.Readable);
-    internal void SavePreview(string path)
+    internal void SavePreview(string path, int tab = 0, bool minimum = false)
     {
+        Controls.OfType<TabControl>().Single().SelectedIndex = tab;
+        if (minimum) Size = MinimumSize;
         ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; Location = new Point(-32000, -32000);
         Show(); Application.DoEvents(); RefreshStats(); PerformLayout();
         using var bitmap = new Bitmap(Width, Height);
@@ -256,6 +302,7 @@ public sealed class CallForm : Form
         File.WriteAllText(Path.ChangeExtension(path, ".json"), ReportJson(), Encoding.UTF8);
         Hide();
         timer.Stop(); timer.Dispose(); diagnosticsCancellation.Cancel();
+        callSession?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         engine.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }

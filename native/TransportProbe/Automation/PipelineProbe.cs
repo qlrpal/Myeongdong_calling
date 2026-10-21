@@ -5,14 +5,14 @@ namespace VoiceNative;
 
 internal static class PipelineProbe
 {
-    public static async Task<int> RunAsync(string server, string room, string path, string role, bool measure = true, bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false)
+    public static async Task<int> RunAsync(string server, string room, string path, string role, bool measure = true, bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool intermediateCapture = true, bool boundedRender = false)
     {
         if (role is not ("pc" or "laptop")) throw new ArgumentException("Role must be pc or laptop.");
         const int seconds = 120;
         var samples = new List<CallDiagnostics>(); var measurements = new List<AcousticLatencyResult>();
         var events = new List<string>(); var sync = new object(); var attempts = 0;
         string? error = null;
-        await using var engine = new WebRtcCallEngine { FixedReserveClockTarget = fixedReserveClockTarget, TransientEmptyQueueHold = transientEmptyQueueHold, FreshRestart = freshRestart };
+        await using var engine = new WebRtcCallEngine { FixedReserveClockTarget = fixedReserveClockTarget, TransientEmptyQueueHold = transientEmptyQueueHold, FreshRestart = freshRestart, IntermediateCapture = intermediateCapture, BoundedRender = boundedRender };
         engine.SetAdaptivePlayoutPreference(false);
         engine.Status += message => { lock (sync) events.Add($"[{DateTimeOffset.Now:HH:mm:ss}] {message}"); };
         PipelineTraceSnapshot trace;
@@ -76,6 +76,8 @@ internal static class PipelineProbe
             fixedReserveClockTarget,
             transientEmptyQueueHold,
             freshRestart,
+            intermediateCapture,
+            boundedRender,
             traceIncludesStartup = true,
             traceBeganAt,
             seconds,

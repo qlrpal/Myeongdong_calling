@@ -19,6 +19,7 @@ if ($NoRestore) { $publishArguments += '--no-restore' }
 & dotnet @publishArguments
 if ($LASTEXITCODE -ne 0) { throw 'Native application build failed; previous output retained.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $staging 'README.md')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs/USER-GUIDE.md') -Destination (Join-Path $staging '시작하기.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs') -Destination $staging -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'server/README.md') -Destination (Join-Path $staging 'docs/SERVER.md')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'server/deploy') -Destination (Join-Path $staging 'docs') -Recurse

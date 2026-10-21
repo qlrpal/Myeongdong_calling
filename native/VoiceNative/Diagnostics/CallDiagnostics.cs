@@ -11,12 +11,13 @@ public sealed record AudioDiagnostics(double? QueueMs, long QueueResets, double?
     double? CaptureGapP95Ms = null, double? CaptureGapMaxMs = null,
     double? CaptureWorkP95Ms = null, double? CaptureWorkMaxMs = null,
     long CaptureDiscontinuities = 0, long CaptureTimestampErrors = 0,
-    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null);
+    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null, RenderDiagnostics? Render = null);
+public sealed record RenderDiagnostics(bool BoundedActive, double? TargetPaddingMs, double? CapacityMs, long EmptyEvents, long SafetyFallbacks = 0, bool RawActive = false);
 public sealed record PeerDiagnostics(string Id, string Name, string State, string IceState, string Route,
     string? LocalEndpoint, string? RemoteEndpoint, long TxFrames, long RxPackets,
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,
     double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio, NetworkPrecision? Precision = null, LatencyView? Latency = null);
-public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, int FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible");
+public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, int FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible", string? MediaAddress = null);
 
 internal sealed class PeerMetrics
 {

@@ -33,6 +33,21 @@ internal static class RtpPlayoutChecks
         Check(details.DecodedPackets == 4 && details.PlcFrames == 1 && details.ConcealedMs == 10 && details.DuplicatePackets == 1 && details.LatePackets == 2, "Loss/duplicate/deadline accounting failed.");
         Check(buffer.Snapshot().DecodedMs == 40 && buffer.Snapshot().ConsumedMs == 50, "Decoded and concealed duration must remain separate.");
 
+        // Experimental initial trimming must preserve reserve + current render demand.
+        // Default construction keeps the original initial backlog policy.
+        using var initialBaseline = new RtpOpusPlayoutBuffer(new(), correctClock: false, adaptiveReserve: false);
+        using var initialFresh = new RtpOpusPlayoutBuffer(new(), correctClock: false, adaptiveReserve: false, freshInitialStart: true);
+        for (var i = 0; i < 10; i++)
+        {
+            initialBaseline.Add(1, (uint)i * 480, payloads[i]);
+            initialFresh.Add(1, (uint)i * 480, payloads[i]);
+        }
+        initialBaseline.Read(output); initialFresh.Read(output);
+        Check(initialBaseline.Snapshot().QueueMs == 90 && initialBaseline.Details().RecoveryDiscardedMs == 0,
+            "Default initial backlog policy changed.");
+        Check(initialFresh.Snapshot().QueueMs == 20 && initialFresh.Details().RecoveryDiscardedMs == 70
+            && initialFresh.Details().ConcealedMs == 0, "Initial trim must count speech omissions, retain reserve and avoid PLC for discarded packets.");
+
         using var wrap = new RtpOpusPlayoutBuffer(new());
         const uint basis = uint.MaxValue - 959;
         wrap.Add(1, unchecked(basis + 480), payloads[1]); wrap.Add(1, basis, payloads[0]); wrap.Add(1, unchecked(basis + 960), payloads[2]);
@@ -70,7 +85,8 @@ internal static class RtpPlayoutChecks
         Check(malformed.Snapshot().QueueMs <= 120, "Malformed packet backlog exceeded its bound.");
         CheckClockAndSamples(payloads);
         CheckAdaptiveReserve(payloads);
-        Console.WriteLine("PASS: RTP order, PLC/deadlines, duplicates, wrap, bounded loss/backlog, SSRC, recovery, 20ms packets and malformed input.");
+        CheckLowDelayLoss();
+        Console.WriteLine("PASS: RTP order, PLC/deadlines, duplicates, wrap, bounded loss/backlog, SSRC, recovery, 20ms packets, low-delay CELT loss recovery and malformed input.");
     }
     private static void CheckAdaptiveReserve(byte[][] payloads)
     {
@@ -136,6 +152,25 @@ internal static class RtpPlayoutChecks
             elastic.Add(1, (uint)(frame + 3) * 480, payloads[(frame + 3) % payloads.Length]);
         }
         Check(elastic.Details().RateAdjustedSamples == 0, "Neutral rate must not drop or repeat samples.");
+    }
+    private static void CheckLowDelayLoss()
+    {
+        using var encoder = new OpusAudioEncoder(OpusProfile.LowDelay64);
+        var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
+        var packets = Enumerable.Range(0, 5).Select(frame => encoder.EncodeAudio(
+            Enumerable.Range(0, 480).Select(i => (short)(6000 * Math.Sin((frame * 480 + i) * 2 * Math.PI * 440 / 48000))).ToArray(), format)).ToArray();
+        using var buffer = new RtpOpusPlayoutBuffer(new(), correctClock: false, adaptiveReserve: false);
+        foreach (var frame in new[] { 0, 1, 3, 4 }) buffer.Add(1, (uint)frame * 480, packets[frame]);
+        var output = new byte[960];
+        for (var frame = 0; frame < 5; frame++)
+        {
+            buffer.Read(output);
+            Check(output.Any(value => value != 0), "Low-delay media, including the missing frame, must continue with decoded audio or PLC.");
+        }
+        Check(buffer.Details() is { DecodedPackets: 4, PlcFrames: 1, ConcealedMs: 10, Rebuffers: 0 }
+            && buffer.Snapshot().UnderfillMs == 0, "Low-delay packet loss/recovery accounting failed.");
+        buffer.Add(1, 960, packets[2]);
+        Check(buffer.Details().LatePackets == 1, "Concealed low-delay packets must not be replayed when late.");
     }
     private static void Check(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 

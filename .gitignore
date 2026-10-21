@@ -13,6 +13,9 @@ node_modules/
 native/.dotnet/
 native/.nuget/
 *.csproj.user
+*.slnx.user
+*.suo
+**/.vs/
 native/dist*/
 native/dist*.zip
 native/.local/

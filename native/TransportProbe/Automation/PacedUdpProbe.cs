@@ -17,7 +17,7 @@ internal static class PacedUdpProbe
     private sealed record Received(int Sequence, double At);
 
     public static async Task<int> RunAsync(string peer, int localPort, int peerPort, int bytes,
-        int seconds, string role, string run, string path, string? planPath = null, bool uniform = false)
+        int seconds, string role, string run, string path, string? planPath = null, bool uniform = false, string? sourceAddress = null)
     {
         if (role is not ("pc" or "laptop") || bytes is < 32 or > 1200 || seconds is < 5 or > 120 ||
             localPort is < 1024 or > 65535 || peerPort is < 1024 or > 65535)
@@ -45,7 +45,9 @@ internal static class PacedUdpProbe
                 for (var i = 0; i < schedule.Length; i++) schedule[i].At = i * last / (schedule.Length - 1);
             }
         }
-        using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, localPort));
+        var selected = MediaInterfaceSelection.Resolve(sourceAddress);
+        using var udp = new UdpClient(new IPEndPoint(selected is null ? IPAddress.Any : IPAddress.Parse(selected.Address!), localPort));
+        if (selected is not null) MediaInterfaceSelection.Apply(udp.Client, selected);
         udp.Client.ReceiveBufferSize = 1024 * 1024;
         var token = SHA256.HashData(Encoding.UTF8.GetBytes(run)).AsSpan(0, 8).ToArray();
         var ownRole = role == "pc" ? (byte)1 : (byte)2;
@@ -57,6 +59,7 @@ internal static class PacedUdpProbe
         var receives = new List<Received>(seconds * 100 + 1000);
         using var stop = new CancellationTokenSource();
         var ignored = 0; var overflow = 0; string? error = null;
+        var wrongEndpoint=0; var wrongToken=0; var wrongRole=0; var wrongLength=0; string? observedEndpoint=null;
         var receive = Task.Run(async () =>
         {
             try
@@ -64,9 +67,10 @@ internal static class PacedUdpProbe
                 while (!stop.IsCancellationRequested)
                 {
                     var result = await udp.ReceiveAsync(stop.Token); var at = ProbeClock.Now;
-                    if (!result.RemoteEndPoint.Equals(endpoint) || result.Buffer.Length is < 32 or > 1200 ||
-                        !result.Buffer.AsSpan(0, 8).SequenceEqual(token) || result.Buffer[12] != (ownRole == 1 ? 2 : 1))
-                    { ignored++; continue; }
+                    if (!result.RemoteEndPoint.Equals(endpoint)) { ignored++; wrongEndpoint++; observedEndpoint ??= result.RemoteEndPoint.ToString(); continue; }
+                    if (result.Buffer.Length is < 32 or > 1200) { ignored++; wrongLength++; continue; }
+                    if (!result.Buffer.AsSpan(0,8).SequenceEqual(token)) { ignored++; wrongToken++; continue; }
+                    if (result.Buffer[12] != (ownRole == 1 ? 2 : 1)) { ignored++; wrongRole++; continue; }
                     if (receives.Count < 24000) receives.Add(new(BinaryPrimitives.ReadInt32LittleEndian(result.Buffer.AsSpan(8)), at));
                     else overflow++;
                 }
@@ -102,7 +106,7 @@ internal static class PacedUdpProbe
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
         {
-            role, peer, localPort, peerPort, payloadBytes = planPath is null ? (int?)bytes : null, seconds, error, ignored, overflow,
+            role, peer, localPort, peerPort, run, sourceAddress, mediaInterface = selected, ignoredReasons = new { wrongEndpoint,wrongToken,wrongRole,wrongLength,observedEndpoint }, payloadBytes = planPath is null ? (int?)bytes : null, seconds, error, ignored, overflow,
             pattern = planPath is null ? "fixed" : uniform ? "uniform" : "replay", planHash,
             generatedAt = DateTimeOffset.Now, sends, receives,
             note = "Synthetic bytes discarded after header validation. Fixed or recorded high-resolution timer schedule; no global timeBeginPeriod. Due/actual times and size are stored. No audio/codec/WebRTC. QPC clocks are host-local; compare matched sequence intervals, not cross-host absolute times. Independent process starts do not preserve original cross-host flow phase."

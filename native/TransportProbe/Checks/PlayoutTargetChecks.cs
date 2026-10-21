@@ -9,8 +9,17 @@ internal static class PlayoutTargetChecks
     {
         await using var engine = new WebRtcCallEngine();
         engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
+        engine.SetRawOutputPreference(false); engine.SetRawOutputPreference(true);
+        engine.SetMediaInterface(null);
+        try { engine.SetMediaInterface("0.0.0.0"); throw new InvalidOperationException("Nonlocal media binding was accepted."); }
+        catch (ArgumentException) { }
+        if (engine.GetDiagnostics().MediaAddress is not null) throw new InvalidOperationException("Rejected media selection changed the OS-routing default.");
         if (engine.GetDiagnostics().PlaybackPolicy != "LowLatency") throw new InvalidOperationException("Low-latency policy was not selected.");
         try { engine.SetAdaptivePlayoutPreference(true); throw new InvalidOperationException("Incompatible adaptive policy was accepted."); }
+        catch (InvalidOperationException error) when (error.Message.Contains("기존 재생 정책", StringComparison.Ordinal)) { }
+        engine.SetPlayoutPolicy(PlayoutPolicy.ResponsiveLowLatency);
+        if (engine.GetDiagnostics().PlaybackPolicy != "ResponsiveLowLatency") throw new InvalidOperationException("Responsive policy was not selected.");
+        try { engine.SetAdaptivePlayoutPreference(true); throw new InvalidOperationException("Legacy adaptation mixed with responsive policy."); }
         catch (InvalidOperationException error) when (error.Message.Contains("기존 재생 정책", StringComparison.Ordinal)) { }
         engine.SetPlayoutPolicy(PlayoutPolicy.Compatible); engine.SetAdaptivePlayoutPreference(true);
         if (engine.GetDiagnostics().PlaybackPolicy != "Compatible") throw new InvalidOperationException("Compatible policy was not restored.");

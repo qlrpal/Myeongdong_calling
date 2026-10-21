@@ -1,3 +1,3 @@
 namespace VoiceNative;
 
-public enum PlayoutPolicy { Compatible, LowLatency }
+public enum PlayoutPolicy { Compatible, LowLatency, ResponsiveLowLatency }

@@ -1,8 +1,10 @@
 # 명동 콜링 Native
 
-지연을 우선하는 Windows 음성 통화 앱과 OCI Ubuntu 연결 관리/TURN 서버입니다. 현재 작업 버전은0.5.5입니다.
+지연을 우선하는 Windows 음성 통화 앱과 OCI Ubuntu 연결 관리/TURN 서버입니다. 현재 작업 버전은0.6.0입니다.
 
 개발 우선순위는 **지연 감소 → 음질 → 부가 기능**입니다. 개인 마이크·이어폰 설정은 최적화 범위에서 제외합니다. WebRTC로 출발하되 이후 전송 구현 교체 가능성을 유지하며, 진단은 실제 통화 개선을 결정하는 데 필요한 범위로 제한합니다.
+
+주 사용 환경은 게임과 동시 실행입니다. 오디오는 **WASAPI 저지연 공유 모드**를 목표로 하며 게임 소리와 통화가 함께 재생되어야 합니다. 독점 모드와 ASIO 지원은 현재 구현 범위에서 제외하고, 오디오 인터페이스 없이 일반 Windows 장치에서 최적화합니다.
 
 ```powershell
 ./native/run.ps1
@@ -11,7 +13,17 @@
 ```
 
 - [실행·빌드·소스 구조](native/README.md)
+- [통화 앱 사용법](native/docs/USER-GUIDE.md)
+- [0.6.0 구현·검증](native/docs/reports/PRODUCT-060.md)
+- [Git 배포 범위·명령](native/docs/GIT-RELEASE.md)
+- [0.5.9 저지연 Opus64 기본값·검증](native/docs/reports/LOW-DELAY-CODEC-059.md)
+- [0.5.8 실제 수신 경로 비교·RAW 출력·LAN 경로 선택](native/docs/reports/END-TO-END-PATH-058.md)
+- [수신 여유20/10ms 비교·출력 이후 대기 조사](native/docs/reports/RECEIVE-RESERVE-058.md)
+- [직접 WASAPI·장치 시계·출력 경로 원인 대조](native/docs/reports/OUTPUT-CLOCK-058.md)
+- [DTS 출력 효과 원인 확인·A/B/A·원상 복구](native/docs/reports/DTS-ENDPOINT-058.md)
 - [0.5.5 저지연 기본 정책·5분 검증](native/docs/reports/LOW-LATENCY-055.md)
+- [0.5.7 공유 출력 대기 축소·안전 복귀](native/docs/reports/BOUNDED-SHARED-RENDER-057.md)
+- [0.5.6 공유 입력 주기 단축 구현·검증](native/docs/reports/SHARED-CAPTURE-PERIOD.md)
 - [정적 분석·Git 준비 상태](native/docs/STATIC-ANALYSIS.md)
 - [서버 운영](native/server/README.md)
 - [네트워크 시험 종합 보고서](native/docs/reports/NETWORK-TEST-SUMMARY.md)

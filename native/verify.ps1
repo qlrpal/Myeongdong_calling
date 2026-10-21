@@ -12,13 +12,15 @@ if (-not $NoRestore) {
 if ($LASTEXITCODE -ne 0) { throw 'Static analysis/build failed.' }
 $probe = Join-Path $PSScriptRoot 'TransportProbe/bin/Release/net10.0-windows10.0.19041.0/TransportProbe.exe'
 $checks = @('--native-converter-test', '--codec-delay-test', '--frame-timeline-test', '--latency-summary-test',
-    '--acoustic-probe-test', '--ten-ms-acoustic-probe-test', '--latency-model-test', '--send-queue-test',
-    '--buffer-recovery-test', '--precision-self-test', '--period-buffer-test', '--low-latency-buffer-test',
-    '--playout-self-test', '--metrics-self-test', '--rtp-playout-test', '--pipeline-trace-test', '--playout-policy-test')
+    '--acoustic-probe-test', '--ten-ms-acoustic-probe-test', '--speech-fixture-test', '--latency-model-test', '--send-queue-test',
+    '--buffer-recovery-test', '--gap-restart-test', '--precision-self-test', '--period-buffer-test', '--low-latency-buffer-test',
+    '--playout-self-test', '--metrics-self-test', '--rtp-playout-test', '--pipeline-trace-test', '--playout-policy-test', '--capture-period-test', '--render-target-test', '--render-path-test', '--codec-render-reference-test')
 foreach ($check in $checks) {
     & $probe $check
     if ($LASTEXITCODE -ne 0) { throw "Check failed: $check" }
 }
+& $probe --product-checks (Join-Path $PSScriptRoot '.local/reports/product-checks')
+if ($LASTEXITCODE -ne 0) { throw 'Product controls/settings/reconnection checks failed.' }
 if ($Stress) {
     & $probe --rtp-stress-test (Join-Path $PSScriptRoot '.local/reports/rtp-stress-verify.json')
     if ($LASTEXITCODE -ne 0) { throw 'RTP clock/backlog stress checks failed.' }
@@ -27,6 +29,10 @@ if ($Stress) {
 }
 & $probe --opus-comparison (Join-Path $PSScriptRoot '.local/reports/opus-comparison-verify.json')
 if ($LASTEXITCODE -ne 0) { throw 'Opus comparison failed.' }
+& $probe --recovery-gap-test (Join-Path $PSScriptRoot '.local/reports/recovery-gap-verify.json')
+if ($LASTEXITCODE -ne 0) { throw 'Recovery gap comparison failed.' }
+& $probe --recovery-policy-test (Join-Path $PSScriptRoot '.local/reports/recovery-policy-verify.json')
+if ($LASTEXITCODE -ne 0) { throw 'Responsive recovery policy checks failed.' }
 $server = Join-Path $PSScriptRoot 'server'
 foreach ($file in (Get-ChildItem -LiteralPath $server -Filter '*.js' -Recurse)) {
     & node --check $file.FullName

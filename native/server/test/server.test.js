@@ -55,6 +55,18 @@ test('serves health and ICE configuration without web assets', async t => {
   assert.equal((await fetch(`${base}/../server.js`)).status, 404);
 });
 
+test('a signal to a departed snapshot peer leaves the caller session valid', async t => {
+  const { post, join } = await setup(t);
+  const alice = await join('Alice');
+  const bob = await join('Bob');
+  assert.equal((await post('/api/leave', bob)).status, 200);
+  const late = await post('/api/signal', { ...alice, to: bob.id, signal: { type: 'offer', sdp: 'late-offer' } });
+  assert.equal(late.status, 404);
+  assert.equal(late.data.error, '참여자가 통화를 나갔습니다.');
+  const charlie = await join('Charlie');
+  assert.deepEqual(charlie.peers, [{ id: alice.id, name: 'Alice' }]);
+});
+
 test('joins, relays offer/answer/candidates, and notifies leave', async t => {
   const { post, join, connect } = await setup(t);
   const alice = await join('Alice');

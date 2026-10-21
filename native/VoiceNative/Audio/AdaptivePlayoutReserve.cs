@@ -2,16 +2,16 @@ namespace VoiceNative;
 
 // Bounded feedback for arrival variation and missed deadlines. Packet-loss gaps
 // are subtracted through the RTP clock; they are not themselves measured jitter.
-internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled)
+internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, bool responsive = false)
 {
     private readonly int floorSamples = minimumSamples;
-    private readonly int maximumSamples = Math.Min(1920, minimumSamples + 960);
+    private readonly int maximumSamples = responsive ? Math.Max(minimumSamples, 1440) : Math.Min(1920, minimumSamples + 960);
     private readonly Queue<double> excess = new();
     private long? lastTimestamp;
     private double lastArrival, quietSamples, lateWindowSamples;
     private int latePressure, updates;
     public bool Enabled { get; } = enabled;
-    public int TargetSamples { get; private set; } = minimumSamples;
+    public int TargetSamples { get; private set; } = responsive ? Math.Max(minimumSamples, 960) : minimumSamples;
     public double JitterP95Ms { get; private set; }
     public long Increases { get; private set; }
     public long Decreases { get; private set; }
@@ -36,7 +36,7 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled)
     {
         if (!Enabled) return;
         quietSamples = 0;
-        if (++latePressure >= 3 && JitterP95Ms >= 5) { Raise(); latePressure = 0; }
+        if (++latePressure >= (responsive ? 2 : 3) && JitterP95Ms >= (responsive ? 3 : 5)) { Raise(); latePressure = 0; }
     }
     public bool TryHold()
     {
@@ -56,15 +56,17 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled)
         if (lateWindowSamples >= 48000) { lateWindowSamples = 0; latePressure = 0; }
         if (concealed) quietSamples = 0;
         else quietSamples += outputSamples;
-        // Thirty quiet seconds first, then one millisecond per second back down.
-        if (quietSamples >= 31 * 48000 && TargetSamples > floorSamples)
+        // Legacy waits thirty quiet seconds; the responsive candidate waits five.
+        // Both return one millisecond per second, without discarding audio.
+        if (quietSamples >= (responsive ? 6 : 31) * 48000 && TargetSamples > floorSamples)
         { TargetSamples = Math.Max(floorSamples, TargetSamples - 48); Decreases++; quietSamples -= 48000; }
     }
     public void Rebuffer()
     {
-        // A long outage exceeds bounded PLC. Restart from fresh packets at the
-        // low-latency floor, rather than charging another 20ms for the outage.
-        TargetSamples = floorSamples; quietSamples = lateWindowSamples = 0; latePressure = 0;
+        // A long outage exceeds bounded PLC. Legacy returns to its floor;
+        // responsive restarts at 20ms and can relax again after quiet playback.
+        TargetSamples = responsive ? Math.Max(floorSamples, 960) : floorSamples;
+        quietSamples = lateWindowSamples = 0; latePressure = 0;
     }
     public void Reset()
     {

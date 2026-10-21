@@ -20,6 +20,7 @@ internal static class ProbeClock
 internal sealed class AcousticCaptureProbe
 {
     private static readonly short[] Signal = CreateSignal();
+    internal static short[] DiagnosticSignal() => Signal.ToArray();
     private readonly object sync = new();
     private TaskCompletionSource<double>? injected;
     private int toneFrame;

@@ -24,7 +24,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private Session? session;
     private WindowsAudioDevice? microphone;
     private OpusAudioEncoder? encoder;
-    private OpusProfile opusProfile = OpusProfile.Baseline;
+    private OpusProfile opusProfile = OpusAudioEncoder.DefaultProfile;
     private AudioSendQueue? sendQueue;
     private CancellationTokenSource? sendCancellation;
     private Task? sendTask;
@@ -39,6 +39,42 @@ public sealed class WebRtcCallEngine : ICallEngine
     internal bool FixedReserveClockTarget { get; init; }
     internal bool TransientEmptyQueueHold { get; init; }
     internal bool FreshRestart { get; init; }
+    internal bool? BoundedRender { get; init; }
+    internal bool? RawRender { get; init; }
+    private bool preferRawOutput = true;
+    private string? mediaAddress;
+    internal bool IntermediateCapture { get; init; } = true;
+    internal string? CaptureDeviceId { get; init; }
+    private string? selectedCaptureId, selectedRenderId;
+    private bool microphoneMuted;
+    public void SetMicrophoneMuted(bool muted)
+    {
+        Volatile.Write(ref microphoneMuted, muted);
+        microphone?.SetMuted(muted);
+    }
+    public void SetPeerVolume(string peerId, float volume)
+    {
+        if (!float.IsFinite(volume) || volume is < 0 or > 2) throw new ArgumentOutOfRangeException(nameof(volume));
+        lock (peers) { if (peers.TryGetValue(peerId, out var peer)) peer.Sink.SetVolume(volume); }
+    }
+    public void SetAudioDevices(string? captureId, string? renderId)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 장치를 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("통화에서 나간 뒤 장치를 변경하세요.");
+            selectedCaptureId = captureId; selectedRenderId = renderId;
+        }
+        finally { gate.Release(); }
+    }
+    internal bool ForceRelay { get; init; }
+    internal bool DirectOnly { get; init; }
+    // Diagnostic-only reserve comparison. Product callers keep the 20ms default.
+    internal int DiagnosticReserveMs { get; init; } = 20;
+    internal bool ResponsiveReserve { get; init; }
+    internal bool? QuickGapRecovery { get; init; }
+    internal Action<short[]>? DiagnosticCaptureTransform { get; init; }
+    private bool preferShortCapture = true;
     private readonly PipelineTrace pipeline = new();
     internal void StartPipelineTrace(int seconds) => pipeline.Start(seconds);
     internal PipelineTraceSnapshot StopPipelineTrace() { pipeline.Stop(); return pipeline.Snapshot(); }
@@ -59,16 +95,28 @@ public sealed class WebRtcCallEngine : ICallEngine
     }
 
     private Uri Endpoint(string path) => new(server!, path);
+    private sealed class SignalingException(System.Net.HttpStatusCode code, string message) : InvalidOperationException(message)
+    { public System.Net.HttpStatusCode Code { get; } = code; }
     private async Task<JsonElement> Post(string path, object body)
     {
         using var response = await http.PostAsJsonAsync(Endpoint(path), body, Json);
         var result = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException(result.TryGetProperty("error", out var error) ? error.GetString() : response.ReasonPhrase);
+            throw new SignalingException(response.StatusCode, (result.TryGetProperty("error", out var error) ? error.GetString() : response.ReasonPhrase) ?? "서버 요청 실패");
         return result;
     }
-    private Task Send(string to, object signal) => session is null ? Task.CompletedTask :
-        Post("api/signal", new { session.Id, session.Token, to, signal });
+    private async Task Send(string to, object signal)
+    {
+        var current = session;
+        if (current is null) return;
+        try { await Post("api/signal", new { current.Id, current.Token, to, signal }); }
+        catch (SignalingException ex) when (ex.Code == System.Net.HttpStatusCode.NotFound && ex.Message == "참여자가 통화를 나갔습니다.")
+        {
+            // The join snapshot can race a remote departure. The queued peer-left
+            // event removes that peer once the negotiation gate is released.
+            Status?.Invoke("상대가 협상 중 나갔습니다 · 방 연결은 유지합니다.");
+        }
+    }
 
     public async Task JoinAsync(Uri address, string room, string name)
     {
@@ -80,6 +128,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             var config = await http.GetFromJsonAsync<JsonElement>(Endpoint("api/config"));
             iceServers.Clear();
+            if (ForceRelay && DirectOnly) throw new InvalidOperationException("Conflicting diagnostic route requirements.");
             foreach (var item in config.GetProperty("iceServers").EnumerateArray())
             {
                 var urls = item.GetProperty("urls");
@@ -91,11 +140,16 @@ public sealed class WebRtcCallEngine : ICallEngine
                     credential = item.TryGetProperty("credential", out var p) ? p.GetString() : null
                 });
             }
+            if (DirectOnly) iceServers.RemoveAll(s => s.urls.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase));
             Status?.Invoke($"ICE 서버 {iceServers.Count}개 · TURN 중계 " +
                 (iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)) ? "사용 가능" : "미설정"));
+            if (ForceRelay && !iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)))
+                throw new InvalidOperationException("TURN 강제 시험에 필요한 TURN 서버가 없습니다.");
             encoder = new OpusAudioEncoder(opusProfile);
             Status?.Invoke("송신 코덱 · " + OpusAudioEncoder.Label(opusProfile));
-            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: 10, pipeline: pipeline);
+            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: 10, pipeline: pipeline, intermediateCapture: IntermediateCapture && preferShortCapture, captureDeviceId: selectedCaptureId ?? CaptureDeviceId)
+            { DiagnosticCaptureTransform = DiagnosticCaptureTransform };
+            microphone.SetMuted(Volatile.Read(ref microphoneMuted));
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
             sendQueue = new AudioSendQueue(); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
@@ -132,10 +186,21 @@ public sealed class WebRtcCallEngine : ICallEngine
     private Peer CreatePeer(string id, string name)
     {
         lock (peers) if (peers.TryGetValue(id, out var existing)) return existing;
+        var selectedInterface = MediaInterfaceSelection.Resolve(mediaAddress);
         var decoder = new AudioEncoder(includeOpus: true);
-        var lowDelay = playoutPolicy == PlayoutPolicy.LowLatency;
-        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay);
-        var pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers });
+        var lowDelay = playoutPolicy is PlayoutPolicy.LowLatency or PlayoutPolicy.ResponsiveLowLatency;
+        var responsive = ResponsiveReserve || playoutPolicy == PlayoutPolicy.ResponsiveLowLatency;
+        var rawOutput = RawRender ?? (preferRawOutput && preferLowLatency && lowDelay && useRtpPlayout);
+        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId);
+        RTCPeerConnection? pc = null;
+        try
+        {
+            pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers,
+                iceTransportPolicy = ForceRelay ? RTCIceTransportPolicy.relay : RTCIceTransportPolicy.all,
+                X_BindAddress = selectedInterface is null ? null : System.Net.IPAddress.Parse(selectedInterface.Address!) });
+            if (selectedInterface is not null) MediaInterfaceSelection.Apply(pc.GetRtpChannel().RtpSocket, selectedInterface);
+        }
+        catch { pc?.Close("media interface unavailable"); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
         var metrics = new PeerMetrics();
         var precision = new RtcpMetrics();
         var receivedPayloadType = 111;
@@ -363,9 +428,43 @@ public sealed class WebRtcCallEngine : ICallEngine
         try
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("적응 여유는 통화에서 나간 뒤 변경하세요.");
-            if (enabled && playoutPolicy == PlayoutPolicy.LowLatency) throw new InvalidOperationException("지터 적응은 기존 재생 정책에서 선택하세요.");
+            if (enabled && playoutPolicy != PlayoutPolicy.Compatible) throw new InvalidOperationException("지터 적응은 기존 재생 정책에서 선택하세요.");
             adaptivePlayout = enabled;
             Status?.Invoke(enabled ? "지터 적응 여유 · 20~40ms" : "고정 여유 · 20ms, 소비율 보정 유지");
+        }
+        finally { gate.Release(); }
+    }
+    public void SetMediaInterface(string? address)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 네트워크를 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("네트워크는 통화에서 나간 뒤 변경하세요.");
+            var selected = MediaInterfaceSelection.Resolve(address);
+            mediaAddress = selected?.Address;
+            Status?.Invoke(selected is null ? "미디어 네트워크: OS 자동 · VPN 경로 유지" : $"미디어 네트워크: {selected.Label} · 이 앱의 UDP만 선택한 인터페이스 사용");
+        }
+        finally { gate.Release(); }
+    }
+    public void SetRawOutputPreference(bool enabled)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 출력 효과 설정을 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("출력 효과 설정은 통화에서 나간 뒤 변경하세요.");
+            preferRawOutput = enabled;
+            Status?.Invoke(enabled ? "저지연 재생에서 통화 출력 효과 우회 우선 · 미지원 시 공유 출력 복귀" : "기존 통화 출력 효과 사용");
+        }
+        finally { gate.Release(); }
+    }
+    public void SetShortCapturePreference(bool enabled)
+    {
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 입력 모드를 변경할 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("입력 모드는 통화에서 나간 뒤 변경하세요.");
+            preferShortCapture = enabled;
+            Status?.Invoke(enabled ? "짧은 공유 입력 주기 우선 · 미지원 시 기존 공유 입력 사용" : "기존 공유 입력 사용 · 출력 설정 유지");
         }
         finally { gate.Release(); }
     }
@@ -377,8 +476,13 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("재생 정책은 통화에서 나간 뒤 변경하세요.");
             playoutPolicy = policy;
-            if (policy == PlayoutPolicy.LowLatency) adaptivePlayout = false;
-            Status?.Invoke(policy == PlayoutPolicy.LowLatency ? "저지연 재생 · 20ms 목표·짧은 공백 보류·최신 큐 복귀" : "기존 재생 · 시작 여유 학습");
+            if (policy != PlayoutPolicy.Compatible) adaptivePlayout = false;
+            Status?.Invoke(policy switch
+            {
+                PlayoutPolicy.ResponsiveLowLatency => "자동 저지연 · 20ms 시작·15~30ms 적응·반복 공백 빠른 복구 (시험)",
+                PlayoutPolicy.LowLatency => "저지연 재생 · 20ms 목표·짧은 공백 보류·최신 큐 복귀",
+                _ => "기존 재생 · 시작 여유 학습"
+            });
         }
         finally { gate.Release(); }
     }
@@ -461,7 +565,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
             System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, 10, encoder?.Snapshot(),
-            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString());
+            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress);
     }
     private void AttachTelemetry(Peer peer, RTCDataChannel channel)
     {

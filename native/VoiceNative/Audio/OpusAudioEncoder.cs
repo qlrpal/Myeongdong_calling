@@ -13,6 +13,7 @@ public sealed record EncoderDiagnostics(string Profile, string Application, int?
 // at equal bitrate, complexity, frame size and VBR; the SDP and decoder remain Opus.
 internal sealed class OpusAudioEncoder : IAudioEncoder, IDisposable
 {
+    public const OpusProfile DefaultProfile = OpusProfile.LowDelay64;
     private readonly AudioEncoder baseline = new(includeOpus: true);
     private readonly IOpusEncoder? configured;
     private readonly byte[] packet = new byte[1275];

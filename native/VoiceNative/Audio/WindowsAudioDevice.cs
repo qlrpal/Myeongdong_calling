@@ -12,13 +12,15 @@ namespace VoiceNative;
 internal sealed class WindowsAudioDevice
 {
     private readonly IAudioEncoder encoder;
-    private readonly WasapiRecorder? input;
+    private readonly SharedCaptureRecorder? input;
     private readonly NativeCaptureConverter? captureConverter;
     private readonly byte[] convertedCapture = new byte[1920];
     private string? inputFallbackReason;
-    private WasapiPlayer? output;
+    private SharedRenderPlayer? output;
     private int requestedOutputMs;
     private readonly bool preferLowLatency;
+    private readonly bool boundedRender, rawRender;
+    private readonly AudioStreamCategory renderCategory;
     private readonly int frameSamples;
     private readonly IPlayoutBuffer? buffer;
     private readonly object audioLock = new();
@@ -36,12 +38,18 @@ internal sealed class WindowsAudioDevice
     private readonly ProcessingWindow captureGaps = new();
     private readonly ProcessingWindow captureWork = new();
     public AcousticCaptureProbe Acoustic { get; } = new();
+    internal Action<short[]>? DiagnosticCaptureTransform { get; init; }
     public AudioFrameTimeline Timeline { get; } = new();
     public string? LastInjectedHash { get; private set; }
     public string? EncodedTraceHash { get; private set; }
     private double? frameCaptureAt;
     private long captureDiscontinuities, captureTimestampErrors;
     private readonly PipelineTrace? pipeline;
+    private readonly string? renderDeviceId;
+    private PlaybackGain? playbackGain;
+    private bool muted;
+    public void SetMuted(bool value) => Volatile.Write(ref muted, value);
+    public void SetVolume(float value) { if (playbackGain is not null) playbackGain.Gain = value; }
     private double frameFirstCallbackAt;
     public CaptureOrigin? LastCaptureOrigin { get; private set; }
     private readonly AudioFormat pcmFormat = new(AudioCodecsEnum.OPUS, 111, 48000, 1);
@@ -50,49 +58,27 @@ internal sealed class WindowsAudioDevice
     public event Action<string>? OnAudioSinkError;
     public event Action<string>? OnAudioSinkRecovered;
 
-    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, int frameMs = 20, bool useRtpPlayout = false, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false)
+    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, int frameMs = 20, bool useRtpPlayout = false, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool intermediateCapture = true, bool boundedRender = false, bool rawRender = false, AudioStreamCategory renderCategory = AudioStreamCategory.Other, int rtpReserveMs = 20, string? captureDeviceId = null, bool responsiveReserve = false, bool quickGapRecovery = false, string? renderDeviceId = null)
     {
         if (outputLatencyMs is not (20 or 40)) throw new ArgumentOutOfRangeException(nameof(outputLatencyMs));
+        if (rtpReserveMs is < 10 or > 40) throw new ArgumentOutOfRangeException(nameof(rtpReserveMs));
         requestedOutputMs = outputLatencyMs;
         this.preferLowLatency = preferLowLatency;
+        this.boundedRender = boundedRender; this.rawRender = rawRender; this.renderCategory = renderCategory;
         if (frameMs is not (10 or 20)) throw new ArgumentOutOfRangeException(nameof(frameMs));
         frameSamples = frameMs * 48; captureFrameBytes = new byte[frameSamples * 2]; capturePcm = new short[frameSamples];
         this.encoder = encoder;
         this.pipeline = pipeline;
+        this.renderDeviceId = renderDeviceId;
         try
         {
             if (!disableSource)
             {
                 // Initialise/JIT the lazy Opus encoder before the real capture callback.
                 encoder.EncodeAudio(new short[frameSamples], pcmFormat);
-                var enableLowLatencyCapture = preferLowLatency;
-                try
-                {
-                    using var enumerator = new MMDeviceEnumerator();
-                    using var endpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia);
-                    using var client = endpoint.CreateAudioClient();
-                    var mix = client.MixFormat;
-                    var minimumMs = client.GetSharedModeEnginePeriod(mix).MinPeriodInFrames * 1000.0 / mix.SampleRate;
-                    // A 1ms native capture buffer overflowed repeatedly on the actual laptop.
-                    // The library only exposes the minimum period; use stable shared capture below 5ms.
-                    if (preferLowLatency && minimumMs < 5)
-                    {
-                        enableLowLatencyCapture = false;
-                        inputFallbackReason = $"최소 입력 주기 {minimumMs:F2}ms는 현재 관리형 인코딩 콜백 경로에서 지나치게 짧아 표준 공유 입력 10ms로 복귀합니다.";
-                    }
-                }
-                catch (Exception) { } // Let NAudio's optional low-latency negotiation handle unavailable IAudioClient3.
-                var captureBuilder = new WasapiRecorderBuilder().WithSharedMode().WithEventSync().WithBufferLength(10);
-                if (enableLowLatencyCapture) captureBuilder.WithLowLatency();
-                if (!preferLowLatency) captureBuilder.WithFormat(new WaveFormat(48000, 16, 1));
-                input = captureBuilder.Build();
-                try { captureConverter = new NativeCaptureConverter(input.WaveFormat); }
-                catch (NotSupportedException ex)
-                {
-                    inputFallbackReason = ex.Message; input.Dispose();
-                    input = new WasapiRecorderBuilder().WithSharedMode().WithEventSync().WithBufferLength(10)
-                        .WithFormat(new WaveFormat(48000, 16, 1)).Build();
-                }
+                input = new SharedCaptureRecorder(preferLowLatency, intermediateCapture, captureDeviceId);
+                captureConverter = new NativeCaptureConverter(input.WaveFormat);
+                inputFallbackReason = input.LowLatencyUnavailableReason;
                 input.DataAvailable += (data, flags, devicePosition, qpcPosition) =>
                 {
                     var callbackAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
@@ -123,26 +109,25 @@ internal sealed class WindowsAudioDevice
             }
             if (!disableSink)
             {
-                buffer = useRtpPlayout ? new RtpOpusPlayoutBuffer(Timeline, adaptiveReserve: adaptiveReserve, pipeline: pipeline, tracePeer: tracePeer, fixedReserveClockTarget: fixedReserveClockTarget, transientEmptyQueueHold: transientEmptyQueueHold, freshRestart: freshRestart) : new PcmPlayoutBuffer();
+                buffer = useRtpPlayout ? new RtpOpusPlayoutBuffer(Timeline, targetReserveMs: rtpReserveMs, adaptiveReserve: adaptiveReserve, pipeline: pipeline, tracePeer: tracePeer, fixedReserveClockTarget: fixedReserveClockTarget, transientEmptyQueueHold: transientEmptyQueueHold, freshRestart: freshRestart, responsiveReserve: responsiveReserve, recoveryReserveMs: quickGapRecovery ? 10 : 0, repeatedGapRecovery: quickGapRecovery) : new PcmPlayoutBuffer();
                 buffer.OnFrameSubmitted = (hash, at, discarded) => Timeline.Update(hash, old => old with { OutputSubmittedAt = discarded ? null : at, Discarded = discarded });
+                playbackGain = new PlaybackGain(buffer);
                 output = CreateOutput();
             }
         }
         catch { input?.Dispose(); output?.Dispose(); (buffer as IDisposable)?.Dispose(); throw; }
     }
-    private WasapiPlayer CreateOutput()
+    private SharedRenderPlayer CreateOutput()
     {
-        var builder = new WasapiPlayerBuilder().WithSharedMode().WithEventSync().WithLatency(requestedOutputMs);
-        if (preferLowLatency) builder.WithLowLatency();
-        var player = builder.Build();
+        var player = new SharedRenderPlayer(requestedOutputMs, preferLowLatency, boundedRender, rawRender, renderCategory, renderDeviceId);
         try
         {
             using var enumerator = new MMDeviceEnumerator();
-            using var endpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            using var endpoint = renderDeviceId is null ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia) : enumerator.GetDevice(renderDeviceId);
             using var client = endpoint.CreateAudioClient();
             var rate = client.MixFormat.SampleRate;
-            IWaveProvider source = buffer!;
-            if (preferLowLatency && rate != 48000) source = new WdlResamplingSampleProvider(buffer!.ToSampleProvider(), rate).ToWaveProvider();
+            IWaveProvider source = playbackGain!;
+            if (preferLowLatency && rate != 48000) source = new WdlResamplingSampleProvider(source.ToSampleProvider(), rate).ToWaveProvider();
             player.Init(source);
             buffer!.ConfigureForOutput(player.LowLatencyActive, player.LatencyMilliseconds);
         }
@@ -205,9 +190,11 @@ internal sealed class WindowsAudioDevice
                     captureFrameCount = 0;
                     var pcm = capturePcm;
                     Buffer.BlockCopy(captureFrameBytes, 0, pcm, 0, captureFrameBytes.Length);
+                    DiagnosticCaptureTransform?.Invoke(pcm);
                     var firstProbeFrame = Acoustic.IsFirstInjectionFrame;
                     var capturedAt = frameCaptureAt;
                     Acoustic.Process(pcm, frameCaptureAt);
+                    if (Volatile.Read(ref muted)) Array.Clear(pcm);
                     if (frameCaptureAt is not null) frameCaptureAt += frameSamples / 48000.0;
                     level = Level(pcm);
                     var started = Stopwatch.GetTimestamp();
@@ -264,7 +251,7 @@ internal sealed class WindowsAudioDevice
     public AudioDiagnostics Snapshot()
     {
         AudioDiagnostics snapshot;
-        WasapiPlayer? currentOutput;
+        SharedRenderPlayer? currentOutput;
         bool queryDevice;
         lock (audioLock)
         {
@@ -303,11 +290,12 @@ internal sealed class WindowsAudioDevice
         // the capture/decoder callback lock across these diagnostic-only queries.
         snapshot = snapshot with
         {
+            Render = currentOutput is null ? null : new RenderDiagnostics(currentOutput.BoundedActive, currentOutput.TargetPaddingMs, currentOutput.CapacityMs, currentOutput.EmptyEvents, currentOutput.SafetyFallbacks, currentOutput.RawActive),
             RequestedOutputMs = buffer is null ? null : requestedOutputMs,
             LowLatencyRequested = preferLowLatency,
             LowLatencyActive = currentOutput?.LowLatencyActive ?? input?.LowLatencyActive,
             LowLatencyUnavailableReason = currentOutput?.LowLatencyUnavailableReason ?? inputFallbackReason ?? input?.LowLatencyUnavailableReason,
-            EnginePeriodMs = (currentOutput?.LowLatencyActive ?? input?.LowLatencyActive) == true ? currentOutput?.LatencyMilliseconds ?? input?.LatencyMilliseconds : null
+            EnginePeriodMs = (currentOutput?.LowLatencyActive ?? input?.LowLatencyActive) == true ? currentOutput?.EnginePeriodMs ?? input?.EnginePeriodMs : null
         };
         if (!queryDevice) return snapshot;
         try
@@ -333,7 +321,7 @@ internal sealed class WindowsAudioDevice
         await playbackGate.WaitAsync();
         try
         {
-            WasapiPlayer? old;
+            SharedRenderPlayer? old;
             lock (audioLock)
             {
                 if (closed || buffer is null) return;
@@ -367,7 +355,7 @@ internal sealed class WindowsAudioDevice
         await playbackGate.WaitAsync();
         try
         {
-            WasapiPlayer? old;
+            SharedRenderPlayer? old;
             lock (audioLock) { old = output; output = null; }
             old?.Stop(); old?.Dispose();
         }

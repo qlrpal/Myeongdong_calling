@@ -15,7 +15,8 @@ public sealed record RtpPlayoutDiagnostics(int TargetReserveMs, int BufferedPack
     double? ArrivalJitterP95Ms = null, double HeldMs = 0, double MaxConsecutivePlcMs = 0,
     long ReserveIncreases = 0, long ReserveDecreases = 0, bool AdaptiveReserve = false,
     double? ClockTargetMs = null, double? ClockFilteredQueueMs = null,
-    long RecoveryDiscardedPackets = 0, double RecoveryDiscardedMs = 0);
+    long RecoveryDiscardedPackets = 0, double RecoveryDiscardedMs = 0,
+    long ShortReserveRestarts = 0, int? RecoveryReserveMs = null);
 
 // Render-driven: the compressed packet reserve replaces the old PCM startup reserve.
 // No timer or extra PCM queue is placed in front of this provider.
@@ -24,6 +25,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private const int SamplesPerMs = 48;
     private const int MaximumSamples = 5760; // 120ms Opus packet/backlog bound.
     private const int MaximumPlcSamples = 2880; // Rebuffer after 60ms of continuous loss.
+    private const int RecoveryPressureEpisodes = 3;
+    private const int RecoveryPressureWindowSamples = 3 * 48000;
     private readonly object sync = new();
     private readonly IOpusDecoder decoder = OpusCodecFactory.CreateDecoder(48000, 1);
     private readonly SortedDictionary<long, Packet> packets = new();
@@ -47,6 +50,15 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private readonly PlayoutClockController clock;
     private readonly bool transientEmptyQueueHold;
     private readonly bool freshRestart;
+    private readonly bool freshInitialStart;
+    private readonly bool contiguousRestart;
+    private readonly bool boundedRestartWait;
+    private bool restartWaited;
+    private readonly int recoveryReserveSamples;
+    private bool gapRestart;
+    private long shortReserveRestarts;
+    private readonly bool repeatedGapRecovery;
+    private readonly Queue<long> recentRebuffers = new();
     private long recoveryDiscardedPackets, recoveryDiscardedSamples;
     private readonly AdaptivePlayoutReserve adaptive;
     private readonly PipelineTrace? pipeline;
@@ -61,15 +73,21 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     public WaveFormat WaveFormat { get; } = new(48000, 16, 1);
     public Action<string, double, bool>? OnFrameSubmitted { get; set; }
 
-    public RtpOpusPlayoutBuffer(AudioFrameTimeline timeline, int targetReserveMs = 20, bool correctClock = true, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false)
+    public RtpOpusPlayoutBuffer(AudioFrameTimeline timeline, int targetReserveMs = 20, bool correctClock = true, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool freshInitialStart = false, bool contiguousRestart = false, bool boundedRestartWait = false, bool responsiveReserve = false, int recoveryReserveMs = 0, bool repeatedGapRecovery = false)
     {
         if (targetReserveMs is < 10 or > 40) { decoder.Dispose(); throw new ArgumentOutOfRangeException(nameof(targetReserveMs)); }
+        if (recoveryReserveMs is not (0 or 10 or 15)) { decoder.Dispose(); throw new ArgumentOutOfRangeException(nameof(recoveryReserveMs)); }
+        recoveryReserveSamples = recoveryReserveMs * SamplesPerMs;
+        this.repeatedGapRecovery = repeatedGapRecovery;
         this.timeline = timeline;
         reserveSamples = targetReserveMs * SamplesPerMs;
-        clock = new(reserveSamples, correctClock, fixedReserveClockTarget);
+        clock = new(reserveSamples, correctClock, fixedReserveClockTarget, responsiveReserve);
         this.transientEmptyQueueHold = transientEmptyQueueHold;
         this.freshRestart = freshRestart;
-        adaptive = new(reserveSamples, adaptiveReserve && correctClock);
+        this.freshInitialStart = freshInitialStart;
+        this.contiguousRestart = contiguousRestart;
+        this.boundedRestartWait = boundedRestartWait;
+        adaptive = new(reserveSamples, (adaptiveReserve || responsiveReserve) && correctClock, responsiveReserve);
         this.pipeline = pipeline; this.tracePeer = tracePeer;
     }
 
@@ -127,7 +145,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 {
                     // Shed old backlog; do not play PLC for deliberately discarded speech.
                     while (packets.Count > 1 && queuedSamples > 2880) RemoveFirst(discarded: true);
-                    DiscardPcm(); decoder.ResetState(); started = false;
+                    DiscardPcm(); decoder.ResetState(); started = false; restartWaited = false;
                     expectedTimestamp = packets.First().Key; hasPosition = true;
                     missingSamples = 0; fadeRemaining = 240; trims++; resyncs++;
                 }
@@ -159,7 +177,13 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 clock.SetReserve(adaptive.TargetSamples);
                 if (!started)
                 {
-                    var startupSamples = Math.Min(MaximumSamples, adaptive.TargetSamples + destination.Length / 2);
+                    // The window uses unwrapped source RTP time, including replay.
+                    // Initial/isolated/reconfigured streams retain their full reserve.
+                    var pressure = !repeatedGapRecovery || (recentRebuffers.Count >= RecoveryPressureEpisodes
+                        && highestTimestamp - recentRebuffers.Peek() <= RecoveryPressureWindowSamples);
+                    var restartReserve = gapRestart && pressure && recoveryReserveSamples > 0
+                        ? Math.Min(adaptive.TargetSamples, recoveryReserveSamples) : adaptive.TargetSamples;
+                    var startupSamples = Math.Min(MaximumSamples, restartReserve + destination.Length / 2);
                     // Preserve a small reserve AFTER the first render request, accounting for
                     // resampler/device pull size instead of stacking another 40ms PCM queue.
                     if (packets.Count == 0 || queuedSamples < startupSamples)
@@ -167,10 +191,39 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         if (everStarted) RecordUnderfill(destination.Length / 2);
                         return destination.Length;
                     }
-                    if (freshRestart && everStarted)
+                    if ((freshRestart && everStarted) || (freshInitialStart && !everStarted))
                     {
                         var discarded = false;
-                        // After an outage, preserve only the fresh reserve plus this pull.
+                        if (contiguousRestart && everStarted)
+                        {
+                            // Experimental: a total packet count can hide RTP holes. Require
+                            // reserve + this pull in the newest contiguous tail before restarting.
+                            long? next = null; long tailStart = 0; var tailSamples = 0;
+                            foreach (var entry in packets.Reverse())
+                            {
+                                if (next is { } boundary && entry.Key + entry.Value.Samples != boundary) break;
+                                tailStart = entry.Key; tailSamples += entry.Value.Samples; next = entry.Key;
+                            }
+                            if (tailSamples < startupSamples)
+                            {
+                                if (!boundedRestartWait || !restartWaited)
+                                {
+                                    restartWaited = true;
+                                    RecordUnderfill(destination.Length / 2);
+                                    return destination.Length;
+                                }
+                                // After one extra pull, preserve baseline progress instead of
+                                // waiting indefinitely for a complete tail on a lossy link.
+                                tailStart = packets.First().Key;
+                            }
+                            while (packets.First().Key < tailStart)
+                            {
+                                recoveryDiscardedSamples += packets.First().Value.Samples;
+                                recoveryDiscardedPackets++; discarded = true;
+                                RemoveFirst(discarded: true);
+                            }
+                        }
+                        // At the selected start boundary, preserve only the fresh reserve plus this pull.
                         // Deliberately discarded speech is tracked separately from PLC/loss.
                         while (packets.Count > 1 && queuedSamples - packets.First().Value.Samples >= startupSamples)
                         {
@@ -181,6 +234,9 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         if (discarded) { decoder.ResetState(); resyncs++; }
                     }
                     expectedTimestamp = packets.First().Key; hasPosition = started = everStarted = true;
+                    if (gapRestart && restartReserve < adaptive.TargetSamples) shortReserveRestarts++;
+                    gapRestart = false;
+                    restartWaited = false;
                     missingSamples = 0; fadeRemaining = 240;
                 }
                 var filled = 0;
@@ -282,7 +338,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         }
         if (missingSamples >= MaximumPlcSamples)
         {
-            started = false; rebuffers++; decoder.ResetState(); adaptive.Rebuffer();
+            EnterRebuffer();
             return false;
         }
         // Diagnostic candidate: one 10ms hold at the start of an empty-queue
@@ -305,7 +361,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         // PLC without declaring that RTP packet consumed; it may still arrive.
         // Both count toward the same 60ms PLC bound. FEC is not requested.
         pcmHash = null;
-        if (missingSamples >= MaximumPlcSamples) { started = false; rebuffers++; decoder.ResetState(); adaptive.Rebuffer(); return false; }
+        if (missingSamples >= MaximumPlcSamples) { EnterRebuffer(); return false; }
         pcmCount = decoder.Decode(ReadOnlySpan<byte>.Empty, pcm, 480, false);
         if (pipeline?.Enabled == true) pipeline.Played(new(tracePeer, source ?? 0, unchecked((uint)expectedTimestamp),
             ProbeClock.Now, null, null, null, advanceTimestamp ? "plc-loss" : "plc-hold", queuedSamples / 48.0));
@@ -320,6 +376,14 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     {
         if (!underflowActive) { underflowActive = true; underfillEpisodes++; }
         underfillSamples += samples; episodeSamples += samples; maxEpisodeSamples = Math.Max(maxEpisodeSamples, episodeSamples);
+    }
+    private void EnterRebuffer()
+    {
+        started = false; gapRestart = true; restartWaited = false; rebuffers++;
+        recentRebuffers.Enqueue(highestTimestamp);
+        while (recentRebuffers.Count > RecoveryPressureEpisodes || highestTimestamp - recentRebuffers.Peek() > RecoveryPressureWindowSamples)
+            recentRebuffers.Dequeue();
+        decoder.ResetState(); adaptive.Rebuffer();
     }
     private void RejectLate(byte[] payload)
     {
@@ -351,6 +415,9 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     {
         while (packets.Count > 0) RemoveFirst(discarded: true);
         DiscardPcm(); decoder.ResetState(); started = hasPosition = hasTimestamp = false;
+        restartWaited = false;
+        gapRestart = false;
+        recentRebuffers.Clear();
         missingSamples = 0; fadeRemaining = 240;
         adaptive.Reset();
     }
@@ -379,7 +446,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 ReserveDecreases: adaptive.Decreases, AdaptiveReserve: adaptive.Enabled,
                 ClockTargetMs: clock.Enabled ? clock.TargetSamples / 48 : null,
                 ClockFilteredQueueMs: clock.FilteredQueueSamples / 48,
-                RecoveryDiscardedPackets: recoveryDiscardedPackets, RecoveryDiscardedMs: recoveryDiscardedSamples / 48.0);
+                RecoveryDiscardedPackets: recoveryDiscardedPackets, RecoveryDiscardedMs: recoveryDiscardedSamples / 48.0,
+                ShortReserveRestarts: shortReserveRestarts, RecoveryReserveMs: recoveryReserveSamples > 0 ? recoveryReserveSamples / 48 : null);
         }
     }
     public void Dispose()
