@@ -48,7 +48,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private readonly bool experimental;
     private readonly int emptyHoldSamples;
     private readonly int coarsePeerFloorSamples;
-    private int PeerReserveFloorSamples => quantumSamples >= 480 ? coarsePeerFloorSamples : 0;
+    private int latestRemoteSamples;
+    private int PeerReserveFloorSamples => latestRemoteSamples >= 480 ? coarsePeerFloorSamples : 0;
     private int CurrentReserveSamples => Math.Max(adaptive.TargetSamples, PeerReserveFloorSamples);
     private readonly bool pcmTransport;
     private uint? source;
@@ -194,6 +195,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 if (hasTimestamp && (stamp - highestTimestamp) % quantumSamples != 0) { invalid++; outcome = "invalid"; return; }
                 // Reject overlapping spans before they can alter decoder state.
                 if (Overlaps(stamp, samples)) { invalid++; outcome = "overlap"; return; }
+                if (!hasTimestamp || stamp >= highestTimestamp) latestRemoteSamples = samples;
                 highestTimestamp = hasTimestamp ? Math.Max(highestTimestamp, stamp) : stamp; hasTimestamp = true;
                 var hash = timeline.Enabled ? AudioFrameTimeline.Hash(payload) : null;
                 var storage = packetPool.Rent(payload.Length);
@@ -543,6 +545,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         recentRebuffers.Clear();
         missingSamples = 0; fadeRemaining = 240;
         hasRemoteQuantum = false;
+        latestRemoteSamples = 0;
         adaptive.Reset();
         primingSignal?.Reset();
     }

@@ -88,3 +88,18 @@ Git에서 빌드/실행하면 생성 runtimeconfig에 자동 반영된다. 수�
 
 
 [070 토폴로지·무선 경로 대조](reports/EXTREME-070.md): 기존 PC 이더넷 이후 메시 무선 백홀이 확인됐다. 2.4GHz의 지속 지연은 로컬 게이트웨이 대조에서도 재현됐고, 어댑터 재초기화 뒤 회복됐지만 AX 자체 원인으로 판정하지 않는다. 이 보고서의 RTT는 전체 음성 지연이 아니며 음성 기본값·배포본을 바꾸지 않았다.
+
+## 079 선택적 자동 프레임 시험
+
+```powershell
+./native/run.ps1 -Experiment opus-auto-frames
+./native/build.ps1 -ReadyToRun -StageOnly
+```
+
+자동 프리셋은 2.5ms로 시작하며 호환되는 상대 1명의 실제 수신 피드백으로 5/10ms를 시험하고 효과가 없으면 복귀한다. 다자·피드백 만료 시에는 현재 길이를 유지한다. 양쪽 최신 빌드를 사용한다. 기존 UI 진단 폴링이 제어를 구동하므로 별도 엔진 호스트도 GetDiagnostics를 주기적으로 호출해야 한다.
+
+시험 도구의 기존 실험 JSON에 `ProAudioCapture:true`, `CriticalAudioPriority:true`를 추가하면 스레드별 MMCSS 대조를 할 수 있다. 자동 프레임은 2.5ms Opus 적응 여유 구성에 `AdaptiveFrames:true`를 추가한다. 이 옵션들은 기본 false이며 run.ps1의 별도 스위치는 아니다. 우선순위 성공·오류는 실행 진단을 확인한다.
+
+ReadyToRun은 선택적 win-x64 빌드다. StageOnly는 기존 dist 대신 격리 출력 경로를 반환한다. NoRestore와 함께 사용하지 않는다. 배포 대상에는 .NET10 Desktop Runtime이 필요하다. 개선량은 측정 전이며 크기가 증가한다.
+
+미디어 선택은 이제 전역/ULA IPv6도 지원한다. 주소의 실제 연결 가능성과 방화벽은 별도 조건이다. 선택 후보의 UDP 표시는 TURN 서버로 가는 클라이언트 구간까지 검증한 것이 아니다. 상세 조건·시험 한계는 [079 보고서](reports/EXTREME-079.md)를 참고한다.

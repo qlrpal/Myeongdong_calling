@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 
 namespace VoiceNative;
 
@@ -14,12 +13,15 @@ internal sealed class DedicatedAudioSender : IDisposable
     private readonly TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool mmcssActive, disposed;
     private Exception? failure;
+    private readonly bool criticalPriority;
+    private AudioThreadPriority? scheduling;
     public Task Completion => completed.Task;
     public bool MmcssActive => Volatile.Read(ref mmcssActive);
     public string? Failure => Volatile.Read(ref failure)?.ToString();
 
-    public DedicatedAudioSender(AudioSendQueue queue, Action<OutgoingAudio> send)
+    public DedicatedAudioSender(AudioSendQueue queue, Action<OutgoingAudio> send, bool criticalPriority = false)
     {
+        this.criticalPriority = criticalPriority;
         this.queue = queue; this.send = send;
         thread = new Thread(Run) { IsBackground = true, Name = "Voice dedicated sender" };
         try { thread.Start(); }
@@ -30,12 +32,10 @@ internal sealed class DedicatedAudioSender : IDisposable
     public void Stop() => stop.Set();
     private void Run()
     {
-        IntPtr priority = IntPtr.Zero;
         try
         {
-            uint index = 0;
-            priority = AvSetMmThreadCharacteristics("Pro Audio", ref index);
-            Volatile.Write(ref mmcssActive, priority != IntPtr.Zero);
+            scheduling = new AudioThreadPriority("Pro Audio", criticalPriority);
+            Volatile.Write(ref mmcssActive, scheduling.Active);
             WaitHandle[] signals = [stop, ready];
             while (!stop.WaitOne(0))
             {
@@ -49,7 +49,7 @@ internal sealed class DedicatedAudioSender : IDisposable
         catch (Exception error) { Volatile.Write(ref failure, error); }
         finally
         {
-            if (priority != IntPtr.Zero) AvRevertMmThreadCharacteristics(priority);
+            scheduling?.Dispose();
             completed.TrySetResult();
         }
     }
@@ -61,9 +61,4 @@ internal sealed class DedicatedAudioSender : IDisposable
         stop.Set(); thread.Join(); ready.Dispose(); stop.Dispose(); disposed = true;
     }
 
-    [DllImport("avrt.dll", CharSet = CharSet.Unicode, ExactSpelling = true, EntryPoint = "AvSetMmThreadCharacteristicsW")]
-    private static extern IntPtr AvSetMmThreadCharacteristics(string taskName, ref uint taskIndex);
-    [DllImport("avrt.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 }

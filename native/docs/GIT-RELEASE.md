@@ -1,6 +1,6 @@
 # Git 소스 배포 · 극저지연 실험 브랜치
 
-현재 브랜치는 `codex/extreme-latency`입니다. 제품 기반 버전0.6.0에 극저지연 실험·송신 수명·할당 감소 변경이 누적된 상태입니다. 새 안정판 태그를 확정하지 않았습니다. [현재 상태](CURRENT-STATUS.md)를 먼저 참고하세요. 소스와 재현 가능한 검사·문서를 함께 커밋하며, 실행 파일 ZIP 배포와는 별도입니다.
+현재 브랜치는 `codex/extreme-latency`입니다. 제품 기반 버전0.6.0에 극저지연 실험·송신 수명·할당 감소·수신 피드백 기반 프레임 전환 변경이 누적된 상태입니다. 새 안정판 태그를 확정하지 않았습니다. [현재 상태](CURRENT-STATUS.md)를 먼저 참고하세요. 소스와 재현 가능한 검사·문서를 함께 커밋하며, 실행 파일 ZIP 배포와는 별도입니다.
 
 ## 반영 범위
 
@@ -17,7 +17,7 @@
 
 ## 제외·보존
 
-`web/`, `native/.local/`, `native/dist/`, `native/dist.zip`, `bin/`, `obj/`, SDK·NuGet 캐시·node_modules·IDE 사용자 상태, 환경 파일·키, 진단 JSON·로그·ETL·캡처·덤프는 Git 대상이 아닙니다. 생성물과 원본 진단 자료는로컬에 보존합니다. 개인 인계는 `.local/handoff/`로 분리하고 `docs/HANDOFF*.md`도 제외합니다. 공개 실험 요약은 `docs/reports/`에 포함하며 실제 SSID/BSSID 대신 역할 이름을 사용합니다. `.env.example`과 의존성 잠금 파일은 소스에 포함합니다.
+`web/`, `native/.local/`, `native/dist/`, `native/dist.zip`, `bin/`, `obj/`, SDK·NuGet 캐시·node_modules·IDE 사용자 상태, 환경 파일·키, 진단 JSON·로그·ETL·캡처·덤프는 Git 대상이 아닙니다. 생성물과 원본 진단 자료는 로컬에 보존합니다. 개인 인계는 `.local/handoff/`로 분리하고 `docs/HANDOFF*.md`도 제외합니다. 공개 실험 요약은 `docs/reports/`에 포함하며 실제 SSID/BSSID 대신 역할 이름을 사용합니다. `.env.example`과 의존성 잠금 파일은 소스에 포함합니다.
 
 ## 반영 명령
 
@@ -28,7 +28,7 @@ git status --short
 git add .gitignore .gitattributes .editorconfig README.md native/
 git diff --cached --stat
 git diff --cached --check
-git commit -m "perf: optimize experimental native audio pipeline"
+git commit -m "feat: add experimental adaptive audio frames and diagnostics"
 git push -u origin HEAD
 ```
 
@@ -46,9 +46,17 @@ git push -u origin HEAD
 
 첫 검사는 잠금 파일에 따라 의존성을 복원합니다. 기본 검사는 마이크를 여는 실통화를 시작하지 않습니다. 네트워크 통합 검사는 localhost UDP와 WebRTC를 사용합니다. 실제 두 PC·장치 시험은 별도 자동 시험 명령이며 환경·방화벽·장치가 필요합니다.
 
-기능·검증·남은 범위는 [현재 상태](CURRENT-STATUS.md)와 [078 보고서](reports/EXTREME-078.md)를 참고합니다. 게임 부하·그룹/외부 장시간 시험은 남았고 집 네트워크 내부 원인 조사는 보류했습니다. 국소 시험 통과를 입→귀 지연 개선이나 안정판 승격으로 바꾸지 않습니다.
+기능·검증·남은 범위는 [현재 상태](CURRENT-STATUS.md)와 [079 보고서](reports/EXTREME-079.md)를 참고합니다. 게임 부하·그룹/외부 장시간 시험은 남았고 집 네트워크 내부 원인 조사는 보류했습니다. 국소 시험 통과를 입→귀 지연 개선이나 안정판 승격으로 바꾸지 않습니다.
 
-## 이번 정리 확인 · 2026-10-22
+## 이번 정리 확인 · 2026-10-22 (079 포함)
+
+소스 반영 후보는 219개다. 이번 변경은 `opus-auto-frames`, 캡처 프레임 경계 전환과 누적 샘플 RTP 시간축, 선택적 MMCSS·ReadyToRun, IPv6 선택·통합 검사, TURN 읽기 전용 진단과 079 보고서를 포함한다. 추가된 C# 파일과 `server/deploy/inspect-turn.sh`도 함께 반영한다. 기본 설정·기존 배포본·서버 설정은 유지한다.
+
+전체 후보의 UTF-8·대용량/바이너리·개인 키/식별자 패턴과 공개 Markdown 내부 링크를 검사했다. 이미 추적된 파일 중 제외 규칙에 걸리는 파일도 없다. 원본 로그·캐시·격리 빌드·이전 dist는 로컬에 보존한다. 패턴 검사는 전체 보안 감사가 아니다. 스테이징·커밋·푸시는 하지 않았다.
+
+후보만 복사한 격리 소스에서 기존 bin/obj 없이 잠금 복원·Release 빌드·제품 검사·서버 8개 검사를 통과했다. 빌드 경고·오류는 0이다. 기존 NuGet 캐시를 사용하고 이 복원에서 취약성 네트워크 조회는 생략했다. 이 검증 후에는 결과를 적는 문서만 갱신했다. 원본 작업 폴더에서 실행한 전체 회귀 및 IPv4/IPv6 미디어 통합 검사는 [079 보고서](reports/EXTREME-079.md)에 기록했다. 빈 캐시·다른 PC·장시간 외부 통화 검증과는 구분한다.
+
+## 이전 정리 확인 · 2026-10-22 (078까지)
 
 Git 반영 후 전체 소스 후보213개를 확인했다. 후보에 실행 바이너리·대용량 생성물·개인 키 패턴·개인 사용자 경로·실제 SSID/MAC 식별자가 없고 공개 Markdown 내부 링크가 모두 후보 파일로 연결됨을 확인했다. 패턴 검사이며 전체 보안 감사는 아니다. 개인 인계·이전 dist/ZIP·원본 캡처는 삭제하지 않고 로컬 보존했다. 스테이징·커밋·푸시는 실행하지 않았다.
 

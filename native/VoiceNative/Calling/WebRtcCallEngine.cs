@@ -19,6 +19,8 @@ public sealed class WebRtcCallEngine : ICallEngine
     private readonly Dictionary<string, Peer> peers = new();
     // Publish only on membership changes; sending never copies or locks the map.
     private Peer[] sendPeers = [];
+    private readonly object framePolicySync = new();
+    private FrameAdaptationDiagnostics? frameAdaptation;
     private readonly List<RTCIceServer> iceServers = new();
     private CancellationTokenSource? cancellation;
     private Task? eventLoop;
@@ -51,7 +53,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private string? selectedCaptureId, selectedRenderId;
     private bool microphoneMuted;
     private LatencyExperiment? experiment;
-    private double FrameDurationMs => experiment?.FrameMs ?? 10;
+    private double FrameDurationMs => microphone?.FrameDurationMs ?? experiment?.FrameMs ?? 10;
     public void SetLatencyExperiment(LatencyExperiment? experiment)
     {
         experiment?.Validate();
@@ -99,11 +101,14 @@ public sealed class WebRtcCallEngine : ICallEngine
     public event Action<string>? Status;
     private sealed record Session(string Id, string Token, RemotePeer[] Peers);
     private sealed record RemotePeer(string Id, string Name);
-    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision)
+    private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision,
+        ConcurrentDictionary<string, byte> CandidateFamilies)
     {
         public AudioSendLifetime SendLifetime { get; } = new();
+        public AdaptiveFramePolicy FramePolicy { get; } = new();
         public long LastSentSequence { get; set; }
         public long FirstSequence { get; set; }
+        public long FirstSampleOffset { get; set; }
         public uint TimestampBase { get; set; }
         public int PayloadTypeId { get; set; } = 111;
         public RTCDataChannel? DiagnosticsChannel { get; set; }
@@ -177,18 +182,18 @@ public sealed class WebRtcCallEngine : ICallEngine
             sendQueue = new AudioSendQueue(sendCapacity); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
             dedicatedSender = experiment?.DedicatedSend == true ? new(activeQueue,
-                frame => DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0)) : null;
+                frame => DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0), experiment.CriticalAudioPriority) : null;
             var activeSender = dedicatedSender;
-            microphone.OnAudioSourceEncodedSample += (_, bytes) =>
+            microphone.OnAudioSourceEncodedSample += (samples, bytes) =>
             {
                 if (experiment?.InlineSend == true)
                 {
-                    var frame = activeQueue.CreateFrame(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
+                    var frame = activeQueue.CreateFrame(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin, (int)samples);
                     activeQueue.Observe(frame); DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0);
                 }
                 else
                 {
-                    activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
+                    activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin, (int)samples);
                     activeSender?.Notify();
                 }
             };
@@ -240,6 +245,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         }
         catch { pc?.Close("media interface unavailable"); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
         var metrics = new PeerMetrics();
+        var candidateFamilies = new ConcurrentDictionary<string, byte>();
         var precision = new RtcpMetrics();
         var receivedPayloadType = 111;
         pc.OnRtpPacketReceived += (_, media, packet) =>
@@ -278,6 +284,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (candidate is not null)
             {
+                candidateFamilies.TryAdd(AddressFamily(candidate.address), 0);
                 Status?.Invoke($"{name}: 로컬 후보 {candidate.type} {candidate.address}:{candidate.port}");
                 _ = SendCandidate(id, candidate);
             }
@@ -289,7 +296,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         };
         sink.OnAudioSinkError += message => Status?.Invoke("출력 오류: " + message);
         sink.OnAudioSinkRecovered += message => Status?.Invoke(name + ": " + message);
-        var peer = new Peer(pc, sink, decoder, name, metrics, precision);
+        var peer = new Peer(pc, sink, decoder, name, metrics, precision, candidateFamilies);
         pc.ondatachannel += channel => { if (channel.label == "voice-latency-v1") AttachTelemetry(peer, channel); };
         pc.OnAudioFormatsNegotiated += formats =>
         {
@@ -422,6 +429,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             try
             {
                 if (microphone is not null) { await microphone.Close(); microphone = null; }
+                frameAdaptation = null;
                 sendQueue?.Complete(); sendCancellation?.Cancel();
                 dedicatedSender?.Stop();
                 if (sendTask is not null) await sendTask;
@@ -588,6 +596,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     {
         KeyValuePair<string, Peer>[] current;
         lock (peers) current = peers.ToArray();
+        UpdateFramePolicy(current.Select(p => p.Value));
         var mic = microphone?.Snapshot();
         var sender = sendQueue?.Snapshot();
         if (sender is not null) sender = sender with { Mode = dedicatedSender is not null ? "dedicated" : experiment?.InlineSend == true ? "inline" : "queued",
@@ -607,7 +616,11 @@ public sealed class WebRtcCallEngine : ICallEngine
             var channel = peer.DiagnosticsChannel;
             if (channel?.readyState == RTCDataChannelState.open && channel.bufferedAmount < 4096)
             {
-                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs))); }
+                var feedback = audio.RtpPlayout is { } playout && audio.DecodedMs is { } decodedMs
+                    ? new ReceiverFrameFeedback(experiment?.AdaptiveShortReserve == true && experiment.Pcm == false,
+                        sample.Rx, decodedMs, playout.ConcealedMs, playout.LatePackets, playout.SourceChanges,
+                        audio.DeviceError is null && audio.PlaybackState == "재생" && audio.LastFrameAgeMs is <= 250) : null;
+                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs, feedback))); }
                 catch (Exception) { } // Diagnostics must not interrupt audio if the channel closes.
             }
             var nominated = peer.Connection.GetRtpChannel().NominatedEntry;
@@ -615,11 +628,38 @@ public sealed class WebRtcCallEngine : ICallEngine
                 nominated is null ? "경로 미선정" : nominated.LocalCandidate.type == RTCIceCandidateType.relay || nominated.RemoteCandidate.type == RTCIceCandidateType.relay ? "TURN 중계" : "직접 연결",
                 nominated is null ? null : FormatEndpoint(nominated.LocalCandidate),
                 nominated is null ? null : FormatEndpoint(nominated.RemoteCandidate),
-                sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, audio, detail, view);
+                sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, audio, detail, view,
+                nominated?.LocalCandidate.protocol.ToString(), nominated is null ? null : AddressFamily(nominated.LocalCandidate.address),
+                nominated is null ? null : AddressFamily(nominated.RemoteCandidate.address), peer.CandidateFamilies.Keys.Order().ToArray());
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
             System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, FrameDurationMs, encoder?.Snapshot(),
-            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress, experiment);
+            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress, experiment, frameAdaptation);
+    }
+    private void UpdateFramePolicy(IEnumerable<Peer> current)
+    {
+        var source = microphone;
+        if (experiment?.AdaptiveFrames != true || source is null) return;
+        lock (framePolicySync)
+        {
+            var connected = current.Where(p => p.Connection.connectionState == RTCPeerConnectionState.connected).ToArray();
+            // A shared encoder cannot independently satisfy several receivers.
+            // Keep multi-peer calls fixed until per-peer control is qualified.
+            var ready = connected.Length == 1;
+            var now = ProbeClock.Now;
+            var reports = connected.Select(peer => (Peer: peer, Report: peer.Telemetry.Snapshot())).ToArray();
+            if (reports.Any(p => p.Report.Age is not <= 3 || p.Report.Remote?.FrameFeedback is not { Supported: true, OutputHealthy: true })) ready = false;
+            foreach (var entry in reports)
+            {
+                if (!ready) entry.Peer.FramePolicy.Suspend();
+                else entry.Peer.FramePolicy.Observe(now, entry.Report.Remote!.FrameFeedback!);
+            }
+            var target = ready ? connected.Max(p => p.FramePolicy.TargetMs) : FrameDurationMs;
+            if (ready) source.RequestFrameDuration(target);
+            frameAdaptation = new(FrameDurationMs, target, ready,
+                ready ? string.Join("; ", connected.Select(p => p.FramePolicy.Reason)) : "requires one fresh compatible receiver; hold current frame",
+                connected.Sum(p => p.FramePolicy.Changes));
+        }
     }
     private void AttachTelemetry(Peer peer, RTCDataChannel channel)
     {
@@ -769,14 +809,14 @@ public sealed class WebRtcCallEngine : ICallEngine
             try
             {
                 if (peer.Connection.connectionState != RTCPeerConnectionState.connected) continue;
-                if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
-                var timestamp = AudioSendQueue.Timestamp(peer.TimestampBase, peer.FirstSequence, frame.Sequence, (uint)(experiment?.FrameSamples ?? 480));
+                if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.FirstSampleOffset = frame.SampleOffset; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
+                var timestamp = unchecked(peer.TimestampBase + (uint)(frame.SampleOffset - peer.FirstSampleOffset));
                 var sentAt = ProbeClock.Now;
                 if (frame.TraceHash is { } traceHash) TraceSentFrame(traceHash, sentAt);
                 peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,
                     peer.LastSentSequence == 0 || frame.Sequence != peer.LastSentSequence + 1 ? 1 : 0, peer.PayloadTypeId);
                 if (pipeline.Enabled) pipeline.Sent(new(peer.Connection.AudioLocalTrack.Ssrc, timestamp, frame.Sequence,
-                    frame.Created / (double)System.Diagnostics.Stopwatch.Frequency, dequeuedAt, sentAt, ProbeClock.Now, frame.Origin));
+                    frame.Created / (double)System.Diagnostics.Stopwatch.Frequency, dequeuedAt, sentAt, ProbeClock.Now, frame.Origin, frame.Samples, frame.SampleOffset));
                 peer.LastSentSequence = frame.Sequence; peer.Metrics.Sent(frame.Payload.Length);
             }
             catch (Exception ex) { error = peer.Name + ": 음성 송신 오류: " + ex.Message; }
@@ -799,4 +839,6 @@ public sealed class WebRtcCallEngine : ICallEngine
         microphone?.Timeline.Update(hash, old => old with { SentAt = at });
     private static string FormatEndpoint(RTCIceCandidate candidate) =>
         candidate.address.Contains(':') ? $"[{candidate.address}]:{candidate.port}" : $"{candidate.address}:{candidate.port}";
+    private static string AddressFamily(string address) => System.Net.IPAddress.TryParse(address, out var parsed)
+        ? parsed.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4" : "hostname";
 }

@@ -21,7 +21,15 @@ internal sealed class WindowsAudioDevice
     private readonly bool preferLowLatency;
     private readonly bool boundedRender, rawRender;
     private readonly AudioStreamCategory renderCategory;
-    private readonly int frameSamples;
+    private readonly CaptureFrameSizes captureFrames;
+    private int frameSamples => captureFrames.Samples;
+    internal double FrameDurationMs => frameSamples / 48.0;
+    internal void RequestFrameDuration(double milliseconds)
+    {
+        if (experiment?.AdaptiveFrames != true || milliseconds is not (2.5 or 5 or 10))
+            throw new InvalidOperationException("Dynamic capture frames are not enabled.");
+        captureFrames.Request((int)(milliseconds * 48));
+    }
     private readonly IPlayoutBuffer? buffer;
     private readonly object audioLock = new();
     private bool closed;
@@ -68,7 +76,7 @@ internal sealed class WindowsAudioDevice
         this.boundedRender = boundedRender; this.rawRender = rawRender; this.renderCategory = renderCategory;
         experiment?.Validate(); this.experiment = experiment;
         if (experiment is null && frameMs is not (10 or 20)) throw new ArgumentOutOfRangeException(nameof(frameMs));
-        frameSamples = experiment?.FrameSamples ?? checked((int)(frameMs * 48)); captureFrameBytes = new byte[frameSamples * 2]; capturePcm = new short[frameSamples];
+        captureFrames = new(experiment?.FrameSamples ?? checked((int)(frameMs * 48)), experiment?.AdaptiveFrames == true);
         if (experiment?.Pcm == true) pcmFormat = new(AudioCodecsEnum.L16, 112, 48000, 1);
         this.encoder = encoder;
         this.pipeline = pipeline;
@@ -80,7 +88,7 @@ internal sealed class WindowsAudioDevice
                 // Initialise/JIT the lazy Opus encoder before the real capture callback.
                 encoder.EncodeAudio(new short[frameSamples], pcmFormat);
                 input = new SharedCaptureRecorder(preferLowLatency, intermediateCapture, captureDeviceId, experiment?.MinimumCapture == true,
-                    experiment?.StagedDeviceBuffers == true, experiment?.PeriodWatchdog == true);
+                    experiment?.StagedDeviceBuffers == true, experiment?.PeriodWatchdog == true, experiment?.ProAudioCapture == true, experiment?.CriticalAudioPriority == true);
                 captureConverter = new NativeCaptureConverter(input.WaveFormat);
                 inputFallbackReason = input.LowLatencyUnavailableReason;
                 input.DataAvailable += (data, flags, devicePosition, qpcPosition) =>
@@ -127,7 +135,7 @@ internal sealed class WindowsAudioDevice
         var priming = experiment?.StagedDeviceBuffers == true ? buffer as RtpOpusPlayoutBuffer : null;
         var player = new SharedRenderPlayer(requestedOutputMs, preferLowLatency, boundedRender, rawRender, renderCategory, renderDeviceId, experiment?.MinimalOutput == true, experiment?.OutputHeadroomMs ?? 0,
             experiment?.StagedDeviceBuffers == true, experiment?.RenderPeriodWatchdog == true, experiment?.TraceRenderWork == true,
-            priming is null ? null : priming.CanPrimeOutput, priming?.PrimingSignal);
+            priming is null ? null : priming.CanPrimeOutput, priming?.PrimingSignal, experiment?.CriticalAudioPriority == true);
         try
         {
             using var enumerator = new MMDeviceEnumerator();
@@ -187,6 +195,7 @@ internal sealed class WindowsAudioDevice
                 {
                     if (captureFrameCount == 0)
                     {
+                        captureFrames.ApplyAtBoundary();
                         frameCaptureAt = packetCaptureAt is { } packetAt ? packetAt + offset / 96000.0 : null;
                         frameFirstCallbackAt = callbackAt;
                     }
@@ -223,8 +232,8 @@ internal sealed class WindowsAudioDevice
             finally { captureWork.Add(Stopwatch.GetElapsedTime(callbackStarted).TotalMilliseconds); }
         }
     }
-    private readonly byte[] captureFrameBytes;
-    private readonly short[] capturePcm;
+    private byte[] captureFrameBytes => captureFrames.Bytes;
+    private short[] capturePcm => captureFrames.Pcm;
     private int captureFrameCount;
     public void GotEncodedMediaFrame(EncodedAudioFrame frame)
     {

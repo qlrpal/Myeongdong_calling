@@ -45,7 +45,7 @@ try {
 }
 finally { Pop-Location }
 if ($Integration) {
-    foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration', '--rtp-playout-integration')) {
+    foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration', '--rtp-playout-integration', '--variable-frame-integration', '--ipv6-loopback-integration')) {
         & $probe $check
         if ($LASTEXITCODE -ne 0) { throw "Integration failed: $check" }
     }

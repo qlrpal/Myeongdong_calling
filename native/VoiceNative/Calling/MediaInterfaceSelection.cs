@@ -20,10 +20,12 @@ internal static class MediaInterfaceSelection
             try
             {
                 var properties = adapter.GetIPProperties();
-                foreach (var address in properties.UnicastAddresses.Select(a => a.Address).Where(a =>
-                    a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a)
-                    && !a.Equals(IPAddress.Any) && !a.ToString().StartsWith("169.254.", StringComparison.Ordinal)))
-                    result.Add(new(address.ToString(), properties.GetIPv4Properties().Index, $"{adapter.Name} · {address}"));
+                foreach (var address in properties.UnicastAddresses.Select(a => a.Address).Where(IsSelectable))
+                {
+                    var index = address.AddressFamily == AddressFamily.InterNetworkV6
+                        ? properties.GetIPv6Properties().Index : properties.GetIPv4Properties().Index;
+                    if (index > 0) result.Add(new(address.ToString(), index, $"{adapter.Name} · {address}"));
+                }
             }
             catch (NetworkInformationException) { /* Adapter disappeared during enumeration; explicit selection then fails closed. */ }
         }
@@ -32,15 +34,24 @@ internal static class MediaInterfaceSelection
     public static MediaInterfaceChoice? Resolve(string? address)
     {
         if (address is null) return null;
-        if (!IPAddress.TryParse(address, out var parsed) || parsed.AddressFamily != AddressFamily.InterNetwork)
-            throw new ArgumentException("사용할 로컬 IPv4 주소를 선택하세요.", nameof(address));
+        if (!IPAddress.TryParse(address, out var parsed) || !IsSelectable(parsed))
+            throw new ArgumentException("사용할 로컬 IPv4/IPv6 유니캐스트 주소를 선택하세요.", nameof(address));
         return Choices().FirstOrDefault(c => c.Address == parsed.ToString())
             ?? throw new ArgumentException("선택한 네트워크 주소를 현재 사용할 수 없습니다. 인터페이스를 다시 선택하세요.", nameof(address));
     }
     internal static void Apply(Socket socket, MediaInterfaceChoice choice)
     {
-        if (socket.AddressFamily != AddressFamily.InterNetwork || choice.Index <= 0)
-            throw new ArgumentException("Explicit media routing requires a valid IPv4 interface.", nameof(choice));
-        socket.SetSocketOption(SocketOptionLevel.IP, (SocketOptionName)31 /* Windows SDK IP_UNICAST_IF; interface index is network byte order. */, IPAddress.HostToNetworkOrder(choice.Index));
+        if (!IPAddress.TryParse(choice.Address, out var address) || socket.AddressFamily != address.AddressFamily || choice.Index <= 0)
+            throw new ArgumentException("Explicit media routing requires a matching address family/interface.", nameof(choice));
+        var ipv6 = socket.AddressFamily == AddressFamily.InterNetworkV6;
+        // Windows IPV6_UNICAST_IF uses host byte order; IPv4 IP_UNICAST_IF uses network order.
+        socket.SetSocketOption(ipv6 ? SocketOptionLevel.IPv6 : SocketOptionLevel.IP, (SocketOptionName)31,
+            ipv6 ? choice.Index : IPAddress.HostToNetworkOrder(choice.Index));
     }
+    internal static bool IsSelectable(IPAddress address) => !IPAddress.IsLoopback(address)
+        && (address.AddressFamily == AddressFamily.InterNetwork
+            ? !address.Equals(IPAddress.Any) && !address.Equals(IPAddress.Broadcast)
+                && address.GetAddressBytes()[0] < 224 && !address.ToString().StartsWith("169.254.", StringComparison.Ordinal)
+            : address.AddressFamily == AddressFamily.InterNetworkV6 && !address.Equals(IPAddress.IPv6Any)
+                && !address.IsIPv6LinkLocal && !address.IsIPv6Multicast && !address.IsIPv4MappedToIPv6);
 }

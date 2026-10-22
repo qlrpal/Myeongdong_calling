@@ -52,6 +52,8 @@ internal sealed class SharedRenderPlayer : IDisposable
     private byte[] staging = [];
     private long timeoutWakes, maxWakeTicks, maxProviderTicks, maxRunningProviderTicks, maxLeaseTicks, emptyOnWake, emptyDuringSupply;
     private bool mmcssActive;
+    private readonly bool criticalPriority;
+    private AudioThreadPriority? scheduling;
     private sealed record EmptyObservation(double At, string Phase);
     private EmptyObservation? lastEmpty;
     // One render-thread writer; immutable entries are published only for slow work/misses.
@@ -74,15 +76,17 @@ internal sealed class SharedRenderPlayer : IDisposable
             return new(stagedBuffers, periodWatchdog, Volatile.Read(ref mmcssActive), Interlocked.Read(ref timeoutWakes),
                 Milliseconds(maxWakeTicks), Milliseconds(maxProviderTicks), Milliseconds(maxLeaseTicks),
                 Interlocked.Read(ref emptyOnWake), Interlocked.Read(ref emptyDuringSupply), observed?.At, observed?.Phase,
-                Milliseconds(maxRunningProviderTicks), prime < 0 ? null : Volatile.Read(ref primingWaitMs), prime < 0 ? null : prime == 1, traceWork ? WorkSnapshot() : null);
+                Milliseconds(maxRunningProviderTicks), prime < 0 ? null : Volatile.Read(ref primingWaitMs), prime < 0 ? null : prime == 1, traceWork ? WorkSnapshot() : null,
+                scheduling?.TaskName, scheduling?.CriticalSet, scheduling?.Error);
         }
     }
     private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
     private static void Maximum(ref long target, long ticks) => Volatile.Write(ref target, Math.Max(Volatile.Read(ref target), ticks));
     private MMDevice GetEndpoint(MMDeviceEnumerator enumerator) => endpointId is null
         ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia) : enumerator.GetDevice(endpointId);
-    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null, bool minimal = false, int minimalHeadroomMs = 0, bool stagedBuffers = false, bool periodWatchdog = false, bool traceWork = false, Func<int, bool>? canPrimeSource48k = null, WaitHandle? primingSignal = null)
+    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null, bool minimal = false, int minimalHeadroomMs = 0, bool stagedBuffers = false, bool periodWatchdog = false, bool traceWork = false, Func<int, bool>? canPrimeSource48k = null, WaitHandle? primingSignal = null, bool criticalPriority = false)
     {
+        this.criticalPriority = criticalPriority;
         if (minimalHeadroomMs is < 0 or > 5) throw new ArgumentOutOfRangeException(nameof(minimalHeadroomMs));
         this.minimalHeadroomMs = minimalHeadroomMs; this.minimal = minimal; this.endpointId = endpointId; this.category = category;
         this.stagedBuffers = stagedBuffers; this.periodWatchdog = periodWatchdog; this.traceWork = traceWork;
@@ -183,11 +187,11 @@ internal sealed class SharedRenderPlayer : IDisposable
     }
     private void Render()
     {
-        IntPtr priority = IntPtr.Zero; Exception? failure = null; var active = client!;
+        Exception? failure = null; var active = client!;
         try
         {
-            uint index = 0; priority = AvSetMmThreadCharacteristics(minimal ? "Pro Audio" : "Audio", ref index);
-            Volatile.Write(ref mmcssActive, priority != IntPtr.Zero);
+            scheduling = new AudioThreadPriority(minimal ? "Pro Audio" : "Audio", criticalPriority);
+            Volatile.Write(ref mmcssActive, scheduling.Active);
             var render = active.AudioRenderClient;
             if (minimal && stagedBuffers && canPrimeSource48k is not null && primingSignal is not null)
             {
@@ -238,7 +242,7 @@ internal sealed class SharedRenderPlayer : IDisposable
         {
             try { active.Stop(); active.Reset(); } catch (COMException) { }
             Volatile.Write(ref padding, 0);
-            if (priority != IntPtr.Zero) AvRevertMmThreadCharacteristics(priority);
+            scheduling?.Dispose();
         }
         if (failure is not null) PlaybackStopped?.Invoke(this, new StoppedEventArgs(failure));
     }
@@ -337,11 +341,4 @@ internal sealed class SharedRenderPlayer : IDisposable
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetThreadTimes(IntPtr thread, out long creation, out long exit, out long kernel, out long user);
-    [DllImport("avrt.dll", CharSet = CharSet.Unicode, ExactSpelling = true, EntryPoint = "AvSetMmThreadCharacteristicsW")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static extern IntPtr AvSetMmThreadCharacteristics(string name, ref uint index);
-    [DllImport("avrt.dll", ExactSpelling = true)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 }

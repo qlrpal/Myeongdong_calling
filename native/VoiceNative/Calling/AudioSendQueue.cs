@@ -2,12 +2,13 @@ using System.Threading.Channels;
 using System.Diagnostics;
 namespace VoiceNative;
 
-internal readonly record struct OutgoingAudio(long Sequence, long Created, byte[] Payload, string? TraceHash = null, CaptureOrigin? Origin = null);
+internal readonly record struct OutgoingAudio(long Sequence, long Created, byte[] Payload, string? TraceHash = null, CaptureOrigin? Origin = null,
+    long SampleOffset = 0, int Samples = 960);
 public sealed record SendDiagnostics(int PendingFrames, long DroppedFrames, double MaxWaitMs, double? LastWaitMs = null,
     string Mode = "queued", bool? MmcssActive = null, string? Error = null, int Capacity = 3);
 internal sealed class AudioSendQueue
 {
-    private long sequence, dropped;
+    private long sequence, dropped, nextSample;
     private double maxWait;
     private double lastWait = -1;
     private readonly Channel<OutgoingAudio> channel;
@@ -19,8 +20,13 @@ internal sealed class AudioSendQueue
         channel = Channel.CreateBounded<OutgoingAudio>(new BoundedChannelOptions(capacity)
         { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.DropOldest }, _ => Interlocked.Increment(ref dropped));
     }
-    public OutgoingAudio CreateFrame(byte[] payload, string? traceHash = null, CaptureOrigin? origin = null) => new(Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), payload, traceHash, origin);
-    public void Enqueue(byte[] payload, string? traceHash = null, CaptureOrigin? origin = null) => channel.Writer.TryWrite(CreateFrame(payload, traceHash, origin));
+    public OutgoingAudio CreateFrame(byte[] payload, string? traceHash = null, CaptureOrigin? origin = null, int samples = 960)
+    {
+        if (samples is not (48 or 120 or 240 or 480 or 960)) throw new ArgumentOutOfRangeException(nameof(samples));
+        return new(Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), payload, traceHash, origin,
+            Interlocked.Add(ref nextSample, samples) - samples, samples);
+    }
+    public void Enqueue(byte[] payload, string? traceHash = null, CaptureOrigin? origin = null, int samples = 960) => channel.Writer.TryWrite(CreateFrame(payload, traceHash, origin, samples));
     public IAsyncEnumerable<OutgoingAudio> Read(CancellationToken token) => channel.Reader.ReadAllAsync(token);
     public bool TryRead(out OutgoingAudio frame) => channel.Reader.TryRead(out frame);
     public void Observe(OutgoingAudio frame)

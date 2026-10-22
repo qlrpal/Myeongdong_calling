@@ -136,3 +136,7 @@ dotnet run --project native/TransportProbe -c Release -- --opus-ab-test https://
 같은 메인 AP의 PC Realtek·노트북 Intel 동시 대조는 [EXTREME-076](docs/reports/EXTREME-076.md)입니다. 실제 공통 분석138.53초에서 양쪽 모두 로컬 지연과 공통·개별 후보가 관측돼 Realtek 하나로 전체 현상을 설명하기 어려워졌습니다. 무선 환경·절전·AP/클라이언트 큐 내부 분리는 남았고, 노트북은 원래 메시 SSID로 복구했습니다.
 
 앱 송신의 전역 잠금·피어 수명 정리는 [EXTREME-077](docs/reports/EXTREME-077.md), 패킷 저장소 할당 감소와 직접/전용 송신 대조는 [EXTREME-078](docs/reports/EXTREME-078.md)에 기록했습니다. 검증된 저장소 개선은 적용했고 직접 송신 기본값은 유지합니다. 전용 송신은 비교용 옵션이며, 입→귀 지연 개선량이나 장시간 안정판 승격은 아직 확정하지 않았습니다.
+
+### 수신 상태 기반 프레임 시험
+
+`./native/run.ps1 -Experiment opus-auto-frames`는 호환 상대 1명의 수신 상태로 2.5/5/10ms를 시험하며 효과가 없으면 복귀합니다. 기존 기본 구성은 유지합니다. 선택적 MMCSS·ReadyToRun 빌드와 IPv6 지원의 사용 조건 및 검증 범위는 [079 보고서](docs/reports/EXTREME-079.md)를 참고하세요.

@@ -4,7 +4,8 @@ internal readonly record struct CaptureOrigin(double? FirstSampleAt, double Firs
     double CallbackAt, double LockRequestedAt, double LockAcquiredAt, double FrameReadyAt,
     double EncodeStart, double EncodeEnd, int CallbackSamples, int Flags);
 internal sealed record PipelineSend(uint Ssrc, uint Timestamp, long Sequence, double QueuedAt,
-    double DequeuedAt, double SendStart, double SendEnd, CaptureOrigin? Capture);
+    double DequeuedAt, double SendStart, double SendEnd, CaptureOrigin? Capture,
+    int? FrameSamples = null, long? SampleOffset = null);
 internal sealed record PipelineReceive(string Peer, uint Ssrc, uint Timestamp, ushort Sequence,
     double At, double BufferCallAt, double BufferReturnAt);
 internal sealed record PipelineAdmission(string Peer, uint Ssrc, uint Timestamp, double CalledAt,

@@ -38,8 +38,11 @@ internal sealed class SharedCaptureRecorder : IDisposable
     private readonly bool stagedBuffers, periodWatchdog;
     private long timeoutWakes, maxWakeTicks, maxLeaseTicks, maxCallbackTicks;
     private bool mmcssActive;
+    private readonly bool proAudio, criticalPriority;
+    private AudioThreadPriority? scheduling;
     public CaptureExecutionDiagnostics? Execution => client is null ? null : new(stagedBuffers, periodWatchdog,
-        Volatile.Read(ref mmcssActive), Interlocked.Read(ref timeoutWakes), Milliseconds(maxWakeTicks), Milliseconds(maxLeaseTicks), Milliseconds(maxCallbackTicks));
+        Volatile.Read(ref mmcssActive), Interlocked.Read(ref timeoutWakes), Milliseconds(maxWakeTicks), Milliseconds(maxLeaseTicks), Milliseconds(maxCallbackTicks),
+        scheduling?.TaskName, scheduling?.CriticalSet, scheduling?.Error);
     private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
     private static void Maximum(ref long target, long ticks) => Volatile.Write(ref target, Math.Max(Volatile.Read(ref target), ticks));
 
@@ -55,9 +58,10 @@ internal sealed class SharedCaptureRecorder : IDisposable
             && rounded * 1000.0 / rate < 10 ? (uint)rounded : null;
     }
 
-    public SharedCaptureRecorder(bool preferLowLatency, bool intermediatePeriod = true, string? captureEndpointId = null, bool minimumPeriod = false, bool stagedBuffers = false, bool periodWatchdog = false)
+    public SharedCaptureRecorder(bool preferLowLatency, bool intermediatePeriod = true, string? captureEndpointId = null, bool minimumPeriod = false, bool stagedBuffers = false, bool periodWatchdog = false, bool proAudio = false, bool criticalPriority = false)
     {
         this.minimumPeriod = minimumPeriod;
+        this.proAudio = proAudio; this.criticalPriority = criticalPriority;
         this.stagedBuffers = stagedBuffers; this.periodWatchdog = periodWatchdog;
         this.captureEndpointId = captureEndpointId;
         try
@@ -156,14 +160,12 @@ internal sealed class SharedCaptureRecorder : IDisposable
 
     private void CaptureLoop()
     {
-        IntPtr priority = IntPtr.Zero;
         Exception? failure = null;
         var active = client!;
         try
         {
-            uint index = 0;
-            priority = AvSetMmThreadCharacteristics(minimumPeriod ? "Pro Audio" : "Audio", ref index);
-            Volatile.Write(ref mmcssActive, priority != IntPtr.Zero);
+            scheduling = new AudioThreadPriority(minimumPeriod || proAudio ? "Pro Audio" : "Audio", criticalPriority);
+            Volatile.Write(ref mmcssActive, scheduling.Active);
             var capture = active.AudioCaptureClient;
             active.Start(); started!.SetResult();
             WaitHandle[] signals = [stop, ready];
@@ -203,7 +205,7 @@ internal sealed class SharedCaptureRecorder : IDisposable
         finally
         {
             try { active.Stop(); active.Reset(); } catch (COMException) { }
-            if (priority != IntPtr.Zero) AvRevertMmThreadCharacteristics(priority);
+            scheduling?.Dispose();
         }
         if (failure is not null) RecordingStopped?.Invoke(this, new StoppedEventArgs(failure));
     }
@@ -228,11 +230,4 @@ internal sealed class SharedCaptureRecorder : IDisposable
         ready.Dispose(); stop.Dispose(); disposed = true;
     }
 
-    [DllImport("avrt.dll", CharSet = CharSet.Unicode, ExactSpelling = true, EntryPoint = "AvSetMmThreadCharacteristicsW")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static extern IntPtr AvSetMmThreadCharacteristics(string taskName, ref uint taskIndex);
-    [DllImport("avrt.dll", ExactSpelling = true)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 }

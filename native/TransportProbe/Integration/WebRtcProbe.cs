@@ -10,14 +10,19 @@ internal static class WebRtcProbe
     {
         // Exercise native ICE + DTLS/SRTP + Opus without opening physical audio devices.
         var profileProbe = args is ["--opus-profile-integration", _];
-        var selectedProfile = profileProbe ? Enum.Parse<VoiceNative.OpusProfile>(args[1]) : VoiceNative.OpusProfile.Baseline;
+        var variableFrameProbe = args is ["--variable-frame-integration"];
+        var variableDurations = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        string? variableError = null;
+        var selectedProfile = profileProbe ? Enum.Parse<VoiceNative.OpusProfile>(args[1]) : variableFrameProbe ? VoiceNative.OpusProfile.LowDelay64 : VoiceNative.OpusProfile.Baseline;
         using var encoder = new VoiceNative.OpusAudioEncoder(selectedProfile);
         using var decoder = new AudioEncoder(includeOpus: true);
         var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
         var configuration = new RTCConfiguration();
         var turnProbe = args is ["--turn-integration", _];
         var rtpPlayoutProbe = args is ["--rtp-playout-integration"];
-        var tenMsProbe = args is ["--ten-ms-rtcp-integration"] || turnProbe || profileProbe || rtpPlayoutProbe;
+        var ipv6Probe = args is ["--ipv6-loopback-integration"];
+        if (ipv6Probe) configuration.X_BindAddress = System.Net.IPAddress.IPv6Loopback;
+        var tenMsProbe = args is ["--ten-ms-rtcp-integration"] || turnProbe || profileProbe || rtpPlayoutProbe || ipv6Probe || variableFrameProbe;
         var probeFrameSamples = tenMsProbe ? 480 : 960;
         var rtcpIntegration = args is ["--rtcp-integration"] || tenMsProbe;
         if (turnProbe || args.Length > 0 && !rtcpIntegration)
@@ -44,6 +49,19 @@ internal static class WebRtcProbe
         }
         using var left = new RTCPeerConnection(configuration);
         using var right = new RTCPeerConnection(configuration);
+        if (ipv6Probe)
+        {
+            var index = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .First(n => n.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                .GetIPProperties().GetIPv6Properties().Index;
+            foreach (var peer in new[] { left, right })
+            {
+                var socket = peer.GetRtpChannel().RtpSocket;
+                VoiceNative.MediaInterfaceSelection.Apply(socket, new("::1", index, "loopback test"));
+                if ((int)socket.GetSocketOption(System.Net.Sockets.SocketOptionLevel.IPv6, (System.Net.Sockets.SocketOptionName)31)! != index)
+                    throw new InvalidOperationException("IPv6 interface socket option mismatch");
+            }
+        }
         var leftRtcp = new VoiceNative.RtcpMetrics();
         var rightRtcp = new VoiceNative.RtcpMetrics();
         left.OnSendReport += (media, report) => { if (media == SDPMediaTypesEnum.audio) leftRtcp.Outgoing(report); };
@@ -93,10 +111,12 @@ internal static class WebRtcProbe
             try
             {
                 var pcm = decoder.DecodeAudio(packet.Payload, format);
-                if (pcm.Length != probeFrameSamples || pcm.All(x => x == 0)) throw new InvalidOperationException("Decoded Opus frame is invalid.");
+                var expectedSamples = variableFrameProbe ? Concentus.Structs.OpusPacketInfo.GetNumSamples(packet.Payload, 48000) : probeFrameSamples;
+                if (pcm.Length != expectedSamples || pcm.All(x => x == 0)) throw new InvalidOperationException("Decoded Opus frame is invalid.");
+                if (variableFrameProbe) variableDurations.Enqueue(pcm.Length);
                 received.TrySetResult();
             }
-            catch (Exception ex) { received.TrySetException(ex); }
+            catch (Exception ex) { if (variableFrameProbe) Volatile.Write(ref variableError, ex.ToString()); received.TrySetException(ex); }
         };
         try
         {
@@ -115,6 +135,8 @@ internal static class WebRtcProbe
                 foreach (var candidate in pendingLeft) left.addIceCandidate(candidate);
             }
             await Task.WhenAll(leftConnected.Task, rightConnected.Task).WaitAsync(TimeSpan.FromSeconds(20));
+            if (ipv6Probe && new[] { left, right }.Any(p => p.GetRtpChannel().NominatedEntry?.LocalCandidate.address != "::1"))
+                throw new InvalidOperationException("IPv6 probe silently selected a different address family");
             if (turnProbe)
             {
                 foreach (var peer in new[] { left, right })
@@ -161,6 +183,28 @@ internal static class WebRtcProbe
                 Console.WriteLine($"PASS: live native RTCP correlation; left RTT={lhs.RtcpRttMs:F2}ms inbound loss={lhs.ReceiveLossPercent:F2}%; right RTT={rhs.RtcpRttMs:F2}ms inbound loss={rhs.ReceiveLossPercent:F2}%.");
             }
             Console.WriteLine($"PASS: two native peers negotiated Opus, connected via ICE/DTLS, and delivered a decodable {probeFrameSamples / 48}ms SRTP audio frame.");
+            if (variableFrameProbe)
+            {
+                var before120 = variableDurations.Count(n => n == 120);
+                var before240 = variableDurations.Count(n => n == 240);
+                var before480 = variableDurations.Count(n => n == 480);
+                var stamp = unchecked(previousRtpTimestamp!.Value + 480);
+                for (var i = 0; i < 24; i++)
+                {
+                    var size = i % 3 == 0 ? 120 : i % 3 == 1 ? 240 : 480;
+                    var pcm = Enumerable.Range(0, size).Select(n => (short)(8000 * Math.Sin(n * Math.PI * 880 / 48000))).ToArray();
+                    left.SendRtpRaw(SDPMediaTypesEnum.audio, encoder.EncodeAudio(pcm, format), stamp, 0, format.FormatID);
+                    stamp = unchecked(stamp + (uint)size);
+                    await Task.Delay(10);
+                }
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                while (variableDurations.Count(n => n == 120) < before120 + 8
+                    || variableDurations.Count(n => n == 240) < before240 + 8
+                    || variableDurations.Count(n => n == 480) < before480 + 8)
+                { if (Volatile.Read(ref variableError) is { } error) throw new InvalidOperationException(error); await Task.Delay(10, deadline.Token); }
+                if (Volatile.Read(ref variableError) is { } failure) throw new InvalidOperationException(failure);
+                Console.WriteLine("PASS: live SRTP stream switches 2.5/5/10ms Opus with cumulative sample timestamps and decodes every duration.");
+            }
             if (rtpPlayoutProbe)
             {
                 using var playout = new VoiceNative.RtpOpusPlayoutBuffer(new());

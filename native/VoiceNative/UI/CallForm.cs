@@ -247,6 +247,8 @@ public sealed partial class CallForm : Form
             if (snapshot.Microphone?.CaptureExecution is { } inputRun)
                 text.AppendLine(CultureInfo.CurrentCulture, $"입력 실행 · 버퍼 조기 반환 {inputRun.StagedBuffers} · 최대 장치 버퍼 보유 {Number(inputRun.MaxLeaseMs, " ms")} / 콜백 처리 {Number(inputRun.MaxCallbackMs, " ms")} · 최대 기상 간격 {Number(inputRun.MaxWakeGapMs, " ms")} · 대기 시간 초과 {inputRun.TimeoutWakes}회 · 오디오 우선순위 {inputRun.MmcssActive}");
             text.AppendLine(CultureInfo.CurrentCulture, $"송신 대기 {snapshot.Sender?.PendingFrames ?? 0}프레임 · 초과 프레임 버림 {snapshot.Sender?.DroppedFrames ?? 0} · 최대 송신 대기 {Number(snapshot.Sender?.MaxWaitMs, " ms")}");
+            if (snapshot.FrameAdaptation is { } frames)
+                text.AppendLine(CultureInfo.CurrentCulture, $"프레임 자동 조절 · 현재/요청 {frames.CurrentMs}/{frames.RequestedMs}ms · 피드백 준비 {frames.AllPeersReady} · 전환 {frames.Changes}회 · {frames.Reason}");
             text.AppendLine(CultureInfo.CurrentCulture, $"입력 공유 저지연: {snapshot.Microphone?.LowLatencyActive} · 주기 {Number(snapshot.Microphone?.EnginePeriodMs, " ms")} · 복귀 사유 {snapshot.Microphone?.LowLatencyUnavailableReason ?? "없음"}");
             if (snapshot.Acoustic is { } measured)
                 text.AppendLine(CultureInfo.CurrentCulture, $"최근 음향 경로 측정 [{measured.Timestamp:HH:mm:ss}] 내→{measured.Peer}: {measured.MinimumMs:F1}~{measured.MaximumMs:F1}ms · 경로 {measured.MeasurementPath} · 검출 ±{measured.DetectionResolutionMs:F0}ms");
@@ -254,6 +256,7 @@ public sealed partial class CallForm : Form
             {
                 text.AppendLine(); text.AppendLine(CultureInfo.CurrentCulture, $"{peer.Name} · {peer.State} / ICE {peer.IceState} · {peer.Route}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"선택 후보: {peer.LocalEndpoint ?? "미선정"} → {peer.RemoteEndpoint ?? "미선정"}");
+                text.AppendLine(CultureInfo.CurrentCulture, $"후보 전송 {peer.CandidateTransport ?? "미선정"} · 주소 계열 {peer.LocalAddressFamily ?? "?"} → {peer.RemoteAddressFamily ?? "?"} · 수집 {string.Join(", ", peer.CollectedAddressFamilies ?? [])} · TURN 클라이언트 구간 전송은 별도 검증 필요");
                 text.AppendLine(CultureInfo.CurrentCulture, $"지연 합산 모델(실측 아님): 내→상대 {Number(peer.Latency?.OutboundModelMs, " ms")} · 상대→내 {Number(peer.Latency?.InboundModelMs, " ms")} · 상대 보고 경과 {Number(peer.Latency?.RemoteAgeSeconds, " 초")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"상대 입력 API {Number(peer.Latency?.Remote?.InputApiMs, " ms")} · 상대 송신 대기 {Number(peer.Latency?.Remote?.SendWaitMs, " ms")} · 상대 재생 큐 {Number(peer.Latency?.Remote?.PlaybackQueueMs, " ms")} · 상대 출력 API {Number(peer.Latency?.Remote?.OutputApiMs, " ms")}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"송신 {Number(peer.TxPayloadKbps, " kbps")} ({peer.TxFrames} 프레임) · 수신 {Number(peer.RxPayloadKbps, " kbps")} ({peer.RxPackets} 패킷)");

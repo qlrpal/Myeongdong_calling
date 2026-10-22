@@ -4,7 +4,8 @@ namespace VoiceNative;
 
 public sealed record LatencyTelemetry(int Version, double? InputApiMs, double? EncodeMs, double? SendWaitMs,
     double? PlaybackQueueMs, double? OutputApiMs, double? DecodeMs, string? OutputState,
-    double? InputFrameAgeMs = null, double? OutputFrameAgeMs = null, double FrameMs = 20);
+    double? InputFrameAgeMs = null, double? OutputFrameAgeMs = null, double FrameMs = 20,
+    ReceiverFrameFeedback? FrameFeedback = null);
 public sealed record LatencyView(double? OutboundModelMs, double? InboundModelMs, double? RemoteAgeSeconds,
     LatencyTelemetry? Remote, string Explanation);
 
@@ -23,6 +24,9 @@ internal sealed class TelemetryState
             foreach (var number in new[] { value.InputApiMs, value.EncodeMs, value.SendWaitMs, value.PlaybackQueueMs, value.OutputApiMs, value.DecodeMs })
                 if (number is { } n && (!double.IsFinite(n) || n < 0 || n > 10000)) return false;
             foreach (var age in new[] { value.InputFrameAgeMs, value.OutputFrameAgeMs }) if (age is { } n && (!double.IsFinite(n) || n < 0)) return false;
+            if (value.FrameFeedback is { } feedback && (feedback.ReceivedPackets < 0 || feedback.LatePackets < 0 || feedback.SourceChanges < 0
+                || !double.IsFinite(feedback.DecodedMs) || !double.IsFinite(feedback.ConcealedMs)
+                || feedback.DecodedMs is < 0 or > 1e12 || feedback.ConcealedMs is < 0 or > 1e12)) return false;
             lock (sync) { remote = value; receivedAt = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency; }
             return true;
         }

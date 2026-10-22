@@ -1,5 +1,7 @@
-param([switch]$NoRestore, [switch]$Package)
+param([switch]$NoRestore, [switch]$Package, [switch]$ReadyToRun, [switch]$StageOnly)
 $ErrorActionPreference = 'Stop'
+if ($ReadyToRun -and $NoRestore) { throw 'ReadyToRun requires RID-specific restore; omit -NoRestore.' }
+if ($StageOnly -and $Package) { throw 'StageOnly preserves dist and does not create a release ZIP.' }
 $env:DOTNET_CLI_HOME = Join-Path $PSScriptRoot '.dotnet'
 $env:NUGET_PACKAGES = Join-Path $PSScriptRoot '.nuget'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
@@ -16,6 +18,12 @@ foreach ($path in @($staging, $dist, $archive)) {
 }
 $publishArguments = @('publish', (Join-Path $PSScriptRoot 'VoiceNative'), '-c', 'Release', '-o', $staging)
 if ($NoRestore) { $publishArguments += '--no-restore' }
+if ($ReadyToRun) {
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    # RID-specific experiments must not rewrite the source checkout's package lock.
+    $publishArguments += @('-r','win-x64','--self-contained','false','-p:PublishReadyToRun=true',
+        ('-p:NuGetLockFilePath=' + (Join-Path $staging 'publish.packages.lock.json')))
+}
 & dotnet @publishArguments
 if ($LASTEXITCODE -ne 0) { throw 'Native application build failed; previous output retained.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $staging 'README.md')
@@ -26,6 +34,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'server/deploy') -Destination (J
 $packageReadme = Join-Path $staging 'README.md'
 $readmeText = [IO.File]::ReadAllText($packageReadme).Replace('server/README.md', 'docs/SERVER.md')
 [IO.File]::WriteAllText($packageReadme, $readmeText, [Text.UTF8Encoding]::new($false))
+if ($StageOnly) { Write-Output "Prepared isolated output: $staging"; return }
 # Retain old packages and user-created diagnostic files without including them in the new ZIP.
 New-Item -ItemType Directory -Path $archive -Force | Out-Null
 if (Test-Path -LiteralPath $dist) { Move-Item -LiteralPath $dist -Destination (Join-Path $archive 'dist') }

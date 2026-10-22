@@ -60,3 +60,9 @@ dotnet run --project native/TransportProbe -- --turn-integration https://qlrpal.
 친구와는 기존 최신 앱에서 `https://qlrpal.ddns.net/` 및 같은 방 이름으로 참가합니다. 로그의 `TURN 중계 사용 가능`은 설정 수신 여부이고 피어의 `직접 연결`/`TURN 중계`가 실제 선택된 경로입니다. 사용자 PC의 공유기 포트포워딩은 필요 없습니다.
 
 자격 증명 형식과 coturn 설정은 [coturn 공식 설명](https://github.com/coturn/coturn/wiki/turnserver)을 참고합니다.
+
+## TURN 읽기 전용 부하 확인
+
+서버의 소스 디렉터리에서 `bash deploy/inspect-turn.sh 10`으로 coturn 서비스 전체의 CPU 코어 사용량과 메모리를 관측할 수 있습니다(1~60초). 설정·방화벽·서비스를 변경하지 않습니다. null은 계측 불가 또는 카운터 초기화를 의미합니다. 결과는 서비스 전체 합계이며 개별 사용자 부하나 400pps 수용량을 검증하지 않습니다.
+
+클라이언트의 선택 후보 UDP 표시는 TURN 클라이언트 구간의 전송 방식까지 증명하지 않습니다. 현재 배포는 UDP TURN URL을 제공하며 실제 우회 경로 검증에서는 URL의 transport와 전송 계측을 함께 확인해야 합니다. 자격 증명을 포함한 전체 설정 응답을 공개 로그에 남기지 마세요.
