@@ -28,7 +28,7 @@ git status --short
 git add .gitignore .gitattributes .editorconfig README.md native/
 git diff --cached --stat
 git diff --cached --check
-git commit -m "feat: add experimental adaptive audio frames and diagnostics"
+git commit -m "fix: preserve audio arrival bursts and validate adaptive recovery"
 git push -u origin HEAD
 ```
 
@@ -46,9 +46,17 @@ git push -u origin HEAD
 
 첫 검사는 잠금 파일에 따라 의존성을 복원합니다. 기본 검사는 마이크를 여는 실통화를 시작하지 않습니다. 네트워크 통합 검사는 localhost UDP와 WebRTC를 사용합니다. 실제 두 PC·장치 시험은 별도 자동 시험 명령이며 환경·방화벽·장치가 필요합니다.
 
-기능·검증·남은 범위는 [현재 상태](CURRENT-STATUS.md)와 [079 보고서](reports/EXTREME-079.md)를 참고합니다. 게임 부하·그룹/외부 장시간 시험은 남았고 집 네트워크 내부 원인 조사는 보류했습니다. 국소 시험 통과를 입→귀 지연 개선이나 안정판 승격으로 바꾸지 않습니다.
+기능·검증·남은 범위는 [현재 상태](CURRENT-STATUS.md)와 [082 보고서](reports/EXTREME-082.md)를 참고합니다. 게임 부하·그룹/외부 장시간 시험은 남았고 집 네트워크 내부 원인 조사는 보류했습니다. 국소 시험 통과를 입→귀 지연 개선이나 안정판 승격으로 바꾸지 않습니다.
 
-## 이번 정리 확인 · 2026-10-22 (079 포함)
+## 이번 정리 확인 · 2026-10-23 (082 포함)
+
+Git 소스 후보224개를 확인했다. 이번 변경에는 수신 부족·복구 폐기를 반영한 자동 정책, 실패 재시도 제한, 정상 도착 묶음 보존, 패킷 길이/시간축/묶음 진단과 080~082 보고서가 포함된다. 새 `AdaptiveNetworkChecks.cs`와 `CaptureFrameIntegration.cs`도 반드시 함께 반영한다. 사용자 프리셋과 실행법은 유지하며 양쪽 최신 빌드가 필요하다.
+
+생성물·원본 진단·캡처·격리 빌드는 기존 제외 규칙으로 로컬 보존했다. 후보의 UTF-8·바이너리/대용량·개인 키/식별자 패턴 및 공개 Markdown 내부 링크를 확인했다. 이미 추적된 제외 대상 파일은 없다. 이는 패턴 검사이며 전체 보안 감사가 아니다.
+
+원본 작업 폴더의 전체 회귀·서버8개·IPv4/IPv6 미디어 통합과 실제 캡처/SRTP 전환 검사가 통과했다. 제어된25개 대조도 통과했으며 합계50분 가상 미디어 시간이다. 실제 친구 환경 전체 해결 판정은 아니다. Git 후보만 복사한 격리 소스에서도 잠금 복원·Release 빌드·제품 검사·서버8개 검사를 통과했다. 빌드 경고·오류는0이며 검증 후에는 이 결과를 적는 문서만 갱신했다. 기존 SDK/NuGet 캐시를 사용하며 이 복원에서는 취약성 네트워크 조회를 생략했다. 스테이징·커밋·푸시는 하지 않았다.
+
+## 이전 정리 확인 · 2026-10-22 (079 포함)
 
 소스 반영 후보는 219개다. 이번 변경은 `opus-auto-frames`, 캡처 프레임 경계 전환과 누적 샘플 RTP 시간축, 선택적 MMCSS·ReadyToRun, IPv6 선택·통합 검사, TURN 읽기 전용 진단과 079 보고서를 포함한다. 추가된 C# 파일과 `server/deploy/inspect-turn.sh`도 함께 반영한다. 기본 설정·기존 배포본·서버 설정은 유지한다.
 

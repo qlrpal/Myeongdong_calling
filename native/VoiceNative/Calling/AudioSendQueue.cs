@@ -42,5 +42,6 @@ internal sealed class AudioSendQueue
         return (int)Math.Clamp(Math.Ceiling(periodMs / frameMs), 1, 16);
     }
     public void Complete() => channel.Writer.TryComplete();
+    internal static uint Timestamp(uint basis, long firstSampleOffset, OutgoingAudio frame) => unchecked(basis + (uint)(frame.SampleOffset - firstSampleOffset));
     public static uint Timestamp(uint basis, long first, long sequence, uint frameSamples = 960) => unchecked(basis + (uint)(sequence - first) * frameSamples);
 }

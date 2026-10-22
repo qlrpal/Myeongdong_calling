@@ -619,7 +619,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                 var feedback = audio.RtpPlayout is { } playout && audio.DecodedMs is { } decodedMs
                     ? new ReceiverFrameFeedback(experiment?.AdaptiveShortReserve == true && experiment.Pcm == false,
                         sample.Rx, decodedMs, playout.ConcealedMs, playout.LatePackets, playout.SourceChanges,
-                        audio.DeviceError is null && audio.PlaybackState == "재생" && audio.LastFrameAgeMs is <= 250) : null;
+                        audio.DeviceError is null && audio.PlaybackState == "재생" && audio.LastFrameAgeMs is <= 250, audio.UnderfillMs, playout.RecoveryDiscardedMs) : null;
                 try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs, feedback))); }
                 catch (Exception) { } // Diagnostics must not interrupt audio if the channel closes.
             }
@@ -648,7 +648,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             var ready = connected.Length == 1;
             var now = ProbeClock.Now;
             var reports = connected.Select(peer => (Peer: peer, Report: peer.Telemetry.Snapshot())).ToArray();
-            if (reports.Any(p => p.Report.Age is not <= 3 || p.Report.Remote?.FrameFeedback is not { Supported: true, OutputHealthy: true })) ready = false;
+            if (reports.Any(p => p.Report.Age is not <= 3 || p.Report.Remote?.FrameFeedback is not { Supported: true, OutputHealthy: true, UnderfillMs: not null, RecoveryDiscardedMs: not null })) ready = false;
             foreach (var entry in reports)
             {
                 if (!ready) entry.Peer.FramePolicy.Suspend();
@@ -810,7 +810,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             {
                 if (peer.Connection.connectionState != RTCPeerConnectionState.connected) continue;
                 if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.FirstSampleOffset = frame.SampleOffset; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
-                var timestamp = unchecked(peer.TimestampBase + (uint)(frame.SampleOffset - peer.FirstSampleOffset));
+                var timestamp = AudioSendQueue.Timestamp(peer.TimestampBase, peer.FirstSampleOffset, frame);
                 var sentAt = ProbeClock.Now;
                 if (frame.TraceHash is { } traceHash) TraceSentFrame(traceHash, sentAt);
                 peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,

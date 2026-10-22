@@ -26,8 +26,8 @@ internal static class ExtremeChecks
             var origin = uint.MaxValue - (uint)options.FrameSamples;
             uint Timestamp(int i) => unchecked(origin + (uint)(i * options.FrameSamples));
             var prime = (int)Math.Ceiling(options.ReserveMs / options.FrameMs) + 1;
-            for (var i = prime - 1; i >= 0; i--) buffer.Add(1, Timestamp(i), payloads[i]);
-            for (var i = 0; i < 100; i++) { if (i >= prime) buffer.Add(1, Timestamp(i), payloads[i]); buffer.Read(output); }
+            for (var i = prime - 1; i >= 0; i--) buffer.Add(1, Timestamp(i), payloads[i], i * options.FrameMs);
+            for (var i = 0; i < 100; i++) { if (i >= prime) buffer.Add(1, Timestamp(i), payloads[i], i * options.FrameMs); buffer.Read(output); }
             var detail = buffer.Details();
             Require(detail.InvalidPackets == 0 && detail.DecodedPackets == 100 && detail.ConcealedMs == 0, name + " short-frame order/wrap decoding");
             Require(Math.Abs(detail.TargetReserveMs - options.ReserveMs) < .001, "Fractional reserve diagnostics");
@@ -35,7 +35,7 @@ internal static class ExtremeChecks
             Require(Math.Abs(concealed.ConcealedMs - options.FrameMs) < .001, "PLC must use actual packet quantum");
             for (var i = 0; i < 25; i++) buffer.Read(output);
             Require(buffer.Details().MaxConsecutivePlcMs <= options.PlcLimitMs, "Bounded concealment");
-            for (var i = 200; i < 400; i++) buffer.Add(1, Timestamp(i), payloads[i % 100]);
+            for (var i = 200; i < 400; i++) buffer.Add(1, Timestamp(i), payloads[i % 100], 1000 + (i - 200) * options.FrameMs);
             Require(buffer.Snapshot().QueueMs <= options.BacklogMs && buffer.Snapshot().Trims > 0, "Bounded backlog");
             buffer.Suspend(); buffer.Resume(); buffer.Add(2, Timestamp(0), payloads[0]);
             buffer.Read(new byte[480 * 2]);

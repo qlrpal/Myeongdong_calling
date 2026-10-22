@@ -2,7 +2,8 @@ using VoiceNative;
 
 try
 {
-    if (args is ["--audio-hotpath-benchmark", var hotpathReport]) AudioHotpathBenchmark.Run(hotpathReport);
+    if (args is ["--adaptive-network-checks", var adaptiveNetworkReport]) AdaptiveNetworkChecks.Run(adaptiveNetworkReport);
+    else if (args is ["--audio-hotpath-benchmark", var hotpathReport]) AudioHotpathBenchmark.Run(hotpathReport);
     else if (args is ["--sender-scheduling-benchmark", var senderSchedulingReport]) await SenderSchedulingBenchmark.RunAsync(senderSchedulingReport);
     else if (args is ["--adaptive-qualification", var shortQualServer, var shortQualPrefix, var shortQualDirectory, var shortQualRole, var shortQualWave])
     {

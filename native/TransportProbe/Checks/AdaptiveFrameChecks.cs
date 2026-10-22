@@ -28,6 +28,7 @@ internal static class AdaptiveFrameChecks
         Require(queue.TryRead(out var retained) && retained.SampleOffset == offset + 120, "Dropped variable frame lost sample time");
 
         CheckPolicy();
+        CheckCaptureBurst();
         await CheckCaptureBoundaryAsync();
         Require(MediaInterfaceSelection.IsSelectable(System.Net.IPAddress.Parse("2001:db8::1"))
             && MediaInterfaceSelection.IsSelectable(System.Net.IPAddress.Parse("fd00::1"))
@@ -59,6 +60,10 @@ internal static class AdaptiveFrameChecks
         Require(state.Receive(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(telemetry)), "Feedback roundtrip");
         Require(!state.Receive(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(telemetry with
             { FrameFeedback = telemetry.FrameFeedback! with { DecodedMs = -1 } })), "Negative feedback accepted");
+        Require(!state.Receive(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(telemetry with
+            { FrameFeedback = telemetry.FrameFeedback! with { UnderfillMs = -1 } })), "Negative underfill accepted");
+        Require(!state.Receive(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(telemetry with
+            { FrameFeedback = telemetry.FrameFeedback! with { RecoveryDiscardedMs = -1 } })), "Negative discard accepted");
         await Task.Factory.StartNew(() =>
         {
             using var registration = new AudioThreadPriority("Pro Audio", true);
@@ -68,9 +73,36 @@ internal static class AdaptiveFrameChecks
         Console.WriteLine("PASS: boundary frame storage, variable-sample RTP/drop/wrap, adaptive trial/rollback/recovery, mixed Opus, feedback validation and thread-local MMCSS.");
     }
 
+    private static void CheckCaptureBurst()
+    {
+        var options = LatencyExperiment.FromName("opus-auto-frames")!;
+        using var encoder = new OpusAudioEncoder(OpusProfile.LowDelay64, options);
+        var payload = encoder.EncodeAudio(new short[120], encoder.SupportedFormats.Single());
+        using var buffer = new RtpOpusPlayoutBuffer(new(), experiment: options);
+        uint stamp = 0;
+        var output = new byte[960];
+        for (var at = 0; at <= 2000; at += 10)
+        {
+            if (at > 0 && at % 20 == 0)
+                for (var i = 0; i < 8; i++) { buffer.Add(1, stamp, payload, at); stamp += 120; }
+            if (at >= 40) buffer.Read(output);
+        }
+        Require(buffer.Details().ConcealedMs == 0 && buffer.Snapshot().UnderfillMs == 0,
+            "Lossless 20ms arrival batches manufactured PLC/underfill");
+        Require(buffer.Details().RecentArrivalBurstMs == 20, "Arrival burst not observed/bounded");
+        for (var at = 2010; at <= 4000; at += 10)
+        {
+            for (var i = 0; i < 4; i++) { buffer.Add(1, stamp, payload, at); stamp += 120; }
+            buffer.Read(output);
+        }
+        Require(buffer.Details().RecentArrivalBurstMs == 10, "Old 20ms burst floor did not expire");
+        buffer.Suspend(); buffer.Resume();
+        Require(buffer.Details().RecentArrivalBurstMs == 0, "Burst estimate survived timeline reset");
+    }
+
     private static void CheckPolicy()
     {
-        ReceiverFrameFeedback F(int windows, bool bad) => new(true, windows * 1000, windows * (bad ? 2940 : 3000), windows * (bad ? 60 : 0), 0, 0, true);
+        ReceiverFrameFeedback F(int windows, bool bad) => new(true, windows * 1000, windows * (bad ? 2940 : 3000), windows * (bad ? 60 : 0), 0, 0, true, 0, 0);
         var p = new AdaptiveFramePolicy();
         p.Observe(0, F(0, true)); p.Observe(3, F(1, true)); p.Observe(6, F(2, true));
         Require(p.TargetMs == 5, "Repeated bad windows did not start trial");
@@ -78,9 +110,24 @@ internal static class AdaptiveFrameChecks
         Require(p.TargetMs == 2.5, "Ineffective trial did not roll back");
         p.Observe(15, F(5, true)); p.Observe(18, F(6, true));
         Require(p.TargetMs == 2.5, "Cooldown missing");
+        p.Observe(30, F(7, true)); p.Observe(33, F(8, true));
+        Require(p.TargetMs == 2.5, "Failed trial retried before backoff expired");
         p = new(); p.Observe(0, F(0, true)); p.Observe(3, F(1, true)); p.Observe(6, F(2, true));
-        for (var i = 1; i <= 10; i++) p.Observe(6 + i * 3, new(true, 2000 + i * 1000, 5880 + i * 3000, 120, 0, 0, true));
+        for (var i = 1; i <= 10; i++) p.Observe(6 + i * 3, new(true, 2000 + i * 1000, 5880 + i * 3000, 120, 0, 0, true, 0, 0));
         Require(p.TargetMs == 2.5, "Quiet period did not recover low latency");
+        for (var component = 0; component < 2; component++)
+        {
+            var misleading = new AdaptiveFramePolicy();
+            misleading.Observe(0, F(0, true)); misleading.Observe(3, F(1, true)); misleading.Observe(6, F(2, true));
+            misleading.Observe(9, new(true, 3000, 8880, 120, 0, 0, true,
+                component == 0 ? 90 : 0, component == 1 ? 90 : 0));
+            Require(misleading.TargetMs == 2.5, "PLC improvement masked worse underfill or discard in first trial window");
+        }
+        var legacy = new AdaptiveFramePolicy();
+        legacy.Observe(0, F(0, true) with { UnderfillMs = null });
+        legacy.Observe(3, F(1, true) with { UnderfillMs = null });
+        legacy.Observe(6, F(2, true) with { UnderfillMs = null });
+        Require(legacy.Changes == 0, "Legacy feedback enabled incomplete adaptation");
         p.Observe(40, F(0, true)); Require(p.TargetMs == 2.5, "Counter reset caused transition");
         p.Suspend(); p.Observe(50, F(100, true)); Require(p.TargetMs == 2.5, "Stale interval caused transition");
     }

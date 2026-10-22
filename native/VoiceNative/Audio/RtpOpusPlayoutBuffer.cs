@@ -17,7 +17,9 @@ public sealed record RtpPlayoutDiagnostics(double TargetReserveMs, int BufferedP
     long ReserveIncreases = 0, long ReserveDecreases = 0, bool AdaptiveReserve = false,
     double? ClockTargetMs = null, double? ClockFilteredQueueMs = null,
     long RecoveryDiscardedPackets = 0, double RecoveryDiscardedMs = 0,
-    long ShortReserveRestarts = 0, int? RecoveryReserveMs = null, string Encoding = "Opus", double PacketQuantumMs = 10);
+    long ShortReserveRestarts = 0, int? RecoveryReserveMs = null, string Encoding = "Opus", double PacketQuantumMs = 10,
+    double? LastPacketDurationMs = null, double? LastTimestampStepMs = null,
+    double ForwardTimestampGapMs = 0, long PacketDurationChanges = 0, double RecentArrivalBurstMs = 0);
 
 // Render-driven: the compressed packet reserve replaces the old PCM startup reserve.
 // No timer or extra PCM queue is placed in front of this provider.
@@ -49,6 +51,11 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private readonly int emptyHoldSamples;
     private readonly int coarsePeerFloorSamples;
     private int latestRemoteSamples;
+    private double? lastTimestampStepMs;
+    private long forwardTimestampGapSamples, packetDurationChanges;
+    private double? previousBurstArrivalMs;
+    private double burstWindowAtMs;
+    private int arrivalBurstSamples, recentBurstSamples;
     private int PeerReserveFloorSamples => latestRemoteSamples >= 480 ? coarsePeerFloorSamples : 0;
     private int CurrentReserveSamples => Math.Max(adaptive.TargetSamples, PeerReserveFloorSamples);
     private readonly bool pcmTransport;
@@ -87,7 +94,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     internal bool CanPrimeOutput(int requiredSamples)
     {
         if (requiredSamples is < 1 or > MaximumSamples) throw new ArgumentOutOfRangeException(nameof(requiredSamples));
-        lock (sync) return !disposed && !suspended && (started || queuedSamples >= Math.Min(MaximumSamples, CurrentReserveSamples + requiredSamples));
+        lock (sync) return !disposed && !suspended && (started || queuedSamples >= Math.Min(MaximumSamples, Math.Max(CurrentReserveSamples + requiredSamples, recentBurstSamples)));
     }
     private PipelinePlayout? pcmTrace;
     private long heldSamples;
@@ -195,6 +202,12 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 if (hasTimestamp && (stamp - highestTimestamp) % quantumSamples != 0) { invalid++; outcome = "invalid"; return; }
                 // Reject overlapping spans before they can alter decoder state.
                 if (Overlaps(stamp, samples)) { invalid++; outcome = "overlap"; return; }
+                if (hasTimestamp && stamp > highestTimestamp)
+                {
+                    lastTimestampStepMs = (stamp - highestTimestamp) / 48.0;
+                    forwardTimestampGapSamples += Math.Max(0, stamp - highestTimestamp - latestRemoteSamples);
+                    if (latestRemoteSamples != samples) packetDurationChanges++;
+                }
                 if (!hasTimestamp || stamp >= highestTimestamp) latestRemoteSamples = samples;
                 highestTimestamp = hasTimestamp ? Math.Max(highestTimestamp, stamp) : stamp; hasTimestamp = true;
                 var hash = timeline.Enabled ? AudioFrameTimeline.Hash(payload) : null;
@@ -206,6 +219,17 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 }
                 catch { packetPool.Return(storage); throw; }
                 queuedSamples += samples;
+                if (coarsePeerFloorSamples > 0) // Adaptive short-reserve profiles only; legacy fixed modes retain their bounds.
+                {
+                    var arrival = arrivalMs ?? ProbeClock.Now * 1000;
+                    if (previousBurstArrivalMs is not { } previous || arrival < previous || arrival - previous > 1)
+                        arrivalBurstSamples = 0;
+                    if (previousBurstArrivalMs is null || arrival < burstWindowAtMs || arrival - burstWindowAtMs >= 1000)
+                    { recentBurstSamples = 0; burstWindowAtMs = arrival; }
+                    arrivalBurstSamples = Math.Min(configuredBacklogSamples, arrivalBurstSamples + samples);
+                    recentBurstSamples = Math.Max(recentBurstSamples, arrivalBurstSamples);
+                    previousBurstArrivalMs = arrival;
+                }
                 if (!started) primingSignal?.Set();
                 outcome = "queued";
                 if (reanchored) { expectedTimestamp = stamp; hasPosition = true; }
@@ -256,7 +280,9 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 {
                     // Trim at the consumption boundary, where a complete device pull
                     // is known. A capture burst must not reset a nearly full pull.
-                    var keep = destination.Length / 2 + CurrentReserveSamples;
+                    // Preserve a bounded observed arrival batch, otherwise trimming a
+                    // 20ms capture batch to 15ms manufactures repeated PLC/discards.
+                    var keep = Math.Max(destination.Length / 2 + CurrentReserveSamples, recentBurstSamples);
                     var discarded = false;
                     while (packets.Count > 1 && queuedSamples - FirstPacket.Value.Samples >= keep)
                     {
@@ -278,7 +304,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         && highestTimestamp - recentRebuffers.Peek() <= RecoveryPressureWindowSamples);
                     var restartReserve = gapRestart && pressure && recoveryReserveSamples > 0
                         ? Math.Max(PeerReserveFloorSamples, Math.Min(CurrentReserveSamples, recoveryReserveSamples)) : CurrentReserveSamples;
-                    var startupSamples = Math.Min(MaximumSamples, restartReserve + destination.Length / 2);
+                    var startupSamples = Math.Min(MaximumSamples, Math.Max(restartReserve + destination.Length / 2, recentBurstSamples));
                     // Preserve a small reserve AFTER the first render request, accounting for
                     // resampler/device pull size instead of stacking another 40ms PCM queue.
                     if (packets.Count == 0 || queuedSamples < startupSamples)
@@ -405,7 +431,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         // Until the first device pull, its demand is unknown. Keep a bounded
         // cold-start window; the first read then trims it to fresh reserve.
         if (experimental) maximumQueuedSamples = lastReadSamples == 0 ? MaximumSamples : Math.Min(MaximumSamples,
-            Math.Max(configuredBacklogSamples, lastReadSamples * 2 + CurrentReserveSamples + quantumSamples));
+            Math.Max(configuredBacklogSamples, lastReadSamples + Math.Max(lastReadSamples, recentBurstSamples) + CurrentReserveSamples + quantumSamples));
     }
 
     private bool PreparePcm()
@@ -545,7 +571,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         recentRebuffers.Clear();
         missingSamples = 0; fadeRemaining = 240;
         hasRemoteQuantum = false;
-        latestRemoteSamples = 0;
+        latestRemoteSamples = 0; lastTimestampStepMs = null;
+        previousBurstArrivalMs = null; arrivalBurstSamples = recentBurstSamples = 0;
         adaptive.Reset();
         primingSignal?.Reset();
     }
@@ -576,7 +603,10 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 ClockFilteredQueueMs: clock.FilteredQueueSamples / 48,
                 RecoveryDiscardedPackets: recoveryDiscardedPackets, RecoveryDiscardedMs: recoveryDiscardedSamples / 48.0,
                 ShortReserveRestarts: shortReserveRestarts, RecoveryReserveMs: recoveryReserveSamples > 0 ? recoveryReserveSamples / 48 : null,
-                Encoding: pcmTransport ? "L16 PCM (loss: silence)" : "Opus", PacketQuantumMs: quantumSamples / 48.0);
+                Encoding: pcmTransport ? "L16 PCM (loss: silence)" : "Opus", PacketQuantumMs: quantumSamples / 48.0,
+                LastPacketDurationMs: latestRemoteSamples > 0 ? latestRemoteSamples / 48.0 : null,
+                LastTimestampStepMs: lastTimestampStepMs, ForwardTimestampGapMs: forwardTimestampGapSamples / 48.0,
+                PacketDurationChanges: packetDurationChanges, RecentArrivalBurstMs: recentBurstSamples / 48.0);
         }
     }
     public void Dispose()

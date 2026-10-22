@@ -204,6 +204,7 @@ internal static class WebRtcProbe
                 { if (Volatile.Read(ref variableError) is { } error) throw new InvalidOperationException(error); await Task.Delay(10, deadline.Token); }
                 if (Volatile.Read(ref variableError) is { } failure) throw new InvalidOperationException(failure);
                 Console.WriteLine("PASS: live SRTP stream switches 2.5/5/10ms Opus with cumulative sample timestamps and decodes every duration.");
+                await CaptureFrameIntegration.RunAsync(left, right, format.FormatID);
             }
             if (rtpPlayoutProbe)
             {

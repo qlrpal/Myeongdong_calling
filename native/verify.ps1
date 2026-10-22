@@ -22,6 +22,8 @@ foreach ($check in $checks) {
 & $probe --product-checks (Join-Path $PSScriptRoot '.local/reports/product-checks')
 if ($LASTEXITCODE -ne 0) { throw 'Product controls/settings/reconnection checks failed.' }
 if ($Stress) {
+    & $probe --adaptive-network-checks (Join-Path $PSScriptRoot '.local/reports/adaptive-network-verify.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Adaptive frame/network recovery checks failed.' }
     & $probe --rtp-stress-test (Join-Path $PSScriptRoot '.local/reports/rtp-stress-verify.json')
     if ($LASTEXITCODE -ne 0) { throw 'RTP clock/backlog stress checks failed.' }
     & $probe --playout-target-test (Join-Path $PSScriptRoot '.local/reports/playout-target-simulation.json')

@@ -140,3 +140,6 @@ dotnet run --project native/TransportProbe -c Release -- --opus-ab-test https://
 ### 수신 상태 기반 프레임 시험
 
 `./native/run.ps1 -Experiment opus-auto-frames`는 호환 상대 1명의 수신 상태로 2.5/5/10ms를 시험하며 효과가 없으면 복귀합니다. 기존 기본 구성은 유지합니다. 선택적 MMCSS·ReadyToRun 빌드와 IPv6 지원의 사용 조건 및 검증 범위는 [079 보고서](docs/reports/EXTREME-079.md)를 참고하세요.
+
+
+2026-10-23 보완: 자동 조절은 수신 부족·폐기를 함께 평가하고, 정상20ms 묶음이 큐 정리에 버려져 PLC를 만드는 문제를 수정했습니다. 양쪽 최신 빌드가 필요합니다. [081 정책 보완](docs/reports/EXTREME-081.md), [082 제어된 대조](docs/reports/EXTREME-082.md)를 참고하세요. 합성 검사 통과와 친구 환경의 실제 끊김 해결 여부는 구분합니다.
