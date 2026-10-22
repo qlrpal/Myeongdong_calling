@@ -25,13 +25,17 @@ internal sealed class PipelineTrace
     {
         if (capacity is < 1 or > 24000) throw new ArgumentOutOfRangeException(nameof(capacity));
         this.capacity = capacity;
+        // Reserve bounded storage before audio starts, avoiding queue growth
+        // and large-array allocation on a recording audio callback.
+        sends = new(capacity); receives = new(capacity); admissions = new(capacity);
+        playout = new(capacity); reads = new(capacity);
     }
     private readonly object sync = new();
-    private readonly Queue<PipelineSend> sends = new();
-    private readonly Queue<PipelineReceive> receives = new();
-    private readonly Queue<PipelineAdmission> admissions = new();
-    private readonly Queue<PipelinePlayout> playout = new();
-    private readonly Queue<PipelineRead> reads = new();
+    private readonly Queue<PipelineSend> sends;
+    private readonly Queue<PipelineReceive> receives;
+    private readonly Queue<PipelineAdmission> admissions;
+    private readonly Queue<PipelinePlayout> playout;
+    private readonly Queue<PipelineRead> reads;
     private double until, maxRecorderMs;
     private long evicted;
     public bool Enabled => ProbeClock.Now < Volatile.Read(ref until);

@@ -149,7 +149,7 @@ public sealed partial class CallForm
         leave.Enabled = locked;
         server.ReadOnly = room.ReadOnly = nickname.ReadOnly = locked;
         captureDevice.Enabled = renderDevice.Enabled = !callSession.IsBusy && !deviceSwitching;
-        callState.Text = callSession.State + (muteMicrophone.Checked ? " · 마이크 꺼짐" : "");
+        callState.Text = callSession.State + (muteMicrophone.Checked ? " · 마이크 꺼짐" : "") + (latencyExperiment.SelectedIndex > 0 ? " · 극저지연 실험" : "");
         if (!locked && !snapshot.InCall) participantPreferences.Clear();
         foreach (var id in participantRows.Keys.Except(snapshot.Peers.Select(p => p.Id)).ToArray())
         { participants.Controls.Remove(participantRows[id].Panel); participantRows[id].Panel.Dispose(); participantRows.Remove(id); failedSince.Remove(id); }

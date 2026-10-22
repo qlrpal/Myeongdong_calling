@@ -19,6 +19,8 @@ native/.nuget/
 native/dist*/
 native/dist*.zip
 native/.local/
+# Machine-specific working notes are retained locally, not published.
+native/docs/HANDOFF*.md
 native/artifacts/
 __pycache__/
 *.pyc

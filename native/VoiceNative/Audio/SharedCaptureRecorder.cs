@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using System.Diagnostics;
 
 namespace VoiceNative;
 
@@ -33,6 +34,14 @@ internal sealed class SharedCaptureRecorder : IDisposable
         ? TimeSpan.FromSeconds(active.CurrentPadding / (double)format.SampleRate) : AverageLatency);
     private double periodMs = 5;
     private readonly string? captureEndpointId;
+    private readonly bool minimumPeriod;
+    private readonly bool stagedBuffers, periodWatchdog;
+    private long timeoutWakes, maxWakeTicks, maxLeaseTicks, maxCallbackTicks;
+    private bool mmcssActive;
+    public CaptureExecutionDiagnostics? Execution => client is null ? null : new(stagedBuffers, periodWatchdog,
+        Volatile.Read(ref mmcssActive), Interlocked.Read(ref timeoutWakes), Milliseconds(maxWakeTicks), Milliseconds(maxLeaseTicks), Milliseconds(maxCallbackTicks));
+    private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+    private static void Maximum(ref long target, long ticks) => Volatile.Write(ref target, Math.Max(Volatile.Read(ref target), ticks));
 
     internal static uint? ChoosePeriod(AudioClientPeriodInfo range, int rate)
     {
@@ -46,19 +55,24 @@ internal sealed class SharedCaptureRecorder : IDisposable
             && rounded * 1000.0 / rate < 10 ? (uint)rounded : null;
     }
 
-    public SharedCaptureRecorder(bool preferLowLatency, bool intermediatePeriod = true, string? captureEndpointId = null)
+    public SharedCaptureRecorder(bool preferLowLatency, bool intermediatePeriod = true, string? captureEndpointId = null, bool minimumPeriod = false, bool stagedBuffers = false, bool periodWatchdog = false)
     {
+        this.minimumPeriod = minimumPeriod;
+        this.stagedBuffers = stagedBuffers; this.periodWatchdog = periodWatchdog;
         this.captureEndpointId = captureEndpointId;
         try
         {
-            if (preferLowLatency && intermediatePeriod)
+            if (preferLowLatency && (intermediatePeriod || minimumPeriod))
             {
                 using var enumerator = new MMDeviceEnumerator();
                 device = GetEndpoint(enumerator);
                 deviceId = device.ID; deviceName = device.FriendlyName;
                 client = device.CreateAudioClient(); format = client.MixFormat;
                 _ = new NativeCaptureConverter(format); // Keep the existing no-resampling contract.
-                var frames = ChoosePeriod(client.GetSharedModeEnginePeriod(format), format.SampleRate)
+                var range = client.GetSharedModeEnginePeriod(format);
+                var frames = (minimumPeriod ? range.ChooseLowestLatencyPeriod() : ChoosePeriod(range, format.SampleRate)
+                    ?? (stagedBuffers && range.DefaultPeriodInFrames * 1000.0 / format.SampleRate is >= 5 and <= 10
+                        ? range.DefaultPeriodInFrames : null))
                     ?? throw new NotSupportedException("입력 장치에 10ms 미만의 안전한 공유 주기가 없습니다.");
                 client.InitializeSharedAudioStream(AudioClientStreamFlags.EventCallback, frames, format, Guid.Empty);
                 client.SetEventHandle(ready.SafeWaitHandle.DangerousGetHandle());
@@ -148,25 +162,37 @@ internal sealed class SharedCaptureRecorder : IDisposable
         try
         {
             uint index = 0;
-            priority = AvSetMmThreadCharacteristics("Audio", ref index);
+            priority = AvSetMmThreadCharacteristics(minimumPeriod ? "Pro Audio" : "Audio", ref index);
+            Volatile.Write(ref mmcssActive, priority != IntPtr.Zero);
             var capture = active.AudioCaptureClient;
             active.Start(); started!.SetResult();
             WaitHandle[] signals = [stop, ready];
-            while (WaitHandle.WaitAny(signals, 30) != 0)
+            var previousWake = Stopwatch.GetTimestamp();
+            while (true)
             {
+                var signal = WaitHandle.WaitAny(signals, periodWatchdog ? Math.Max(1, (int)Math.Ceiling(periodMs)) : 30);
+                if (signal == 0) break;
+                if (signal == WaitHandle.WaitTimeout) Interlocked.Increment(ref timeoutWakes);
+                var now = Stopwatch.GetTimestamp(); Maximum(ref maxWakeTicks, now - previousWake); previousWake = now;
                 while (!stop.WaitOne(0) && capture.GetNextPacketSize() > 0)
                 {
-                    using var lease = capture.GetBufferLease(format.BlockAlign);
-                    var bytes = checked(lease.FrameCount * format.BlockAlign);
-                    if (bytes == 0) continue;
-                    ReadOnlySpan<byte> data;
-                    if ((lease.Flags & AudioClientBufferFlags.Silent) != 0)
+                    int bytes; AudioClientBufferFlags flags; long position, qpc;
+                    var leaseAt = Stopwatch.GetTimestamp();
+                    using (var lease = capture.GetBufferLease(format.BlockAlign))
                     {
+                        bytes = checked(lease.FrameCount * format.BlockAlign);
+                        if (bytes == 0) continue;
+                        flags = lease.Flags; position = lease.DevicePosition; qpc = lease.QPCPosition;
                         if (bytes > silence.Length) throw new InvalidOperationException("입력 무음 버퍼 범위를 초과했습니다.");
-                        data = silence.AsSpan(0, bytes);
+                        var silent = (flags & AudioClientBufferFlags.Silent) != 0;
+                        if (silent) silence.AsSpan(0, bytes).Clear();
+                        else if (stagedBuffers) lease.Buffer.CopyTo(silence);
+                        if (!stagedBuffers) Deliver(silent ? silence.AsSpan(0, bytes) : lease.Buffer, flags, position, qpc);
                     }
-                    else data = lease.Buffer;
-                    DataAvailable?.Invoke(data, lease.Flags, lease.DevicePosition, lease.QPCPosition);
+                    Maximum(ref maxLeaseTicks, Stopwatch.GetTimestamp() - leaseAt);
+                    // Scratch storage adds no playback queue. Return the native lease
+                    // before conversion/Opus/SRTP work, preserving its original timestamp.
+                    if (stagedBuffers) Deliver(silence.AsSpan(0, bytes), flags, position, qpc);
                 }
             }
         }
@@ -180,6 +206,12 @@ internal sealed class SharedCaptureRecorder : IDisposable
             if (priority != IntPtr.Zero) AvRevertMmThreadCharacteristics(priority);
         }
         if (failure is not null) RecordingStopped?.Invoke(this, new StoppedEventArgs(failure));
+    }
+    private void Deliver(ReadOnlySpan<byte> data, AudioClientBufferFlags flags, long position, long qpc)
+    {
+        var at = Stopwatch.GetTimestamp();
+        try { DataAvailable?.Invoke(data, flags, position, qpc); }
+        finally { Maximum(ref maxCallbackTicks, Stopwatch.GetTimestamp() - at); }
     }
 
     public void StopRecording()

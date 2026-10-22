@@ -2,12 +2,18 @@
 
 PC는 집 인터넷, 노트북은 휴대전화의 모바일 데이터 핫스팟을 사용한다. 시험 중 SSH는 필요하지 않다. 기존 통화 앱과 진단 실행기를 종료한 뒤 진행한다. 휴대전화가 집 Wi-Fi를 재공유하는 조건과 구분하기 위해 휴대전화 Wi-Fi를 끄고 모바일 데이터가 연결된 상태에서 핫스팟을 켠다. 노트북은 핫스팟 연결 후 인터넷 접속을 확인한다. 포트포워딩은 추가하지 않는다.
 
-## 준비된 실행 위치
+## 새 체크아웃에서 도구 준비
 
-- PC: `C:\Users\begemi\Desktop\coding\voice_call\native\.local\external-test-059\test-external.cmd`
-- 노트북: 실행 창(Win+R)에 `%USERPROFILE%\voice-external-test-059\test-external.cmd` 입력.
+저장소 루트에서 실행한다. 시험용 WAV는48kHz·모노·16bit PCM,1~120초의 합성 발화 파일을 준비하고 출력 폴더에 `speech.wav`로 둔다. 개인 진단·음성 파일은 저장소에 포함하지 않는다.
 
-이미 두 기기에 실행기·의존 DLL·합성 발화 파일을 복사했다. 각 기기의 기존 .NET 실행 환경을 사용한다. 관리자 실행은 필요하지 않다. 이전 LAN IP를 고정하지 않고 OS 기본 경로를 사용한다. VPN이 활성화돼 있다면 그 경로도 시험 조건에 포함된다.
+```powershell
+dotnet publish native/TransportProbe -c Release -o native/.local/external-test
+Copy-Item native/test-external.ps1,native/test-external.cmd native/.local/external-test/
+# 준비한 speech.wav를 native/.local/external-test/에 넣은 뒤 실행
+./native/.local/external-test/test-external.cmd
+```
+
+다른 PC로 보낼 때에는 `external-test` 폴더 전체와 합성 WAV를 함께 전달한다. 대상에는 .NET10 Desktop Runtime이 필요하다. 관리자 실행은 필요하지 않다. 이전 LAN IP를 고정하지 않고 OS 기본 경로를 사용하므로 VPN이 활성화돼 있다면 그 경로도 시험 조건에 포함된다. Git 소스만 내려받았다고 과거 개인 실행기·WAV가 준비돼 있는 것은 아니다.
 
 ## 1회차: 자동 경로
 
@@ -31,6 +37,6 @@ PC는 집 인터넷, 노트북은 휴대전화의 모바일 데이터 핫스팟�
 
 이 시험은 외부망의 연결 성공·선택 경로·RTT·PLC·버퍼 부족·큐 변화를 확인한다. 실제 입→귀 지연 측정은 아니다. 휴대전화 이동통신 지연과 핫스팟 Wi-Fi 변동이 포함된다. 같은 장소의 PC·노트북 시험으로 먼 지역 친구와의 경로까지 검증한 것으로 해석하지 않는다.
 
-## 구현 검증 범위
+## 시험 범위와 최신 상태
 
-Release 빌드 경고0·오류0, 기존 회귀 검사, 서버7개, 로컬 WebRTC 통합 검사 통과. 현재 OCI에서 relay 전용 ICE·DTLS/SRTP·RTCP 통합 연결도 통과했다. 노트북 실행 파일·WAV·스크립트 존재와 실행을 확인했다. 핫스팟의 두 기기5분 회차는 사용자가 실행할 단계이며 아직 완료하지 않았다.
+이 실행기는 기존 기본 Opus 경로를 시험하며 `opus-adaptive`의 성능 대조를 대신하지 않는다. 최신 구현·검증과 남은 외부/그룹 시험은 [현재 상태](CURRENT-STATUS.md), 극저지연 시험 옵션은 [실험 가이드](EXTREME-LATENCY.md)를 참고한다. 과거 특정 장비에 실행기를 복사한 사실을 새 체크아웃의 준비 완료나 모든 환경의 성공으로 해석하지 않는다.

@@ -2,7 +2,42 @@ using VoiceNative;
 
 try
 {
-    if (args is ["--product-smoke", var smokeServer, var smokeRoom, var smokeReport, var smokeRole, var smokeWave]) await ProductSmoke.RunAsync(smokeServer, smokeRoom, smokeReport, smokeRole, smokeWave);
+    if (args is ["--audio-hotpath-benchmark", var hotpathReport]) AudioHotpathBenchmark.Run(hotpathReport);
+    else if (args is ["--sender-scheduling-benchmark", var senderSchedulingReport]) await SenderSchedulingBenchmark.RunAsync(senderSchedulingReport);
+    else if (args is ["--adaptive-qualification", var shortQualServer, var shortQualPrefix, var shortQualDirectory, var shortQualRole, var shortQualWave])
+    {
+        foreach (var adaptiveRoute in new[] { "direct", "relay" })
+        foreach (var adaptiveFloor in new[] { "5", "10" })
+            await ExtremeSoak.RunAsync(shortQualServer, shortQualPrefix + "-" + adaptiveRoute + "-" + adaptiveFloor,
+                Path.Combine(shortQualDirectory, shortQualRole + "-" + adaptiveRoute + "-adaptive" + adaptiveFloor + ".json"),
+                shortQualRole, shortQualWave, "qual-adaptive" + adaptiveFloor + ".json", 60, route: adaptiveRoute);
+    }
+    else if (args is ["--qualification-summary", var qualificationInput, var qualificationOutput]) QualificationSummary.Run(qualificationInput, qualificationOutput);
+    else if (args is ["--priming-device-check", var primingDeviceOutput]) await ExtremeChecks.PrimingDeviceAsync(primingDeviceOutput);
+    else if (args is ["--extreme-qualification", var qualificationServer, var qualificationPrefix, var qualificationDirectory, var qualificationRole, var qualificationWave])
+    {
+        foreach (var qualificationRoute in new[] { "direct", "relay" })
+        foreach (var (label, qualificationMode) in new[] { ("baseline-a1", "baseline"), ("r10-head1", "qual-r10.json"), ("r5-head1", "qual-r5.json"), ("baseline-a2", "baseline") })
+            await ExtremeSoak.RunAsync(qualificationServer, qualificationPrefix + "-" + qualificationRoute + "-" + label,
+                Path.Combine(qualificationDirectory, qualificationRole + "-" + qualificationRoute + "-" + label + ".json"),
+                qualificationRole, qualificationWave, qualificationMode, 30, route: qualificationRoute);
+    }
+    else if (args is ["--route-extreme-soak", var pinnedServer, var pinnedRoom, var pinnedReport, var pinnedRole, var pinnedWave, var pinnedMode, var pinnedSeconds, var pinnedRoute, var pinnedAddress])
+        await ExtremeSoak.RunAsync(pinnedServer, pinnedRoom, pinnedReport, pinnedRole, pinnedWave, pinnedMode, int.Parse(pinnedSeconds, System.Globalization.CultureInfo.InvariantCulture), route: pinnedRoute, mediaAddress: pinnedAddress);
+    else if (args is ["--route-extreme-soak", var routeExtremeServer, var routeExtremeRoom, var routeExtremeReport, var routeExtremeRole, var routeExtremeWave, var routeExtremeMode, var routeExtremeSeconds, var extremeRoute])
+        await ExtremeSoak.RunAsync(routeExtremeServer, routeExtremeRoom, routeExtremeReport, routeExtremeRole, routeExtremeWave, routeExtremeMode, int.Parse(routeExtremeSeconds, System.Globalization.CultureInfo.InvariantCulture), route: extremeRoute);
+    else if (args is ["--extreme-replay", var extremeInput, var extremeOutput]) ExtremeReplay.Run(extremeInput, extremeOutput);
+    else if (args is ["--extreme-soak", var extremeServer, var extremeRoom, var extremeReport, var extremeRole, var extremeWave, var extremeMode, var extremeSeconds])
+        await ExtremeSoak.RunAsync(extremeServer, extremeRoom, extremeReport, extremeRole, extremeWave, extremeMode, int.Parse(extremeSeconds, System.Globalization.CultureInfo.InvariantCulture));
+    else if (args is ["--extreme-series", var seriesServer, var seriesRoom, var seriesDirectory, var seriesRole, var seriesWave, var seriesEpoch])
+    {
+        var start = DateTimeOffset.FromUnixTimeSeconds(long.Parse(seriesEpoch, System.Globalization.CultureInfo.InvariantCulture));
+        var modes = new[] { "baseline", "opus-5", "opus-2.5", "opus-zero", "pcm-1" };
+        for (var i = 0; i < modes.Length; i++) await ExtremeSoak.RunAsync(seriesServer, seriesRoom + "-" + i,
+            Path.Combine(seriesDirectory, seriesRole + "-" + modes[i] + "-call.json"), seriesRole, seriesWave, modes[i], 15, start.AddSeconds(i * 40));
+    }
+    else if (args is ["--extreme-checks"]) ExtremeChecks.Run();
+    else if (args is ["--product-smoke", var smokeServer, var smokeRoom, var smokeReport, var smokeRole, var smokeWave]) await ProductSmoke.RunAsync(smokeServer, smokeRoom, smokeReport, smokeRole, smokeWave);
     else if (args is ["--product-checks", var productDirectory]) await ProductChecks.RunAsync(productDirectory);
     else if (args is ["--scheduled-route-speech-once", var onceServer, var onceRoom, var onceReport, var onceRole, var onceWave, var onceEpoch, var onceMode])
     {
@@ -152,6 +187,16 @@ try
     }
     else if (args is ["--udp-paced", var udpPeer, var udpLocal, var udpRemote, var udpBytes, var udpSeconds, var udpRole, var udpRun, var udpPath])
         Environment.ExitCode = await PacedUdpProbe.RunAsync(udpPeer, int.Parse(udpLocal, System.Globalization.CultureInfo.InvariantCulture), int.Parse(udpRemote, System.Globalization.CultureInfo.InvariantCulture), int.Parse(udpBytes, System.Globalization.CultureInfo.InvariantCulture), int.Parse(udpSeconds, System.Globalization.CultureInfo.InvariantCulture), udpRole, udpRun, udpPath);
+    else if (args is ["--path-isolation-ports", var portSource, var portPeer, var portServer, var portReference, var portSeconds, var portRate, var portBase, var portOutput])
+        await PathIsolationProbe.RunAsync(portSource, portPeer, portServer, portReference, int.Parse(portSeconds, System.Globalization.CultureInfo.InvariantCulture), portOutput, int.Parse(portRate, System.Globalization.CultureInfo.InvariantCulture), portBase: int.Parse(portBase, System.Globalization.CultureInfo.InvariantCulture));
+    else if (args is ["--path-isolation-voice", var qosSource, var qosPeer, var qosServer, var qosReference, var qosSeconds, var qosRate, var qosOutput])
+        await PathIsolationProbe.RunAsync(qosSource, qosPeer, qosServer, qosReference, int.Parse(qosSeconds, System.Globalization.CultureInfo.InvariantCulture), qosOutput, int.Parse(qosRate, System.Globalization.CultureInfo.InvariantCulture), false, true);
+    else if (args is ["--path-isolation-load", var loadSource, var loadPeer, var loadServer, var loadReference, var loadSeconds, var loadLane, var loadRate, var loadOutput] && loadLane is "lan" or "oci")
+        await PathIsolationProbe.RunAsync(loadSource, loadPeer, loadServer, loadReference, int.Parse(loadSeconds, System.Globalization.CultureInfo.InvariantCulture), loadOutput, int.Parse(loadRate, System.Globalization.CultureInfo.InvariantCulture), loadLane == "lan");
+    else if (args is ["--path-isolation", var isolationSource, var isolationPeer, var isolationServer, var isolationReference, var isolationSeconds, var isolationOutput])
+        await PathIsolationProbe.RunAsync(isolationSource, isolationPeer, isolationServer, isolationReference, int.Parse(isolationSeconds, System.Globalization.CultureInfo.InvariantCulture), isolationOutput);
+    else if (args is ["--path-control", var pathTarget, var pathGateway, var pathSeconds, var pathOutput])
+        await IcmpProfile.RunAsync(pathTarget, pathGateway, pathOutput, int.Parse(pathSeconds, System.Globalization.CultureInfo.InvariantCulture), 200, false);
     else if (args is ["--icmp-profile", var icmpTarget, var icmpGateway, var icmpPath])
         await IcmpProfile.RunAsync(icmpTarget, icmpGateway, icmpPath);
     else if (args is ["--pipeline-passive", var passiveServer, var passiveRoom, var passivePath, var passiveRole])

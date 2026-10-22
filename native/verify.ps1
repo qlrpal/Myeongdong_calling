@@ -11,7 +11,7 @@ if (-not $NoRestore) {
 & dotnet build $solution -c Release --no-restore -warnaserror -m:1
 if ($LASTEXITCODE -ne 0) { throw 'Static analysis/build failed.' }
 $probe = Join-Path $PSScriptRoot 'TransportProbe/bin/Release/net10.0-windows10.0.19041.0/TransportProbe.exe'
-$checks = @('--native-converter-test', '--codec-delay-test', '--frame-timeline-test', '--latency-summary-test',
+$checks = @('--extreme-checks', '--native-converter-test', '--codec-delay-test', '--frame-timeline-test', '--latency-summary-test',
     '--acoustic-probe-test', '--ten-ms-acoustic-probe-test', '--speech-fixture-test', '--latency-model-test', '--send-queue-test',
     '--buffer-recovery-test', '--gap-restart-test', '--precision-self-test', '--period-buffer-test', '--low-latency-buffer-test',
     '--playout-self-test', '--metrics-self-test', '--rtp-playout-test', '--pipeline-trace-test', '--playout-policy-test', '--capture-period-test', '--render-target-test', '--render-path-test', '--codec-render-reference-test')

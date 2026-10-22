@@ -46,10 +46,49 @@ internal sealed class SharedRenderPlayer : IDisposable
     public double? CapacityMs => client is null ? null : capacity * 1000.0 / OutputWaveFormat.SampleRate;
 
     private readonly string? endpointId;
+    private readonly bool minimal;
+    private readonly int minimalHeadroomMs;
+    private readonly bool stagedBuffers, periodWatchdog, traceWork;
+    private byte[] staging = [];
+    private long timeoutWakes, maxWakeTicks, maxProviderTicks, maxRunningProviderTicks, maxLeaseTicks, emptyOnWake, emptyDuringSupply;
+    private bool mmcssActive;
+    private sealed record EmptyObservation(double At, string Phase);
+    private EmptyObservation? lastEmpty;
+    // One render-thread writer; immutable entries are published only for slow work/misses.
+    private readonly RenderWorkObservation?[] recentWork = new RenderWorkObservation?[128];
+    private int workIndex;
+    private RenderWorkObservation[] WorkSnapshot() => Enumerable.Range(0, recentWork.Length).Select(i => Volatile.Read(ref recentWork[i]))
+        .OfType<RenderWorkObservation>().OrderBy(entry => entry.At).ToArray();
+    private void RecordWork(RenderWorkObservation entry) => Volatile.Write(ref recentWork[workIndex++ % recentWork.Length], entry);
+    private readonly Func<int, bool>? canPrimeSource48k;
+    private readonly WaitHandle? primingSignal;
+    private double primingWaitMs;
+    private int primingResult = -1;
+    public RenderExecutionDiagnostics? Execution
+    {
+        get
+        {
+            if (client is null) return null;
+            var observed = Volatile.Read(ref lastEmpty);
+            var prime = Volatile.Read(ref primingResult);
+            return new(stagedBuffers, periodWatchdog, Volatile.Read(ref mmcssActive), Interlocked.Read(ref timeoutWakes),
+                Milliseconds(maxWakeTicks), Milliseconds(maxProviderTicks), Milliseconds(maxLeaseTicks),
+                Interlocked.Read(ref emptyOnWake), Interlocked.Read(ref emptyDuringSupply), observed?.At, observed?.Phase,
+                Milliseconds(maxRunningProviderTicks), prime < 0 ? null : Volatile.Read(ref primingWaitMs), prime < 0 ? null : prime == 1, traceWork ? WorkSnapshot() : null);
+        }
+    }
+    private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+    private static void Maximum(ref long target, long ticks) => Volatile.Write(ref target, Math.Max(Volatile.Read(ref target), ticks));
     private MMDevice GetEndpoint(MMDeviceEnumerator enumerator) => endpointId is null
         ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia) : enumerator.GetDevice(endpointId);
-    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null)
-    { this.endpointId = endpointId; this.category = category; this.requestedMs = requestedMs; this.preferLow = preferLow; this.bounded = bounded; this.preferRaw = preferRaw; }
+    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null, bool minimal = false, int minimalHeadroomMs = 0, bool stagedBuffers = false, bool periodWatchdog = false, bool traceWork = false, Func<int, bool>? canPrimeSource48k = null, WaitHandle? primingSignal = null)
+    {
+        if (minimalHeadroomMs is < 0 or > 5) throw new ArgumentOutOfRangeException(nameof(minimalHeadroomMs));
+        this.minimalHeadroomMs = minimalHeadroomMs; this.minimal = minimal; this.endpointId = endpointId; this.category = category;
+        this.stagedBuffers = stagedBuffers; this.periodWatchdog = periodWatchdog; this.traceWork = traceWork;
+        this.canPrimeSource48k = canPrimeSource48k; this.primingSignal = primingSignal;
+        this.requestedMs = requestedMs; this.preferLow = preferLow; this.bounded = bounded; this.preferRaw = preferRaw;
+    }
 
     internal static int ChooseTarget(int capacity, uint period, int rate) =>
         Math.Min(capacity, checked((int)period + (int)Math.Ceiling(rate * .005)));
@@ -81,8 +120,9 @@ internal sealed class SharedRenderPlayer : IDisposable
                 client.InitializeSharedAudioStream(AudioClientStreamFlags.EventCallback, period, mix, Guid.Empty);
                 client.SetEventHandle(ready.SafeWaitHandle.DangerousGetHandle());
                 capacity = client.BufferSize;
-                desiredFrames = ChooseTarget(capacity, period, mix.SampleRate);
-                targetFrames = capacity;
+                if (stagedBuffers) staging = new byte[checked(capacity * mix.BlockAlign)];
+                desiredFrames = minimal ? Math.Min(capacity, checked((int)period + (int)Math.Ceiling(mix.SampleRate * minimalHeadroomMs / 1000.0))) : ChooseTarget(capacity, period, mix.SampleRate);
+                targetFrames = minimal ? desiredFrames : capacity;
                 periodMs = period * 1000.0 / mix.SampleRate; OutputWaveFormat = mix;
                 ISampleProvider samples = source.ToSampleProvider();
                 if (samples.WaveFormat.SampleRate != mix.SampleRate) samples = new WdlResamplingSampleProvider(samples, mix.SampleRate);
@@ -146,23 +186,50 @@ internal sealed class SharedRenderPlayer : IDisposable
         IntPtr priority = IntPtr.Zero; Exception? failure = null; var active = client!;
         try
         {
-            uint index = 0; priority = AvSetMmThreadCharacteristics("Audio", ref index);
+            uint index = 0; priority = AvSetMmThreadCharacteristics(minimal ? "Pro Audio" : "Audio", ref index);
+            Volatile.Write(ref mmcssActive, priority != IntPtr.Zero);
             var render = active.AudioRenderClient;
+            if (minimal && stagedBuffers && canPrimeSource48k is not null && primingSignal is not null)
+            {
+                // Prime with real compressed media before starting the hardware clock.
+                // The same reserve/pull threshold is used; there is no extra steady FIFO.
+                var required = (int)Math.Ceiling(targetFrames * 48000.0 / OutputWaveFormat.SampleRate)
+                    + (OutputWaveFormat.SampleRate == 48000 ? 0 : 8);
+                var began = Stopwatch.GetTimestamp();
+                WaitHandle[] primeSignals = [stop, primingSignal];
+                var mediaReady = canPrimeSource48k(required);
+                while (!mediaReady)
+                {
+                    var remaining = 100 - (int)Math.Ceiling(Stopwatch.GetElapsedTime(began).TotalMilliseconds);
+                    if (remaining <= 0) break;
+                    if (WaitHandle.WaitAny(primeSignals, remaining) == 0) { started!.TrySetResult(); return; }
+                    mediaReady = canPrimeSource48k(required);
+                }
+                Volatile.Write(ref primingWaitMs, Stopwatch.GetElapsedTime(began).TotalMilliseconds);
+                Volatile.Write(ref primingResult, mediaReady ? 1 : 0);
+            }
             Fill(render, targetFrames); active.Start(); warmupStarted = Stopwatch.GetTimestamp(); started!.SetResult();
             WaitHandle[] signals = [stop, ready];
-            while (WaitHandle.WaitAny(signals, Math.Max(30, (int)Math.Ceiling(periodMs * 3))) != 0)
+            var previousWake = Stopwatch.GetTimestamp();
+            while (true)
             {
+                var signal = WaitHandle.WaitAny(signals, periodWatchdog ? Math.Max(1, (int)Math.Ceiling(periodMs)) : Math.Max(30, (int)Math.Ceiling(periodMs * 3)));
+                if (signal == 0) break;
+                if (signal == WaitHandle.WaitTimeout) Interlocked.Increment(ref timeoutWakes);
+                var now = Stopwatch.GetTimestamp(); var previousLoopWake = previousWake; Maximum(ref maxWakeTicks, now - previousWake); previousWake = now;
                 var queued = active.CurrentPadding;
                 if (queued == 0)
                 {
-                    RestoreFullPadding();
+                    ObserveEmpty("wake");
+                    if (traceWork) RecordWork(new(ProbeClock.Now, "wake-empty", Milliseconds(now - previousLoopWake),
+                        0, 0, null, 0, null, 0, 0, 0));
                 }
                 // Keep established headroom through cold decoder/JIT startup. Reduce only
                 // after two seconds without a drain; never retry after a bounded deadline miss.
                 if (!boundedFailed && Stopwatch.GetElapsedTime(warmupStarted).TotalSeconds >= 2)
                     Volatile.Write(ref targetFrames, desiredFrames);
                 var count = Math.Min(capacity - queued, targetFrames - queued);
-                if (count > 0) Fill(render, count, monitorDrain: queued > 0);
+                if (count > 0) Fill(render, count, monitorDrain: queued > 0, queuedBefore: queued);
                 Volatile.Write(ref padding, active.CurrentPadding);
             }
         }
@@ -175,9 +242,17 @@ internal sealed class SharedRenderPlayer : IDisposable
         }
         if (failure is not null) PlaybackStopped?.Invoke(this, new StoppedEventArgs(failure));
     }
+    private void ObserveEmpty(string phase)
+    {
+        if (phase == "wake") Interlocked.Increment(ref emptyOnWake);
+        else Interlocked.Increment(ref emptyDuringSupply);
+        Volatile.Write(ref lastEmpty, new(ProbeClock.Now, phase));
+        RestoreFullPadding();
+    }
     private void RestoreFullPadding()
     {
         Interlocked.Increment(ref emptyEvents);
+        if (minimal) return; // Explicit test mode counts misses instead of silently adding latency.
         if (targetFrames < capacity)
         {
             boundedFailed = true;
@@ -187,17 +262,60 @@ internal sealed class SharedRenderPlayer : IDisposable
         // Warm-up drains restart settling; a bounded miss latches full headroom.
         Volatile.Write(ref targetFrames, capacity);
     }
-    private void Fill(AudioRenderClient render, int frames, bool monitorDrain = false)
+    private void Fill(AudioRenderClient render, int frames, bool monitorDrain = false, int? queuedBefore = null)
     {
-        using var lease = render.GetBufferLease(frames, OutputWaveFormat.BlockAlign);
-        var count = provider!.Read(lease.Buffer);
-        if (count < 0 || count > lease.Buffer.Length || count % OutputWaveFormat.BlockAlign != 0)
-            throw new InvalidOperationException("Invalid shared render source length.");
-        lease.Buffer[count..].Clear();
-        // A slow provider can drain the already committed audio while its lease is held.
-        // Observe before Release, otherwise newly committed frames would hide the miss.
-        if (monitorDrain && client!.CurrentPadding == 0) RestoreFullPadding();
-        lease.Release(frames);
+        var began = Stopwatch.GetTimestamp();
+        var cpuBefore = traceWork ? ThreadCpuTicks() : null;
+        var gc0 = traceWork ? GC.CollectionCount(0) : 0;
+        var gc1 = traceWork ? GC.CollectionCount(1) : 0;
+        var gc2 = traceWork ? GC.CollectionCount(2) : 0;
+        var bytes = checked(frames * OutputWaveFormat.BlockAlign);
+        if (stagedBuffers) ReadProvider(staging.AsSpan(0, bytes));
+        var readEnd = Stopwatch.GetTimestamp();
+        var leaseAt = readEnd;
+        int? beforeCommit = null;
+        using (var lease = render.GetBufferLease(frames, OutputWaveFormat.BlockAlign))
+        {
+            if (stagedBuffers) staging.AsSpan(0, bytes).CopyTo(lease.Buffer);
+            else ReadProvider(lease.Buffer);
+            // Observe before release so committing fresh frames cannot hide a miss.
+            if (monitorDrain)
+            {
+                beforeCommit = client!.CurrentPadding;
+                if (beforeCommit == 0) ObserveEmpty("supply");
+            }
+            lease.Release(frames);
+        }
+        var end = Stopwatch.GetTimestamp();
+        Maximum(ref maxLeaseTicks, end - leaseAt);
+        if (traceWork && (Stopwatch.GetElapsedTime(began, end).TotalMilliseconds >= 2 || beforeCommit == 0))
+        {
+            var cpuAfter = ThreadCpuTicks();
+            RecordWork(new(began / (double)Stopwatch.Frequency, beforeCommit == 0 ? "supply-empty" : warmupStarted == 0 ? "prime" : "slow-supply",
+                Milliseconds(end - began), Milliseconds(readEnd - began), Milliseconds(end - leaseAt),
+                cpuBefore is { } c0 && cpuAfter is { } c1 ? Math.Max(0, c1 - c0) / 10000.0 : null,
+                queuedBefore * 1000.0 / OutputWaveFormat.SampleRate, beforeCommit * 1000.0 / OutputWaveFormat.SampleRate,
+                GC.CollectionCount(0) - gc0, GC.CollectionCount(1) - gc1, GC.CollectionCount(2) - gc2));
+        }
+    }
+    private static long? ThreadCpuTicks() => GetThreadTimes(GetCurrentThread(), out _, out _, out var kernel, out var user)
+        ? kernel + user : null;
+    private void ReadProvider(Span<byte> destination)
+    {
+        var began = Stopwatch.GetTimestamp();
+        try
+        {
+            var count = provider!.Read(destination);
+            if (count < 0 || count > destination.Length || count % OutputWaveFormat.BlockAlign != 0)
+                throw new InvalidOperationException("Invalid shared render source length.");
+            destination[count..].Clear();
+        }
+        finally
+        {
+            var elapsed = Stopwatch.GetTimestamp() - began;
+            Maximum(ref maxProviderTicks, elapsed);
+            if (warmupStarted != 0) Maximum(ref maxRunningProviderTicks, elapsed);
+        }
     }
     public void Stop()
     {
@@ -212,6 +330,13 @@ internal sealed class SharedRenderPlayer : IDisposable
         if (Thread.CurrentThread == thread) throw new InvalidOperationException("Dispose output outside render callback.");
         Stop(); fallback?.Dispose(); ReleaseClient(); ready.Dispose(); stop.Dispose(); disposed = true;
     }
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern IntPtr GetCurrentThread();
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetThreadTimes(IntPtr thread, out long creation, out long exit, out long kernel, out long user);
     [DllImport("avrt.dll", CharSet = CharSet.Unicode, ExactSpelling = true, EntryPoint = "AvSetMmThreadCharacteristicsW")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern IntPtr AvSetMmThreadCharacteristics(string name, ref uint index);

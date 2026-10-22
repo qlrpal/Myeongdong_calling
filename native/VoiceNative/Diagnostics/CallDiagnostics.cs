@@ -11,13 +11,23 @@ public sealed record AudioDiagnostics(double? QueueMs, long QueueResets, double?
     double? CaptureGapP95Ms = null, double? CaptureGapMaxMs = null,
     double? CaptureWorkP95Ms = null, double? CaptureWorkMaxMs = null,
     long CaptureDiscontinuities = 0, long CaptureTimestampErrors = 0,
-    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null, RenderDiagnostics? Render = null);
-public sealed record RenderDiagnostics(bool BoundedActive, double? TargetPaddingMs, double? CapacityMs, long EmptyEvents, long SafetyFallbacks = 0, bool RawActive = false);
+    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null, RenderDiagnostics? Render = null, CaptureExecutionDiagnostics? CaptureExecution = null);
+public sealed record CaptureExecutionDiagnostics(bool StagedBuffers, bool PeriodWatchdog, bool MmcssActive,
+    long TimeoutWakes, double MaxWakeGapMs, double MaxLeaseMs, double MaxCallbackMs);
+public sealed record RenderExecutionDiagnostics(bool StagedBuffers, bool PeriodWatchdog, bool MmcssActive,
+    long TimeoutWakes, double MaxWakeGapMs, double MaxProviderMs, double MaxLeaseMs,
+    long EmptyOnWake, long EmptyDuringSupply, double? LastEmptyAt, string? LastEmptyPhase,
+    double? MaxRunningProviderMs = null, double? PrimingWaitMs = null, bool? PrimedWithMedia = null, RenderWorkObservation[]? RecentWork = null);
+// ThreadCpuMs uses coarse Windows thread accounting; 0 does not prove no CPU work.
+public sealed record RenderWorkObservation(double At, string Phase, double ElapsedMs, double ProviderMs,
+    double LeaseMs, double? ThreadCpuMs, double? PaddingBeforeMs, double? PaddingBeforeCommitMs,
+    int Gen0Collections, int Gen1Collections, int Gen2Collections);
+public sealed record RenderDiagnostics(bool BoundedActive, double? TargetPaddingMs, double? CapacityMs, long EmptyEvents, long SafetyFallbacks = 0, bool RawActive = false, RenderExecutionDiagnostics? Execution = null);
 public sealed record PeerDiagnostics(string Id, string Name, string State, string IceState, string Route,
     string? LocalEndpoint, string? RemoteEndpoint, long TxFrames, long RxPackets,
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,
     double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio, NetworkPrecision? Precision = null, LatencyView? Latency = null);
-public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, int FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible", string? MediaAddress = null);
+public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, double FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible", string? MediaAddress = null, LatencyExperiment? Experiment = null);
 
 internal sealed class PeerMetrics
 {

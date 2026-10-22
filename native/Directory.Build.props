@@ -1,5 +1,7 @@
 <Project>
   <PropertyGroup>
+    <!-- This latency experiment compiles optimized code on first use instead of tiering during audio. -->
+    <TieredCompilation>false</TieredCompilation>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>

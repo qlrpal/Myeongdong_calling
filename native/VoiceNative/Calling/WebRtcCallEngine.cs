@@ -17,6 +17,8 @@ public sealed class WebRtcCallEngine : ICallEngine
     private readonly SemaphoreSlim gate = new(1);
     private readonly SemaphoreSlim cleanupGate = new(1);
     private readonly Dictionary<string, Peer> peers = new();
+    // Publish only on membership changes; sending never copies or locks the map.
+    private Peer[] sendPeers = [];
     private readonly List<RTCIceServer> iceServers = new();
     private CancellationTokenSource? cancellation;
     private Task? eventLoop;
@@ -28,6 +30,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private AudioSendQueue? sendQueue;
     private CancellationTokenSource? sendCancellation;
     private Task? sendTask;
+    private DedicatedAudioSender? dedicatedSender;
     private readonly SemaphoreSlim measurementGate = new(1);
     private AcousticLatencyResult? acousticResult;
     private int outputLatencyMs = 40;
@@ -47,6 +50,19 @@ public sealed class WebRtcCallEngine : ICallEngine
     internal string? CaptureDeviceId { get; init; }
     private string? selectedCaptureId, selectedRenderId;
     private bool microphoneMuted;
+    private LatencyExperiment? experiment;
+    private double FrameDurationMs => experiment?.FrameMs ?? 10;
+    public void SetLatencyExperiment(LatencyExperiment? experiment)
+    {
+        experiment?.Validate();
+        if (!gate.Wait(0)) throw new InvalidOperationException("연결 작업 중에는 실험을 바꿀 수 없습니다.");
+        try
+        {
+            if (session is not null || microphone is not null) throw new InvalidOperationException("통화에서 나온 뒤 실험을 선택하세요.");
+            this.experiment = experiment;
+        }
+        finally { gate.Release(); }
+    }
     public void SetMicrophoneMuted(bool muted)
     {
         Volatile.Write(ref microphoneMuted, muted);
@@ -85,6 +101,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private sealed record RemotePeer(string Id, string Name);
     private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision)
     {
+        public AudioSendLifetime SendLifetime { get; } = new();
         public long LastSentSequence { get; set; }
         public long FirstSequence { get; set; }
         public uint TimestampBase { get; set; }
@@ -145,17 +162,38 @@ public sealed class WebRtcCallEngine : ICallEngine
                 (iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)) ? "사용 가능" : "미설정"));
             if (ForceRelay && !iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)))
                 throw new InvalidOperationException("TURN 강제 시험에 필요한 TURN 서버가 없습니다.");
-            encoder = new OpusAudioEncoder(opusProfile);
-            Status?.Invoke("송신 코덱 · " + OpusAudioEncoder.Label(opusProfile));
-            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: 10, pipeline: pipeline, intermediateCapture: IntermediateCapture && preferShortCapture, captureDeviceId: selectedCaptureId ?? CaptureDeviceId)
+            encoder = new OpusAudioEncoder(experiment is null ? opusProfile : OpusProfile.LowDelay64, experiment);
+            Status?.Invoke("송신 코덱 · " + (experiment is null ? OpusAudioEncoder.Label(opusProfile) : encoder.Snapshot().Profile) + $" · {FrameDurationMs}ms");
+            if (experiment is not null && (!useRtpPlayout || !preferLowLatency)) throw new InvalidOperationException("극저지연 실험은 공유 저지연·RTP 재생을 켜야 합니다.");
+            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: FrameDurationMs, pipeline: pipeline, intermediateCapture: IntermediateCapture && preferShortCapture, captureDeviceId: selectedCaptureId ?? CaptureDeviceId, experiment: experiment)
             { DiagnosticCaptureTransform = DiagnosticCaptureTransform };
             microphone.SetMuted(Volatile.Read(ref microphoneMuted));
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
-            sendQueue = new AudioSendQueue(); sendCancellation = new CancellationTokenSource();
+            // Short frames can arrive in a single device-period burst. A one-frame
+            // asynchronous queue would discard valid siblings before the worker wakes.
+            var sendCapacity = experiment?.DedicatedSend == true
+                ? AudioSendQueue.BurstCapacity(microphone.Snapshot().EnginePeriodMs ?? 10, FrameDurationMs)
+                : experiment?.LatestSend == true ? 1 : 3;
+            sendQueue = new AudioSendQueue(sendCapacity); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
-            microphone.OnAudioSourceEncodedSample += (_, bytes) => activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
+            dedicatedSender = experiment?.DedicatedSend == true ? new(activeQueue,
+                frame => DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0)) : null;
+            var activeSender = dedicatedSender;
+            microphone.OnAudioSourceEncodedSample += (_, bytes) =>
+            {
+                if (experiment?.InlineSend == true)
+                {
+                    var frame = activeQueue.CreateFrame(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
+                    activeQueue.Observe(frame); DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0);
+                }
+                else
+                {
+                    activeQueue.Enqueue(bytes, microphone?.EncodedTraceHash, microphone?.LastCaptureOrigin);
+                    activeSender?.Notify();
+                }
+            };
             var sendToken = sendCancellation.Token;
-            sendTask = Task.Run(() => DispatchAudio(activeQueue, sendToken));
+            sendTask = activeSender?.Completion ?? (experiment?.InlineSend == true ? null : Task.Run(() => DispatchAudio(activeQueue, sendToken)));
             session = (await Post("api/join", new { room, name })).Deserialize<Session>(Json)!;
             cancellation = new CancellationTokenSource();
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -177,7 +215,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                 await microphone.StartAudio();
             }
             finally { gate.Release(); }
-            Status?.Invoke("방 참가 완료 · Opus 48kHz · 상대방 연결 대기");
+            Status?.Invoke($"방 참가 완료 · {(experiment?.Pcm == true ? "L16 PCM" : "Opus")} 48kHz / {FrameDurationMs}ms · 상대방 연결 대기");
         }
         catch { await LeaveAsync(); throw; }
     }
@@ -188,10 +226,10 @@ public sealed class WebRtcCallEngine : ICallEngine
         lock (peers) if (peers.TryGetValue(id, out var existing)) return existing;
         var selectedInterface = MediaInterfaceSelection.Resolve(mediaAddress);
         var decoder = new AudioEncoder(includeOpus: true);
-        var lowDelay = playoutPolicy is PlayoutPolicy.LowLatency or PlayoutPolicy.ResponsiveLowLatency;
+        var lowDelay = experiment is not null || playoutPolicy is PlayoutPolicy.LowLatency or PlayoutPolicy.ResponsiveLowLatency;
         var responsive = ResponsiveReserve || playoutPolicy == PlayoutPolicy.ResponsiveLowLatency;
         var rawOutput = RawRender ?? (preferRawOutput && preferLowLatency && lowDelay && useRtpPlayout);
-        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId);
+        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId, experiment: experiment);
         RTCPeerConnection? pc = null;
         try
         {
@@ -258,7 +296,11 @@ public sealed class WebRtcCallEngine : ICallEngine
             peer.PayloadTypeId = formats.First().FormatID;
             Volatile.Write(ref receivedPayloadType, peer.PayloadTypeId);
         };
-        lock (peers) peers.Add(id, peer);
+        lock (peers)
+        {
+            peers.Add(id, peer);
+            Volatile.Write(ref sendPeers, peers.Values.ToArray());
+        }
         return peer;
     }
     private async Task StartSink(WindowsAudioDevice sink)
@@ -291,9 +333,13 @@ public sealed class WebRtcCallEngine : ICallEngine
             var id = data.GetProperty("id").GetString()!;
             departed.Add(id);
             Peer? peer;
-            lock (peers) { peers.Remove(id, out peer); }
+            lock (peers)
+            {
+                peers.Remove(id, out peer);
+                Volatile.Write(ref sendPeers, peers.Values.ToArray());
+            }
             pending.Remove(id);
-            if (peer is not null) { peer.Connection.Close("left"); await peer.Sink.Close(); peer.Decoder.Dispose(); Status?.Invoke(peer.Name + ": 나감"); }
+            if (peer is not null) { await ClosePeerAsync(peer, "left"); Status?.Invoke(peer.Name + ": 나감"); }
             return;
         }
         if (kind != "signal") return;
@@ -377,12 +423,18 @@ public sealed class WebRtcCallEngine : ICallEngine
             {
                 if (microphone is not null) { await microphone.Close(); microphone = null; }
                 sendQueue?.Complete(); sendCancellation?.Cancel();
+                dedicatedSender?.Stop();
                 if (sendTask is not null) await sendTask;
+                dedicatedSender?.Dispose(); dedicatedSender = null;
                 sendCancellation?.Dispose(); sendCancellation = null; sendTask = null; sendQueue = null;
                 encoder?.Dispose(); encoder = null;
                 Peer[] closing;
-                lock (peers) { closing = peers.Values.ToArray(); peers.Clear(); }
-                foreach (var peer in closing) { peer.Connection.Close("leave"); await peer.Sink.Close(); peer.Decoder.Dispose(); }
+                lock (peers)
+                {
+                    closing = peers.Values.ToArray(); peers.Clear();
+                    Volatile.Write(ref sendPeers, []);
+                }
+                foreach (var peer in closing) await ClosePeerAsync(peer, "leave");
                 var old = session; session = null;
                 if (old is not null) { try { await Post("api/leave", new { old.Id, old.Token }); } catch { } }
                 pending.Clear(); departed.Clear();
@@ -538,6 +590,8 @@ public sealed class WebRtcCallEngine : ICallEngine
         lock (peers) current = peers.ToArray();
         var mic = microphone?.Snapshot();
         var sender = sendQueue?.Snapshot();
+        if (sender is not null) sender = sender with { Mode = dedicatedSender is not null ? "dedicated" : experiment?.InlineSend == true ? "inline" : "queued",
+            MmcssActive = dedicatedSender?.MmcssActive, Error = dedicatedSender?.Failure };
         var snapshots = current.Select(entry =>
         {
             var peer = entry.Value;
@@ -547,13 +601,13 @@ public sealed class WebRtcCallEngine : ICallEngine
             var remote = peer.Telemetry.Snapshot();
             var fresh = remote.Age is <= 3 && detail.RttAgeSeconds is <= 15 && peer.Connection.connectionState == RTCPeerConnectionState.connected;
             var view = new LatencyView(
-                fresh && mic?.LastFrameAgeMs is <= 250 && remote.Remote?.OutputFrameAgeMs is <= 250 && remote.Remote.OutputState == "재생" ? TelemetryState.Model(mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, detail.RtcpRttMs, remote.Remote.PlaybackQueueMs, remote.Remote.OutputApiMs, remote.Remote.DecodeMs, 10) : null,
+                fresh && mic?.LastFrameAgeMs is <= 250 && remote.Remote?.OutputFrameAgeMs is <= 250 && remote.Remote.OutputState == "재생" ? TelemetryState.Model(mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, detail.RtcpRttMs, remote.Remote.PlaybackQueueMs, remote.Remote.OutputApiMs, remote.Remote.DecodeMs, FrameDurationMs) : null,
                 fresh && remote.Remote?.InputFrameAgeMs is <= 250 && audio.LastFrameAgeMs is <= 250 && audio.PlaybackState == "재생" ? TelemetryState.Model(remote.Remote?.InputApiMs, remote.Remote?.EncodeMs, remote.Remote?.SendWaitMs, detail.RtcpRttMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, remote.Remote?.FrameMs ?? 20) : null,
                 remote.Age, remote.Remote, "합산 모델: API 지연+코덱 처리+송신자 프레임 대기+송신 대기+RTT/2+수신 큐+출력 API. 대칭 경로 가정이며 중복 대기·코덱 내부·물리 장치 지연은 검증되지 않음. 전체 음향 지연 실측 아님.");
             var channel = peer.DiagnosticsChannel;
             if (channel?.readyState == RTCDataChannelState.open && channel.bufferedAmount < 4096)
             {
-                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, 10))); }
+                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs))); }
                 catch (Exception) { } // Diagnostics must not interrupt audio if the channel closes.
             }
             var nominated = peer.Connection.GetRtpChannel().NominatedEntry;
@@ -564,8 +618,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                 sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, audio, detail, view);
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
-            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, 10, encoder?.Snapshot(),
-            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress);
+            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, FrameDurationMs, encoder?.Snapshot(),
+            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress, experiment);
     }
     private void AttachTelemetry(Peer peer, RTCDataChannel channel)
     {
@@ -635,6 +689,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     public Task MeasureLoopbackLatencyAsync() => MeasureSignalLatencyAsync(true);
     private async Task MeasureSignalLatencyAsync(bool useLoopback)
     {
+        if (experiment is not null) throw new InvalidOperationException("극저지연 실험에서는 전용 파이프라인 계측을 사용하세요. 기존 음향 검사는 기본 모드에서 실행합니다.");
         if (!await measurementGate.WaitAsync(0)) throw new InvalidOperationException("이미 음향 측정 중입니다.");
         Peer? target = null; string? probeId = null;
         try
@@ -700,30 +755,48 @@ public sealed class WebRtcCallEngine : ICallEngine
             {
                 queue.Observe(frame);
                 var dequeuedAt = pipeline.Enabled ? ProbeClock.Now : 0;
-                lock (peers)
-                {
-                    foreach (var peer in peers.Values)
-                    {
-                        if (peer.Connection.connectionState != RTCPeerConnectionState.connected) continue;
-                        try
-                        {
-                            if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
-                            var timestamp = AudioSendQueue.Timestamp(peer.TimestampBase, peer.FirstSequence, frame.Sequence, 480);
-                            var sentAt = ProbeClock.Now;
-                            if (frame.TraceHash is { } traceHash) microphone?.Timeline.Update(traceHash, old => old with { SentAt = sentAt });
-                            peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,
-                                peer.LastSentSequence == 0 || frame.Sequence != peer.LastSentSequence + 1 ? 1 : 0, peer.PayloadTypeId);
-                            if (pipeline.Enabled) pipeline.Sent(new(peer.Connection.AudioLocalTrack.Ssrc, timestamp, frame.Sequence,
-                                frame.Created / (double)System.Diagnostics.Stopwatch.Frequency, dequeuedAt, sentAt, ProbeClock.Now, frame.Origin));
-                            peer.LastSentSequence = frame.Sequence; peer.Metrics.Sent(frame.Payload.Length);
-                        }
-                        catch (Exception ex) { Status?.Invoke(peer.Name + ": 음성 송신 오류: " + ex.Message); }
-                    }
-                }
+                DispatchFrame(frame, dequeuedAt);
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
+    private void DispatchFrame(OutgoingAudio frame, double dequeuedAt)
+    {
+        foreach (var peer in Volatile.Read(ref sendPeers))
+        {
+            if (!peer.SendLifetime.TryEnter()) continue;
+            string? error = null;
+            try
+            {
+                if (peer.Connection.connectionState != RTCPeerConnectionState.connected) continue;
+                if (peer.FirstSequence == 0) { peer.FirstSequence = frame.Sequence; peer.TimestampBase = peer.Connection.AudioLocalTrack.Timestamp; }
+                var timestamp = AudioSendQueue.Timestamp(peer.TimestampBase, peer.FirstSequence, frame.Sequence, (uint)(experiment?.FrameSamples ?? 480));
+                var sentAt = ProbeClock.Now;
+                if (frame.TraceHash is { } traceHash) TraceSentFrame(traceHash, sentAt);
+                peer.Connection.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, timestamp,
+                    peer.LastSentSequence == 0 || frame.Sequence != peer.LastSentSequence + 1 ? 1 : 0, peer.PayloadTypeId);
+                if (pipeline.Enabled) pipeline.Sent(new(peer.Connection.AudioLocalTrack.Ssrc, timestamp, frame.Sequence,
+                    frame.Created / (double)System.Diagnostics.Stopwatch.Frequency, dequeuedAt, sentAt, ProbeClock.Now, frame.Origin));
+                peer.LastSentSequence = frame.Sequence; peer.Metrics.Sent(frame.Payload.Length);
+            }
+            catch (Exception ex) { error = peer.Name + ": 음성 송신 오류: " + ex.Message; }
+            finally { peer.SendLifetime.Exit(); }
+            // User callbacks must not hold a send lease needed by peer shutdown.
+            if (error is not null) Status?.Invoke(error);
+        }
+    }
+    private static async Task ClosePeerAsync(Peer peer, string reason)
+    {
+        await peer.SendLifetime.StopAsync();
+        try { peer.Connection.Close(reason); }
+        finally
+        {
+            try { await peer.Sink.Close(); }
+            finally { peer.Decoder.Dispose(); }
+        }
+    }
+    private void TraceSentFrame(string hash, double at) =>
+        microphone?.Timeline.Update(hash, old => old with { SentAt = at });
     private static string FormatEndpoint(RTCIceCandidate candidate) =>
         candidate.address.Contains(':') ? $"[{candidate.address}]:{candidate.port}" : $"{candidate.address}:{candidate.port}";
 }

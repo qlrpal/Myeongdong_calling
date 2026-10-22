@@ -107,8 +107,8 @@ internal sealed class RtcpMetrics
 
 internal sealed class ProcessingWindow
 {
-    private readonly Queue<double> values = new();
-    public void Add(double ms) { values.Enqueue(ms); if (values.Count > 256) values.Dequeue(); }
+    private readonly Queue<double> values = new(256);
+    public void Add(double ms) { if (values.Count == 256) values.Dequeue(); values.Enqueue(ms); }
     public (double? P95, double? Max) Snapshot()
     {
         if (values.Count == 0) return (null, null);

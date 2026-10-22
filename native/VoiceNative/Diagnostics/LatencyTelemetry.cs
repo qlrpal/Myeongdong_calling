@@ -4,7 +4,7 @@ namespace VoiceNative;
 
 public sealed record LatencyTelemetry(int Version, double? InputApiMs, double? EncodeMs, double? SendWaitMs,
     double? PlaybackQueueMs, double? OutputApiMs, double? DecodeMs, string? OutputState,
-    double? InputFrameAgeMs = null, double? OutputFrameAgeMs = null, int FrameMs = 20);
+    double? InputFrameAgeMs = null, double? OutputFrameAgeMs = null, double FrameMs = 20);
 public sealed record LatencyView(double? OutboundModelMs, double? InboundModelMs, double? RemoteAgeSeconds,
     LatencyTelemetry? Remote, string Explanation);
 
@@ -19,7 +19,7 @@ internal sealed class TelemetryState
         try
         {
             var value = JsonSerializer.Deserialize<LatencyTelemetry>(bytes);
-            if (value is null || value.Version != 1 || value.FrameMs is not (10 or 20)) return false;
+            if (value is null || value.Version != 1 || value.FrameMs is not (1 or 2.5 or 5 or 10 or 20)) return false;
             foreach (var number in new[] { value.InputApiMs, value.EncodeMs, value.SendWaitMs, value.PlaybackQueueMs, value.OutputApiMs, value.DecodeMs })
                 if (number is { } n && (!double.IsFinite(n) || n < 0 || n > 10000)) return false;
             foreach (var age in new[] { value.InputFrameAgeMs, value.OutputFrameAgeMs }) if (age is { } n && (!double.IsFinite(n) || n < 0)) return false;
@@ -32,7 +32,7 @@ internal sealed class TelemetryState
     {
         lock (sync) return (remote, remote is null ? null : Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency - receivedAt);
     }
-    public static double? Model(double? input, double? encode, double? sendWait, double? rtt, double? queue, double? output, double? decode, int frameMs = 20)
+    public static double? Model(double? input, double? encode, double? sendWait, double? rtt, double? queue, double? output, double? decode, double frameMs = 20)
     {
         if (new[] { input, encode, sendWait, rtt, queue, output, decode }.Any(x => x is null)) return null;
         // Explicit model: the sender frame duration and a symmetric network RTT/2.

@@ -1,11 +1,26 @@
 """Join late admissions with earlier PLC decisions using one receiver's clock."""
 import json
+import math
 import sys
 from bisect import bisect_right
 from collections import defaultdict
 from pathlib import Path
 from analyze_pipeline import key, stats
 from analyze_playout_target import summarize
+
+
+def validate(report):
+    if 'options' not in report:
+        summarize(report)  # Preserve the legacy trial's boundary-error rule.
+        return
+    trace = report['trace']
+    reads = trace['Reads']
+    if (report.get('error') or trace['EvictedRecords'] or len(reads) < 2
+            or not trace['Admissions'] or len(report['samples']) < 2
+            or any(len(s['Peers']) != 1 or s['Peers'][0]['State'] != 'connected' for s in report['samples'])
+            or any(not math.isfinite(r['LockAt']) for r in reads)
+            or reads[-1]['LockAt'] - reads[0]['LockAt'] < 8):
+        raise ValueError('Incomplete/evicted extreme trace cannot support deadline analysis')
 
 
 def inspect(report):
@@ -63,6 +78,16 @@ def self_test():
     assert a['plc_to_late_admission_ms']['p50'] == 3
     assert a['late_after_played'] == a['late_without_observed_prior_decision'] == 1
     assert a['empty_queue_decisions'] == a['within_5ms'] == 1
+    extreme = dict(options=None, error=None, samples=[dict(Peers=[dict(State='connected')])] * 2,
+        trace=dict(EvictedRecords=0, Reads=[dict(LockAt=1), dict(LockAt=11)], Admissions=[{}]))
+    validate(extreme)
+    for patch in [dict(error='failed'), dict(trace={**extreme['trace'], 'EvictedRecords': 1}),
+                  dict(trace={**extreme['trace'], 'Reads': [dict(LockAt=1), dict(LockAt=2)]})]:
+        try:
+            validate({**extreme, **patch})
+        except ValueError:
+            continue
+        raise AssertionError('Invalid extreme trace accepted')
     print('PASS: receiver-local deadline join, clock-offset invariance and late duplicates/unknown decisions')
 
 
@@ -75,7 +100,7 @@ if __name__ == '__main__':
         results = []
         for path in sys.argv[2:]:
             report = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-            summarize(report)  # Reject incomplete/evicted input using the comparison's boundary rule.
+            validate(report)
             results.append(dict(source=Path(path).name, **inspect(report)))
         Path(sys.argv[1]).write_text(json.dumps(dict(
             notes='Observed decoder PLC deadline to subsequent admission; one receiver clock only. Not a physical output deadline or proof of network loss. Full trace counts include startup and shutdown boundaries.',

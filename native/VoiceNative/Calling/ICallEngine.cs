@@ -8,6 +8,7 @@ public interface ICallEngine : IAsyncDisposable
     void SetAudioDevices(string? captureId, string? renderId);
     void SetMicrophoneMuted(bool muted);
     void SetPeerVolume(string peerId, float volume);
+    void SetLatencyExperiment(LatencyExperiment? experiment);
     CallDiagnostics GetDiagnostics();
     Task RestartOutputAsync();
     Task SetOutputLatencyAsync(int milliseconds);

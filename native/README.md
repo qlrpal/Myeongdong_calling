@@ -23,6 +23,10 @@ Windows10 2004 이상, .NET10 SDK, Node.js22 이상을 사용합니다. 저장�
 배포는 `native/dist/` 전체 또는 `native/dist.zip`을 사용합니다. 기존 dist/ZIP과 그 안의 사용자 진단 자료는 새 빌드 때 `.local/archive/build-*`로 보존하며 새 패키지에 섞지 않습니다. 대상 PC에는 .NET10 Desktop Runtime이 필요합니다. 의존성 복원 후에는 빌드/검사에 `-NoRestore`를 붙일 수 있습니다.
 앱 주소는 `https://qlrpal.ddns.net/`, 두 사용자는 같은 방 이름으로 참가합니다. 사용자 공유기의 포트포워딩은 필요 없지만 Windows 앱 방화벽 허용은 필요할 수 있습니다.
 
+### 극저지연 실험 브랜치
+
+`codex/extreme-latency`의 지연 우선 교체 후보는 `./native/run.ps1 -Experiment opus-adaptive`로 실행합니다. 양쪽 모두 이 브랜치의 최신 빌드를 사용하세요. 2.5ms Opus, 5~20ms 적응 여유, 공유 출력 한 주기+1ms를 사용하며 기본 실행과 기존 배포본은 그대로 유지합니다. 두 PC 1:1에서 직접 연결·TURN 장시간 비교를 수행했지만, 추가 대조에서는 연속성 기준을 넘는 상태도 관측됐습니다. 모든 환경에서 안정화됐다는 뜻은 아닙니다. [최초 대체 후보 보고서](docs/reports/EXTREME-064.md), [복구·패킷 길이 추가 대조](docs/reports/EXTREME-066.md), [실험 가이드](docs/EXTREME-LATENCY.md)를 참고하세요. `opus-adaptive-5`는 별도의 5ms 대조 프로필이며 일괄 권장값으로 승격하지 않았습니다. 기존 설정 실행은 `-Experiment baseline`입니다. 게임 부하·다자/다른 하드웨어 검증은 남아 있습니다.
+
 ## 현재 동작
 
 - C# Windows Forms / SIPSorcery10.0.17 / NAudio3.0.0 / Concentus2.2.2.
@@ -112,3 +116,23 @@ dotnet run --project native/TransportProbe -c Release -- --opus-ab-test https://
 공유 출력 구현과 실측 범위는 [0.5.7 보고서](docs/reports/BOUNDED-SHARED-RENDER-057.md)를 참고하세요. 기존 배포 ZIP은 자동으로 갱신하지 않았으며 `run.ps1`은 현재 소스를 빌드합니다.
 
 최신 출력 경로 비교와 겹친 VPN/LAN 경로 확인은 [0.5.8 보고서](docs/reports/END-TO-END-PATH-058.md)에 정리했습니다. LAN을 명시한 최종5분 통화는 양쪽 완료했으며, 노트북 출력은 한 차례 전체 버퍼로 안전 복귀했습니다.
+
+
+극저지연 실험의 최신 장치 경로 개선·지정 LAN/TURN 검증·남은 실패는 [EXTREME-067](docs/reports/EXTREME-067.md)에 기록했습니다. 실험 모드에서는 물리 미디어 인터페이스를 명시적으로 선택하세요([실행 안내](docs/EXTREME-LATENCY.md)). 아직 안정판 전체 대체 판정은 아닙니다.
+
+
+최신 경로 대조는 [EXTREME-070](docs/reports/EXTREME-070.md)입니다. PC 랜선은 메시 버디에 연결돼 있어 메인 공유기까지 완전한 유선 경로가 아니었습니다. 메인 AP 직접 연결·대역·WLAN 요청·어댑터 재초기화를 분리해 검사했으며, 최종 내부 원인과 장시간 통화 개선은 확정하지 않았습니다. [EXTREME-069](docs/reports/EXTREME-069.md)에는 이전 경로 검증을 기록했습니다. 두 수신 경로의 공통 지연 변동과 짧은 TURN 통과 결과를 기록했으며 장시간 검증은 남아 있습니다. 앱 공급 개선은 [EXTREME-068](docs/reports/EXTREME-068.md)에 정리했습니다. 이 실험 브랜치의 앱별 JIT 정책 변경으로 장시간 출력 소진은 없어졌지만 TURN 연속성 기준은 계속 실패했습니다. 서버→NIC→앱의 같은 RTP 패킷 대조와 남은 발생 구간을 보고서에 기록했습니다. 안정판 전체 대체 판정은 보류합니다.
+
+
+현재 구현·검증·미확정 사항·다음 작업은 [현재 상태 문서](docs/CURRENT-STATUS.md)에 정리했습니다. 장치별 접속 정보와 원본 위치를 포함하는 개인 인계 문서는 로컬 `.local/handoff/`에 보존하며 Git에 포함하지 않습니다.
+
+
+재개 후 양쪽 게이트웨이 동시 대조와 NIC 캡처 결과는 [EXTREME-071](docs/reports/EXTREME-071.md)에 기록했습니다. 정확히 대응한 로컬 게이트웨이 RTT 98.77ms 중 NIC 송수신 관측 경계 사이가 98.67ms였습니다. 해당 사건은 앱 처리보다 하위 Wi-Fi 분기로 좁혔으며 드라이버·장치·무선·AP 내부 구분은 남아 있습니다. 전체 음성 지연이나 안정판 승격 판정은 아닙니다.
+
+후속 [EXTREME-072](docs/reports/EXTREME-072.md)에서는 설정 변경 없이 NIC/NDIS와 DPC/ISR를 동시에 대응했습니다. 수십 ms 사건을 장시간 DPC/ISR 실행으로 설명하는 증거는 없었으며, NIC 내부 큐·펌웨어·무선·AP 분리는 남았습니다. 2.4GHz 단독 사건과 양쪽 경로 공통 후보를 구분했습니다. 메인 공유기 직결 유선이 불가능해 다음 물리 대조에는 대체 Wi-Fi 어댑터나 독립 AP가 필요합니다.
+
+독립 휴대폰 AP 대조는 [EXTREME-073](docs/reports/EXTREME-073.md), 대역을 2.4GHz로 맞춘 후속 결과는 [EXTREME-075](docs/reports/EXTREME-075.md)에 기록했습니다. 핫스팟에서도 로컬 지연이 재현돼 홈 AP 단독 원인으로 설명되지 않았습니다. PC 무선 경로·공통 RF 환경·AP별 대기는 여전히 미분리이며, 최종 원인 규명이나 안정판 승격을 뜻하지 않습니다. PC는 원래 AP로 복구했습니다.
+
+같은 메인 AP의 PC Realtek·노트북 Intel 동시 대조는 [EXTREME-076](docs/reports/EXTREME-076.md)입니다. 실제 공통 분석138.53초에서 양쪽 모두 로컬 지연과 공통·개별 후보가 관측돼 Realtek 하나로 전체 현상을 설명하기 어려워졌습니다. 무선 환경·절전·AP/클라이언트 큐 내부 분리는 남았고, 노트북은 원래 메시 SSID로 복구했습니다.
+
+앱 송신의 전역 잠금·피어 수명 정리는 [EXTREME-077](docs/reports/EXTREME-077.md), 패킷 저장소 할당 감소와 직접/전용 송신 대조는 [EXTREME-078](docs/reports/EXTREME-078.md)에 기록했습니다. 검증된 저장소 개선은 적용했고 직접 송신 기본값은 유지합니다. 전용 송신은 비교용 옵션이며, 입→귀 지연 개선량이나 장시간 안정판 승격은 아직 확정하지 않았습니다.

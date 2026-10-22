@@ -8,6 +8,11 @@ internal static class ProductChecks
     { if (!condition) throw new InvalidOperationException(message); }
     public static async Task RunAsync(string directory)
     {
+        await AudioSendLifetimeChecks.RunAsync();
+        PacketStorageChecks.Run();
+        await DedicatedSenderChecks.RunAsync();
+        await using (var idleEngine = new WebRtcCallEngine())
+            Require(idleEngine.GetDiagnostics().Sender is null, "Idle diagnostics require no active sender");
         var request = CallRequest.Create("https://example.com", "테스트_123", "사용자", null, null);
         foreach (var bad in new[] { "", "a b", new string('a', 41), "a\nb" })
         {
@@ -82,6 +87,7 @@ internal static class ProductChecks
         public void SetAudioDevices(string? captureId, string? renderId) { }
         public void SetMicrophoneMuted(bool muted) { }
         public void SetPeerVolume(string peerId, float volume) { }
+        public void SetLatencyExperiment(LatencyExperiment? experiment) { }
         public Task RestartOutputAsync() => Task.CompletedTask;
         public Task SetOutputLatencyAsync(int milliseconds) => Task.CompletedTask;
         public void SetLowLatencyPreference(bool enabled) { }

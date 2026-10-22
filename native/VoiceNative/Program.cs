@@ -20,12 +20,21 @@ internal static class Program
             preview.SavePreview(path);
             return;
         }
-        if (args is ["--media-address", var mediaAddress])
+        try
         {
-            try { Application.Run(new CallForm(mediaAddress)); }
-            catch (ArgumentException error) { MessageBox.Show(error.Message, "미디어 네트워크 선택"); }
-            return;
+            string? mediaAddress = null, experiment = null;
+            if (args.Length % 2 != 0) throw new ArgumentException("옵션에는 값이 필요합니다.");
+            for (var i = 0; i < args.Length; i += 2)
+            {
+                switch (args[i])
+                {
+                    case "--media-address": mediaAddress = args[i + 1]; break;
+                    case "--experiment": experiment = args[i + 1]; break;
+                    default: throw new ArgumentException("알 수 없는 실행 옵션: " + args[i]);
+                }
+            }
+            Application.Run(new CallForm(mediaAddress, experiment));
         }
-        Application.Run(new CallForm());
+        catch (ArgumentException error) { MessageBox.Show(error.Message, "실행 설정"); }
     }
 }
