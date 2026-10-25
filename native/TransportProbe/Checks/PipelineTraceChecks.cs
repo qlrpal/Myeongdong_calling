@@ -1,4 +1,5 @@
 using VoiceNative;
+using System.Buffers.Binary;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 
@@ -15,6 +16,24 @@ internal static class PipelineTraceChecks
         if (limited.Snapshot().Sends.Length != 2) throw new InvalidOperationException("Stopped trace accepted records.");
         limited.Start(5);
         if (limited.Snapshot().Sends.Length != 0 || limited.Snapshot().EvictedRecords != 0) throw new InvalidOperationException("Trace restart retained previous session.");
+        var raw = new PipelineTrace(2); raw.Start(5);
+        var header = new byte[12]; header[0] = 0x80; header[1] = 0xef;
+        BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(2), 65535);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(8), 0x10203040);
+        raw.ObserveRtpChannel("test", header, 111, 8192);
+        header[0] = 0; raw.ObserveRtpChannel("test", header, 111, 8192);
+        header[0] = 0x8f; raw.ObserveRtpChannel("test", header, 111, 8192);
+        header[0] = 0x80; header[1] = 200; raw.ObserveRtpChannel("test", header, 111, 8192);
+        raw.ObserveRtpChannel("test", header.AsSpan(0, 8), 111, 8192);
+        var observed = raw.Snapshot().RtpChannel!;
+        if (observed.Length != 1 || observed[0].Ssrc != 0x10203040 || observed[0].Timestamp != uint.MaxValue
+            || observed[0].Sequence != 65535 || observed[0].DatagramBytes != 12 || observed[0].ReceiveBufferBytes != 8192)
+            throw new InvalidOperationException("RTP channel observer corrupted header identity or accepted non-RTP/short/CSRC metadata");
+        raw.Stop(); header[1] = 111; raw.ObserveRtpChannel("test", header, 111, 8192);
+        if (raw.Snapshot().RtpChannel!.Length != 1) throw new InvalidOperationException("Stopped observer accepted RTP");
+        raw.Start(5);
+        if (raw.Snapshot().RtpChannel!.Length != 0) throw new InvalidOperationException("Observer retained previous session");
         using var encoder = new AudioEncoder(includeOpus: true);
         var format = encoder.SupportedFormats.Single(f => f.Codec == AudioCodecsEnum.OPUS);
         var payloads = Enumerable.Range(0, 3).Select(frame => encoder.EncodeAudio(

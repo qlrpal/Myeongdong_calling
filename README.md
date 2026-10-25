@@ -14,6 +14,8 @@
 ./native/verify.ps1
 ```
 
+- [두 호스트 3명·6명 시험](native/docs/TWO-HOST-GROUP-TEST.md)
+- [최신 그룹 검증·미해결 항목](native/docs/reports/EXTREME-092.md)
 - [실행·빌드·소스 구조](native/README.md)
 - [통화 앱 사용법](native/docs/USER-GUIDE.md)
 - [0.6.0 구현·검증](native/docs/reports/PRODUCT-060.md)

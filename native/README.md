@@ -25,7 +25,7 @@ Windows10 2004 이상, .NET10 SDK, Node.js22 이상을 사용합니다. 저장�
 
 ### 극저지연 실험 브랜치
 
-`codex/extreme-latency`의 지연 우선 교체 후보는 `./native/run.ps1 -Experiment opus-adaptive`로 실행합니다. 양쪽 모두 이 브랜치의 최신 빌드를 사용하세요. 2.5ms Opus, 5~20ms 적응 여유, 공유 출력 한 주기+1ms를 사용하며 기본 실행과 기존 배포본은 그대로 유지합니다. 두 PC 1:1에서 직접 연결·TURN 장시간 비교를 수행했지만, 추가 대조에서는 연속성 기준을 넘는 상태도 관측됐습니다. 모든 환경에서 안정화됐다는 뜻은 아닙니다. [최초 대체 후보 보고서](docs/reports/EXTREME-064.md), [복구·패킷 길이 추가 대조](docs/reports/EXTREME-066.md), [실험 가이드](docs/EXTREME-LATENCY.md)를 참고하세요. `opus-adaptive-5`는 별도의 5ms 대조 프로필이며 일괄 권장값으로 승격하지 않았습니다. 기존 설정 실행은 `-Experiment baseline`입니다. 게임 부하·다자/다른 하드웨어 검증은 남아 있습니다.
+`codex/extreme-latency`의 지연 우선 교체 후보는 `./native/run.ps1 -Experiment opus-adaptive`로 실행합니다. 양쪽 모두 이 브랜치의 최신 빌드를 사용하세요. 2.5ms Opus, 5~20ms 적응 여유, 공유 출력 한 주기+1ms를 사용하며 기본 실행과 기존 배포본은 그대로 유지합니다. 두 PC 1:1에서 직접 연결·TURN 장시간 비교를 수행했지만, 추가 대조에서는 연속성 기준을 넘는 상태도 관측됐습니다. 모든 환경에서 안정화됐다는 뜻은 아닙니다. [최초 대체 후보 보고서](docs/reports/EXTREME-064.md), [복구·패킷 길이 추가 대조](docs/reports/EXTREME-066.md), [실험 가이드](docs/EXTREME-LATENCY.md)를 참고하세요. `opus-adaptive-5`는 별도의 5ms 대조 프로필이며 일괄 권장값으로 승격하지 않았습니다. 기존 설정 실행은 `-Experiment baseline`입니다. 두 호스트의 다중 엔진 그룹 시험은 [092 보고서](docs/reports/EXTREME-092.md)에 기록했습니다. 자동 경로 유지 실패와 PLC 미해결이 있어 품질 합격은 아닙니다. 독립된 여러 PC·게임 부하·다른 회선 검증은 남아 있습니다.
 
 ## 현재 동작
 

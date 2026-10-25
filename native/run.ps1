@@ -1,4 +1,4 @@
-param([string]$MediaAddress, [ValidateSet('baseline','opus-adaptive','opus-auto-frames','opus-adaptive-5','opus-5','opus-2.5','opus-2.5-r10','opus-2.5-r10-h1','opus-2.5-r5-hold','opus-zero','pcm-1','pcm-2.5-r10')][string]$Experiment,
+param([string]$MediaAddress, [ValidateSet('baseline','opus-learned','opus-adaptive','opus-auto-frames','opus-adaptive-5','opus-5','opus-2.5','opus-2.5-r10','opus-2.5-r10-h1','opus-2.5-r5-hold','opus-zero','pcm-1','pcm-2.5-r10')][string]$Experiment,
     [ValidateSet('Release','Debug')][string]$Configuration = 'Release')
 $ErrorActionPreference = 'Stop'
 $env:DOTNET_CLI_HOME = Join-Path $PSScriptRoot '.dotnet'

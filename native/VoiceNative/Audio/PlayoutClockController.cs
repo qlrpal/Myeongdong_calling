@@ -2,9 +2,9 @@ namespace VoiceNative;
 
 // Queue feedback against the render sample clock; never uses wall-clock timers.
 // This corrects consumption, not an estimate of the hardware oscillator's ppm.
-internal sealed class PlayoutClockController(int reserveSamples, bool enabled, bool fixedReserveTarget = false, bool responsive = false)
+internal sealed class PlayoutClockController(int reserveSamples, bool enabled, bool fixedReserveTarget = false, bool responsive = false, bool fineClock = false)
 {
-    private double filteredQueue, learnedTarget, observedSamples;
+    private double filteredQueue, learnedTarget, observedSamples, rateBias;
     private bool initialized;
     private int targetReserveSamples = reserveSamples;
     public double Rate { get; private set; } = 1;
@@ -22,15 +22,17 @@ internal sealed class PlayoutClockController(int reserveSamples, bool enabled, b
             // Baseline learns at most one extra packet of phase/jitter.
             // The opt-in diagnostic comparison keeps the explicit reserve target.
             learnedTarget = fixedReserveTarget ? targetReserveSamples : Math.Clamp(filteredQueue, targetReserveSamples, targetReserveSamples + 480);
+            if (fineClock) Rate = 1 + rateBias;
             return;
         }
         var error = filteredQueue - learnedTarget;
         var outsideBand = Math.Sign(error) * Math.Max(0, Math.Abs(error) - (responsive ? 120 : 240));
         // Candidate follows a falling reserve without leaving tens of seconds
         // of residual queue. Keep the existing -0.2%/+1% rate safety limits.
-        var correction = Math.Clamp(outsideBand / 48000 * (responsive ? 0.25 : 0.1), -0.002, 0.01);
+        var correction = Math.Clamp(outsideBand / 48000 * (responsive ? 0.25 : 0.1) + rateBias, -0.002, 0.01);
         Rate += (1 + correction - Rate) * Math.Min(1, outputSamples / 12000.0);
     }
+    public void SetRateBias(double bias) { if (fineClock) rateBias = Math.Clamp(bias, -.001, .001); }
     public void SetReserve(int samples)
     {
         if (samples == targetReserveSamples) return;

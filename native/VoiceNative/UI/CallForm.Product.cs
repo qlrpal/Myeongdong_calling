@@ -157,11 +157,11 @@ public sealed partial class CallForm
         {
             if (!participantRows.TryGetValue(peer.Id, out var row))
             {
-                var panel = new Panel { Width = 640, Height = 75, BackColor = Color.White, Margin = new Padding(0, 0, 0, 8) };
-                var label = new Label { Left = 10, Top = 8, Width = 600, Height = 24 };
-                var volume = new TrackBar { Left = 5, Top = 33, Width = 390, Height = 35, Minimum = 0, Maximum = 200, Value = 100, TickFrequency = 25 };
-                var amount = new Label { Left = 405, Top = 39, Width = 75, Text = "100%" };
-                var silent = new CheckBox { Left = 495, Top = 37, Width = 120, Text = "상대 음소거" };
+                var panel = new Panel { Width = 640, Height = 113, BackColor = Color.White, Margin = new Padding(0, 0, 0, 8) };
+                var label = new Label { Left = 10, Top = 8, Width = 620, Height = 60 };
+                var volume = new TrackBar { Left = 5, Top = 71, Width = 390, Height = 35, Minimum = 0, Maximum = 200, Value = 100, TickFrequency = 25 };
+                var amount = new Label { Left = 405, Top = 77, Width = 75, Text = "100%" };
+                var silent = new CheckBox { Left = 495, Top = 75, Width = 120, Text = "상대 음소거" };
                 if (participantPreferences.TryGetValue(peer.Id, out var remembered)) { volume.Value = remembered.Volume; silent.Checked = remembered.Muted; }
                 void ApplyVolume() { participantPreferences[peer.Id] = (volume.Value, silent.Checked); engine.SetPeerVolume(peer.Id, silent.Checked ? 0 : volume.Value / 100f); amount.Text = volume.Value + "%"; }
                 volume.ValueChanged += (_, _) => ApplyVolume(); silent.CheckedChanged += (_, _) => ApplyVolume();
@@ -171,6 +171,11 @@ public sealed partial class CallForm
             }
             if (participantPreferences.TryGetValue(peer.Id, out var preference)) engine.SetPeerVolume(peer.Id, preference.Muted ? 0 : preference.Volume / 100f);
             row.State.Text = peer.Name + " · " + (peer.State == "connected" ? peer.Route : "연결 중 · " + peer.State);
+            var networkRtt = peer.Precision?.RttAgeSeconds is <= 15
+                ? Number(peer.Precision.RtcpRttMs, "ms") : "미측정/오래됨";
+            row.State.Text += $"\n망 RTT {networkRtt} · 앱 수신 큐 {Number(peer.Audio.QueueMs, "ms")} · 출력 주기 {Number(peer.Audio.EnginePeriodMs, "ms")}";
+            row.State.Text += $"\n장치 주기·큐는 전체 음성 지연이 아닙니다 · 출력 공유 저지연 {(peer.Audio.LowLatencyActive == true ? "사용" : "미사용")}";
+
             if (peer.State is "failed" or "disconnected" || peer.IceState is "failed" or "disconnected")
             {
                 failedSince.TryAdd(peer.Id, DateTimeOffset.UtcNow);

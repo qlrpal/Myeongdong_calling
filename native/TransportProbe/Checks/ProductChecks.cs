@@ -12,6 +12,8 @@ internal static class ProductChecks
         PacketStorageChecks.Run();
         await DedicatedSenderChecks.RunAsync();
         await AdaptiveFrameChecks.RunAsync();
+        ClockEstimatorChecks.Run();
+        ReserveLearningChecks.Run();
         await using (var idleEngine = new WebRtcCallEngine())
             Require(idleEngine.GetDiagnostics().Sender is null, "Idle diagnostics require no active sender");
         var request = CallRequest.Create("https://example.com", "테스트_123", "사용자", null, null);

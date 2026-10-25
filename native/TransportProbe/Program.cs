@@ -2,7 +2,27 @@ using VoiceNative;
 
 try
 {
-    if (args is ["--adaptive-network-checks", var adaptiveNetworkReport]) AdaptiveNetworkChecks.Run(adaptiveNetworkReport);
+    if (args is ["--sdk-receive-race", var longRaceReport, var longRaceAddress, var longRaceCount])
+        await SdkReceiveRaceProbe.RunAsync(longRaceReport,longRaceAddress,int.Parse(longRaceCount,System.Globalization.CultureInfo.InvariantCulture));
+    else if (args is ["--sdk-receive-race", var raceReport, var raceAddress])
+        await SdkReceiveRaceProbe.RunAsync(raceReport,raceAddress);
+    else if (args is ["--two-host-group-boundary-pinned", var boundaryServer, var boundaryRoom, var boundaryReport, var boundaryRole, var boundaryWave, var boundaryEpoch, var boundaryAddress])
+        await TwoHostGroupProbe.RunAsync(boundaryServer, boundaryRoom, boundaryReport, boundaryRole, boundaryWave, long.Parse(boundaryEpoch, System.Globalization.CultureInfo.InvariantCulture), false, boundaryAddress, true, 90);
+    else if (args is ["--two-host-group-quick-pinned", var groupPinServer, var groupPinRoom, var groupPinReport, var groupPinRole, var groupPinWave, var groupPinEpoch, var groupPinAddress])
+        await TwoHostGroupProbe.RunAsync(groupPinServer, groupPinRoom, groupPinReport, groupPinRole, groupPinWave, long.Parse(groupPinEpoch, System.Globalization.CultureInfo.InvariantCulture), true, groupPinAddress);
+    else if (args is ["--two-host-group-soak-pinned", var groupSoakServer, var groupSoakRoom, var groupSoakReport, var groupSoakRole, var groupSoakWave, var groupSoakEpoch, var groupSoakAddress])
+        await TwoHostGroupProbe.RunAsync(groupSoakServer, groupSoakRoom, groupSoakReport, groupSoakRole, groupSoakWave, long.Parse(groupSoakEpoch, System.Globalization.CultureInfo.InvariantCulture), false, groupSoakAddress, true);
+    else if (args is ["--two-host-group-quick", var groupQuickServer, var groupQuickRoom, var groupQuickReport, var groupQuickRole, var groupQuickWave, var groupQuickEpoch])
+        await TwoHostGroupProbe.RunAsync(groupQuickServer, groupQuickRoom, groupQuickReport, groupQuickRole, groupQuickWave, long.Parse(groupQuickEpoch, System.Globalization.CultureInfo.InvariantCulture), true);
+    else if (args is ["--two-host-group", var groupServer, var groupRoom, var groupReport, var groupRole, var groupWave, var groupEpoch])
+        await TwoHostGroupProbe.RunAsync(groupServer, groupRoom, groupReport, groupRole, groupWave, long.Parse(groupEpoch, System.Globalization.CultureInfo.InvariantCulture));
+    else if (args is ["--reserve-learning-soak", var learnedSoakReport]) AdaptiveNetworkChecks.Run(learnedSoakReport, 900, true, true);
+    else if (args is ["--reserve-continuous-soak", var continuousSoakReport]) AdaptiveNetworkChecks.Run(continuousSoakReport, 900, true, false);
+    else if (args is ["--reserve-learning-checks", var learnedReport]) AdaptiveNetworkChecks.Run(learnedReport, 300, true, true);
+    else if (args is ["--adaptive-clock-baseline-checks", var adaptiveClockBaseline]) AdaptiveNetworkChecks.Run(adaptiveClockBaseline, 300, false);
+    else if (args is ["--adaptive-clock-candidate-checks", var adaptiveClockReport]) AdaptiveNetworkChecks.Run(adaptiveClockReport, 300, true);
+    else if (args is ["--adaptive-network-long-checks", var adaptiveLongReport]) AdaptiveNetworkChecks.Run(adaptiveLongReport, 300);
+    else if (args is ["--adaptive-network-checks", var adaptiveNetworkReport]) AdaptiveNetworkChecks.Run(adaptiveNetworkReport);
     else if (args is ["--audio-hotpath-benchmark", var hotpathReport]) AudioHotpathBenchmark.Run(hotpathReport);
     else if (args is ["--sender-scheduling-benchmark", var senderSchedulingReport]) await SenderSchedulingBenchmark.RunAsync(senderSchedulingReport);
     else if (args is ["--adaptive-qualification", var shortQualServer, var shortQualPrefix, var shortQualDirectory, var shortQualRole, var shortQualWave])

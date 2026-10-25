@@ -167,6 +167,16 @@ public sealed partial class CallForm : Form
             catch (Exception ex) { if (!closeRequested) AppendLog("로컬 기준 측정 실패: " + ex.Message); }
             finally { if (!IsDisposed && !closeRequested) local.Enabled = join.Enabled = true; }
         };
+        var packetTrace = new Button { Text = "패킷 경로 기록 (30초)", AutoSize = true };
+        controls.Controls.Add(packetTrace);
+        controls.Controls.SetChildIndex(packetTrace, 2);
+        packetTrace.Click += (_, _) =>
+        {
+            if (!engine.GetDiagnostics().InCall) { AppendLog("통화 중 패킷 경로 기록을 시작하세요."); return; }
+            if (engine is not WebRtcCallEngine traceEngine) { AppendLog("이 엔진은 패킷 경로 기록을 지원하지 않습니다."); return; }
+            traceEngine.StartPipelineTrace(30);
+            AppendLog("패킷 경로 30초 기록 시작 · 음성/페이로드 없이 RTP 식별자·길이·앱 시각만 기록합니다. 양쪽에서 시작한 뒤 진단을 저장하세요. 다시 누르면 이전 기록을 초기화합니다.");
+        };
         var diagnostics = new FlowLayoutPanel { Dock = DockStyle.Fill };
         var peerAddress = new TextBox { PlaceholderText = "상대 PC 내부 IP", Width = 220 };
         var udpCheck = new Button { Text = "LAN UDP 검사", AutoSize = true }; var routeCheck = new Button { Text = "경로·ping 검사", AutoSize = true };
@@ -270,6 +280,7 @@ public sealed partial class CallForm : Form
                 {
                     text.AppendLine(CultureInfo.CurrentCulture, $"RTP 재생 · 목표 여유 {rtp.TargetReserveMs}ms · 수신 시간 단위 {rtp.PacketQuantumMs}ms · 대기 {rtp.BufferedPackets}패킷 · PLC {rtp.PlcFrames}회 / {rtp.ConcealedMs:F1}ms");
                     text.AppendLine(CultureInfo.CurrentCulture, $"적응 여유 {(rtp.AdaptiveReserve ? "켜짐" : "꺼짐")} · 도착 간격 초과 P95 {Number(rtp.ArrivalJitterP95Ms, " ms")} · PLC 중 대기 삽입 {rtp.HeldMs:F1}ms · 최대 연속 PLC {rtp.MaxConsecutivePlcMs:F1}ms");
+                    text.AppendLine(CultureInfo.CurrentCulture, $"여유 정책: {rtp.ReserveLearningState switch { "Learning" => "초기/재학습 중", "Holding" => "학습값 유지", "Disabled" => "고정", "ContinuousFallback" => "안전 복귀: 연속 자동", _ => "연속 자동" }} · 재학습 {rtp.ReserveRelearns}회 · 큐는 장치 버퍼 제외, RTT는 왕복 네트워크 값");
                     text.AppendLine(CultureInfo.CurrentCulture, $"소비율 보정 {rtp.RateCorrectionPpm:+0;-0;0}ppm · 출력 요청 P95/최대 {Number(rtp.ReadRequestP95Ms, " ms")}/{Number(rtp.ReadRequestMaxMs, " ms")} · 읽기 직후 큐 {Number(rtp.QueueAfterReadMs, " ms")}");
                     text.AppendLine(CultureInfo.CurrentCulture, $"지연 도착 {rtp.LatePackets} · 중복 {rtp.DuplicatePackets} · 잘못된 패킷 {rtp.InvalidPackets} · 재동기화 {rtp.Resyncs} · 재버퍼링 {rtp.Rebuffers}");
                     if (rtp.RecoveryDiscardedPackets > 0) text.AppendLine(CultureInfo.CurrentCulture, $"지연 회복을 위해 생략한 음성 {rtp.RecoveryDiscardedMs:F1}ms / {rtp.RecoveryDiscardedPackets}패킷");
@@ -322,6 +333,7 @@ public sealed partial class CallForm : Form
         localLatencyTrials = localTrials.ToArray(),
         measurementLimits = "로컬: 출력 제출→스피커→마이크 캡처. 통화: 송신 캡처 프레임 시각→상대 마이크 재캡처. 서로 출발점이 달라 단순 차감 불가. ADC/DAC·드라이버·DSP·공기 경로는 합산값이며 장치 단독으로 분리되지 않음. 발화·음악은 오검출 가능. 동일 장치·볼륨·노이즈 제거 조건으로 반복 비교 필요.",
         samples = history.ToArray(),
+        pipeline = (engine as WebRtcCallEngine)?.SnapshotPipelineTrace(),
         events = logLines.ToArray()
     }, VoiceNative.DiagnosticJson.Readable);
     internal void SavePreview(string path, int tab = 0, bool minimum = false)

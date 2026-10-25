@@ -4,6 +4,7 @@ namespace VoiceNative;
 
 internal static class AdaptiveFrameChecks
 {
+    private static readonly int[] SupportedDurations = [120, 240, 480];
     private static readonly int[] MixedDurations = [120, 240, 480, 120];
     private static readonly int[] CaptureTransitions = [120, 480, 240, 120];
     public static async Task RunAsync()
@@ -29,6 +30,7 @@ internal static class AdaptiveFrameChecks
 
         CheckPolicy();
         CheckCaptureBurst();
+        CheckFractionalTransitionCapacity();
         await CheckCaptureBoundaryAsync();
         Require(MediaInterfaceSelection.IsSelectable(System.Net.IPAddress.Parse("2001:db8::1"))
             && MediaInterfaceSelection.IsSelectable(System.Net.IPAddress.Parse("fd00::1"))
@@ -71,6 +73,36 @@ internal static class AdaptiveFrameChecks
             Console.WriteLine($"MMCSS probe: active={registration.Active}, critical={registration.CriticalSet}, error={registration.Error}");
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         Console.WriteLine("PASS: boundary frame storage, variable-sample RTP/drop/wrap, adaptive trial/rollback/recovery, mixed Opus, feedback validation and thread-local MMCSS.");
+    }
+
+    private static void CheckFractionalTransitionCapacity()
+    {
+        var options = LatencyExperiment.FromName("opus-auto-frames")!;
+        using var encoder = new OpusAudioEncoder(OpusProfile.LowDelay64, options);
+        var payloads = SupportedDurations.ToDictionary(n => n,
+            n => encoder.EncodeAudio(new short[n], encoder.SupportedFormats.Single()));
+        using var buffer = new RtpOpusPlayoutBuffer(new(), experiment: options);
+        var output = new byte[976];
+        double captureAt = 10, renderAt = 40;
+        long produced = 0; double initialUnderfill = 0;
+        for (var now = 0.0; now < 12000;)
+        {
+            now = Math.Min(captureAt, renderAt);
+            if (now == captureAt)
+            {
+                var samples = now < 3000 ? 120 : now < 6000 ? 480 : 240;
+                while (produced + samples <= now * 48)
+                { buffer.Add(1, unchecked(uint.MaxValue - 960 + (uint)produced), payloads[samples], now); produced += samples; }
+                captureAt += 10;
+            }
+            if (now == renderAt)
+            {
+                buffer.Read(output); renderAt += 488 / 48.0;
+                if (now < 1000) initialUnderfill = buffer.Snapshot().UnderfillMs;
+            }
+        }
+        if (buffer.Details().InvalidPackets != 0 || buffer.Snapshot().UnderfillMs > initialUnderfill)
+            throw new InvalidOperationException("Fractional render/2.5->10->5ms transition exceeded its packet-rounded capacity");
     }
 
     private static void CheckCaptureBurst()

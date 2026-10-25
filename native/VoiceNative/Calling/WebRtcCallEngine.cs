@@ -94,6 +94,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     internal Action<short[]>? DiagnosticCaptureTransform { get; init; }
     private bool preferShortCapture = true;
     private readonly PipelineTrace pipeline = new();
+    internal PipelineTraceSnapshot SnapshotPipelineTrace() => pipeline.Snapshot();
     internal void StartPipelineTrace(int seconds) => pipeline.Start(seconds);
     internal PipelineTraceSnapshot StopPipelineTrace() { pipeline.Stop(); return pipeline.Snapshot(); }
     private LoopbackLatencyCapture? loopback;
@@ -244,10 +245,14 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (selectedInterface is not null) MediaInterfaceSelection.Apply(pc.GetRtpChannel().RtpSocket, selectedInterface);
         }
         catch { pc?.Close("media interface unavailable"); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
+        var receivedPayloadType = 111;
+        var rtpChannel = pc.GetRtpChannel();
+        var receiveBufferBytes = rtpChannel.RtpSocket.ReceiveBufferSize;
+        rtpChannel.OnRTPDataReceived += (_, _, packet) =>
+            pipeline.ObserveRtpChannel(id, packet, Volatile.Read(ref receivedPayloadType), receiveBufferBytes);
         var metrics = new PeerMetrics();
         var candidateFamilies = new ConcurrentDictionary<string, byte>();
         var precision = new RtcpMetrics();
-        var receivedPayloadType = 111;
         pc.OnRtpPacketReceived += (_, media, packet) =>
         {
             if (media == SDPMediaTypesEnum.audio)
@@ -261,7 +266,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                     var bufferCallAt = pipeline.Enabled ? ProbeClock.Now : 0;
                     sink.GotRtpAudioPacket(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload);
                     if (pipeline.Enabled) pipeline.Received(new(id, packet.Header.SyncSource, packet.Header.Timestamp,
-                        packet.Header.SequenceNumber, receivedAt, bufferCallAt, ProbeClock.Now));
+                        packet.Header.SequenceNumber, receivedAt, bufferCallAt, ProbeClock.Now, packet.Payload.Length));
                 }
             }
         };

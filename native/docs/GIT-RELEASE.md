@@ -2,6 +2,21 @@
 
 현재 브랜치는 `codex/extreme-latency`입니다. 제품 기반 버전0.6.0에 극저지연 실험·송신 수명·할당 감소·수신 피드백 기반 프레임 전환 변경이 누적된 상태입니다. 새 안정판 태그를 확정하지 않았습니다. [현재 상태](CURRENT-STATUS.md)를 먼저 참고하세요. 소스와 재현 가능한 검사·문서를 함께 커밋하며, 실행 파일 ZIP 배포와는 별도입니다.
 
+## 소스를 내려받은 사용자의 실행
+
+아래 명령은 이번 소스 변경이 커밋·푸시된 이후에 최신 변경을 받는다. 로컬 정리만으로 원격 저장소가 갱신되지는 않는다. 다른 작업이 있는 체크아웃에서는 해당 변경을 먼저 보존한다.
+
+```powershell
+git fetch origin
+git switch codex/extreme-latency
+git pull --ff-only origin codex/extreme-latency
+./native/run.ps1
+# 선택적 지연 우선 실험
+./native/run.ps1 -Experiment opus-adaptive
+```
+
+.NET10 SDK·Node.js22 이상이 필요하다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다. 이 문서 정리는 커밋·푸시를 실행하는 작업과 별도다.
+
 ## 반영 범위
 
 | 경로 | 내용 |
@@ -28,7 +43,7 @@ git status --short
 git add .gitignore .gitattributes .editorconfig README.md native/
 git diff --cached --stat
 git diff --cached --check
-git commit -m "fix: preserve audio arrival bursts and validate adaptive recovery"
+git commit -m "test: qualify group calls and organize latency experiments - gpt가 함"
 git push -u origin HEAD
 ```
 
@@ -47,6 +62,16 @@ git push -u origin HEAD
 첫 검사는 잠금 파일에 따라 의존성을 복원합니다. 기본 검사는 마이크를 여는 실통화를 시작하지 않습니다. 네트워크 통합 검사는 localhost UDP와 WebRTC를 사용합니다. 실제 두 PC·장치 시험은 별도 자동 시험 명령이며 환경·방화벽·장치가 필요합니다.
 
 기능·검증·남은 범위는 [현재 상태](CURRENT-STATUS.md)와 [082 보고서](reports/EXTREME-082.md)를 참고합니다. 게임 부하·그룹/외부 장시간 시험은 남았고 집 네트워크 내부 원인 조사는 보류했습니다. 국소 시험 통과를 입→귀 지연 개선이나 안정판 승격으로 바꾸지 않습니다.
+
+## 이번 정리 확인 · 2026-10-25 (083~092)
+
+소스 후보243개를 확인했다.083~091의 실제 진단·시계/시간창 보완·기각 후보 기록과092의 두 호스트 그룹 시험/분석 도구를 포함한다. 새 C#/Python 파일도 함께 반영해야 한다. 모드 지위·실행법·한계를 최신화했고 기본값/기존 dist는 유지했다. 자동 경로 그룹 유지 실패와 노트북 내부 수신 콜백 미관측은 미해결로 공개하며 새 안정판 태그를 만들지 않는다.
+
+후보의 UTF-8·바이너리/대용량 혼입·개인 키/식별자 패턴·공개 Markdown 링크를 검사했다. 이미 추적된 제외 대상은 없다. 패턴 검사이며 전체 보안 감사가 아니다. 원본·WAV·로그·ETL·기각 소스·바이너리는 .local 등에 보존하고 업로드에서 제외했다.
+
+원본 소스의 Release 경고/오류0, 전체 회귀·서버8개·IPv4/IPv6 WebRTC 미디어 통합을 통과했다. 후보 소스만 복사한 폴더에서도 기존 bin/obj 없이 잠금 복원·Release 빌드·제품 검사·분석기4개 self-test·서버8개를 통과했다. 기존 NuGet 캐시를 사용하고 격리 복원에서 NuGetAudit 네트워크 조회는 생략했다. 빈 캐시/다른 하드웨어 검증이나 취약성 감사가 아니다. 검증 후에는 결과를 적는 문서만 갱신했다. 스테이징·커밋·푸시는 실행하지 않았다.
+
+아래 기록은 각각 당시의 범위이며 최신 판정은 [현재 상태](CURRENT-STATUS.md)·[092 보고서](reports/EXTREME-092.md)를 우선한다.
 
 ## 이번 정리 확인 · 2026-10-23 (082 포함)
 

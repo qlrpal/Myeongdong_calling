@@ -2,7 +2,7 @@ namespace VoiceNative;
 
 // Bounded feedback for arrival variation and missed deadlines. Packet-loss gaps
 // are subtracted through the RTP clock; they are not themselves measured jitter.
-internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, bool responsive = false, bool shortFrames = false, int maximumShortSamples = 720, int shortQuietSeconds = 6)
+internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, bool responsive = false, bool shortFrames = false, int maximumShortSamples = 720, int shortQuietSeconds = 6, bool initialLearning = false)
 {
     private readonly int floorSamples = minimumSamples;
     private readonly int maximumSamples = shortFrames ? Math.Max(minimumSamples, maximumShortSamples) : responsive ? Math.Max(minimumSamples, 1440) : Math.Min(1920, minimumSamples + 960);
@@ -12,6 +12,18 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, b
     private long? lastTimestamp;
     private double lastArrival, quietSamples, lateWindowSamples;
     private int latePressure, updates;
+    private double learningSamples, healthSamples, concealedHealthSamples;
+    private bool safetyFallback;
+    public bool Frozen { get; private set; }
+    public long Relearns { get; private set; }
+    public string LearningState => !Enabled ? "Disabled" : !initialLearning ? "Continuous" : safetyFallback ? "ContinuousFallback" : Frozen ? "Holding" : "Learning";
+    private void Relearn(bool safety = false)
+    {
+        if (Frozen) Relearns++;
+        Frozen = false; learningSamples = healthSamples = concealedHealthSamples = 0;
+        quietSamples = lateWindowSamples = 0; latePressure = 0;
+        safetyFallback |= safety;
+    }
     public bool Enabled { get; } = enabled;
     public int TargetSamples { get; private set; } = responsive ? Math.Max(minimumSamples, 960) : minimumSamples;
     public double JitterP95Ms { get; private set; }
@@ -39,12 +51,13 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, b
     {
         if (!Enabled) return;
         quietSamples = 0;
-        if (++latePressure >= (responsive || shortFrames ? 2 : 3) && JitterP95Ms >= (shortFrames ? 2 : responsive ? 3 : 5)) { Raise(); latePressure = 0; }
+        if (++latePressure >= (responsive || shortFrames ? 2 : 3) && JitterP95Ms >= (shortFrames ? 2 : responsive ? 3 : 5)) { if (Frozen) Relearn(true); Raise(); latePressure = 0; }
     }
     public bool TryHold(int packetSamples = 0)
     {
         var amount = shortFrames && packetSamples > 0 ? packetSamples : stepSamples;
         if (!Enabled || TargetSamples + amount > maximumSamples) return false;
+        if (Frozen) Relearn(true);
         Raise(amount); return true;
     }
     private void Raise(int amount = 0)
@@ -56,8 +69,25 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, b
     public void Advance(int outputSamples, bool concealed)
     {
         if (!Enabled) return;
+        // Deadline pressure ages with output time even when the target is held.
+        // Otherwise isolated late events accumulate indefinitely in Holding.
         lateWindowSamples += outputSamples;
         if (lateWindowSamples >= 48000) { lateWindowSamples = 0; latePressure = 0; }
+        if (initialLearning && !safetyFallback)
+        {
+            healthSamples += outputSamples;
+            if (concealed) concealedHealthSamples += outputSamples;
+            // Persistent concealment or a required hold/late-target increase returns
+            // to continuous control for this source. Freezing cannot disable safety.
+            if (Frozen && healthSamples >= 3 * 48000)
+            {
+                if (concealedHealthSamples >= 9600) Relearn(true);
+                healthSamples = concealedHealthSamples = 0;
+            }
+            if (!Frozen && (learningSamples += outputSamples) >= 30 * 48000 && TargetSamples == floorSamples)
+            { Frozen = true; healthSamples = concealedHealthSamples = 0; }
+            if (Frozen) return;
+        }
         if (concealed) quietSamples = 0;
         else quietSamples += outputSamples;
         // Short-frame experiments can shorten the quiet interval independently.
@@ -67,6 +97,7 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, b
     }
     public void Rebuffer()
     {
+        if (initialLearning) Relearn();
         // Long gaps recover at the configured short-frame ceiling. Legacy and
         // responsive behavior remain separate from that bounded experiment.
         TargetSamples = shortFrames ? (Enabled ? maximumSamples : floorSamples)
@@ -75,7 +106,7 @@ internal sealed class AdaptivePlayoutReserve(int minimumSamples, bool enabled, b
     }
     public void Reset()
     {
-        Rebuffer(); excess.Clear(); lastTimestamp = null; lastArrival = 0;
+        safetyFallback = false; Rebuffer(); excess.Clear(); lastTimestamp = null; lastArrival = 0;
         if (shortFrames) TargetSamples = floorSamples;
         updates = 0; JitterP95Ms = 0;
     }

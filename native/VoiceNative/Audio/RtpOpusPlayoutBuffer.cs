@@ -19,7 +19,7 @@ public sealed record RtpPlayoutDiagnostics(double TargetReserveMs, int BufferedP
     long RecoveryDiscardedPackets = 0, double RecoveryDiscardedMs = 0,
     long ShortReserveRestarts = 0, int? RecoveryReserveMs = null, string Encoding = "Opus", double PacketQuantumMs = 10,
     double? LastPacketDurationMs = null, double? LastTimestampStepMs = null,
-    double ForwardTimestampGapMs = 0, long PacketDurationChanges = 0, double RecentArrivalBurstMs = 0);
+    double ForwardTimestampGapMs = 0, long PacketDurationChanges = 0, double RecentArrivalBurstMs = 0, double? RtpClockBiasPpm = null, bool? RtpClockFitReady = null, string ReserveLearningState = "Continuous", long ReserveRelearns = 0);
 
 // Render-driven: the compressed packet reserve replaces the old PCM startup reserve.
 // No timer or extra PCM queue is placed in front of this provider.
@@ -38,6 +38,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private readonly ArrayPool<byte> packetPool;
     private readonly HashSet<uint> retiredSources = new();
     private readonly short[] pcm = new short[MaximumSamples];
+    private readonly RtpClockEstimator? clockEstimator;
+    private long clockBiasAfter;
     private readonly ProcessingWindow processing = new();
     private readonly ProcessingWindow readRequests = new();
     private readonly AudioFrameTimeline timeline;
@@ -46,7 +48,12 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private int quantumSamples;
     private bool hasRemoteQuantum;
     private int maximumQueuedSamples;
-    private int lastReadSamples;
+    private int recentReadSamples;
+    private long maximumReadSeenAt, minimumReadSeenAt;
+    private int minimumReadSamples;
+    private int ReserveForRead(int samples) => recentBurstSamples > 0 && samples >= recentBurstSamples
+        && samples % recentBurstSamples != 0 ? Math.Max(CurrentReserveSamples, recentBurstSamples) : CurrentReserveSamples;
+    private int PhaseReserveSamples => ReserveForRead(recentReadSamples);
     private readonly bool experimental;
     private readonly int emptyHoldSamples;
     private readonly int coarsePeerFloorSamples;
@@ -94,7 +101,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     internal bool CanPrimeOutput(int requiredSamples)
     {
         if (requiredSamples is < 1 or > MaximumSamples) throw new ArgumentOutOfRangeException(nameof(requiredSamples));
-        lock (sync) return !disposed && !suspended && (started || queuedSamples >= Math.Min(MaximumSamples, Math.Max(CurrentReserveSamples + requiredSamples, recentBurstSamples)));
+        lock (sync) return !disposed && !suspended && (started || queuedSamples >= Math.Min(MaximumSamples, Math.Max(ReserveForRead(Math.Max(requiredSamples, recentReadSamples)) + requiredSamples, recentBurstSamples)));
     }
     private PipelinePlayout? pcmTrace;
     private long heldSamples;
@@ -135,7 +142,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         maximumConcealSamples = experiment?.PlcLimitMs * 48 ?? MaximumPlcSamples;
         reserveSamples = experiment?.ReserveSamples ?? targetReserveMs * SamplesPerMs;
         if (experiment is not null) { adaptiveReserve = responsiveReserve = transientEmptyQueueHold = false; fixedReserveClockTarget = freshRestart = freshInitialStart = true; }
-        clock = new(reserveSamples, correctClock, fixedReserveClockTarget, responsiveReserve);
+        clock = new(reserveSamples, correctClock, fixedReserveClockTarget, responsiveReserve, experiment?.FineClock == true);
+        clockEstimator = experiment?.FineClock == true ? new() : null;
         this.transientEmptyQueueHold = transientEmptyQueueHold;
         this.freshRestart = freshRestart;
         this.freshInitialStart = freshInitialStart;
@@ -143,7 +151,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         this.boundedRestartWait = boundedRestartWait;
         adaptive = new(reserveSamples, (adaptiveReserve || responsiveReserve || experiment?.AdaptiveShortReserve == true) && correctClock,
             responsiveReserve, experiment?.AdaptiveShortReserve == true, (experiment?.MaxAdaptiveReserveMs ?? 15) * SamplesPerMs,
-            experiment?.ShortReserveQuietSeconds ?? 6);
+            experiment?.ShortReserveQuietSeconds ?? 6, experiment?.InitialReserveLearning == true);
         this.pipeline = pipeline; this.tracePeer = tracePeer;
     }
 
@@ -155,6 +163,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         {
             var lockAt = tracing ? ProbeClock.Now : 0;
             var outcome = "ignored";
+            int? traceSamples = null;
             try
             {
                 if (disposed || suspended) return;
@@ -165,6 +174,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 // capture setting must not reject a valid remote 2.5ms stream.
                 var wireQuantum = pcmTransport ? quantumSamples : 120;
                 if (samples < wireQuantum || samples > MaximumSamples || samples % wireQuantum != 0) { invalid++; outcome = "invalid"; return; }
+                traceSamples = samples;
                 if (source != ssrc)
                 {
                     if (retiredSources.Contains(ssrc)) { RejectLate(payload); outcome = "retired-source"; return; }
@@ -224,10 +234,10 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                     var arrival = arrivalMs ?? ProbeClock.Now * 1000;
                     if (previousBurstArrivalMs is not { } previous || arrival < previous || arrival - previous > 1)
                         arrivalBurstSamples = 0;
-                    if (previousBurstArrivalMs is null || arrival < burstWindowAtMs || arrival - burstWindowAtMs >= 1000)
-                    { recentBurstSamples = 0; burstWindowAtMs = arrival; }
                     arrivalBurstSamples = Math.Min(configuredBacklogSamples, arrivalBurstSamples + samples);
-                    recentBurstSamples = Math.Max(recentBurstSamples, arrivalBurstSamples);
+                    if (arrivalBurstSamples >= recentBurstSamples || previousBurstArrivalMs is null
+                        || arrival < burstWindowAtMs || arrival - burstWindowAtMs >= 1000)
+                    { recentBurstSamples = arrivalBurstSamples; burstWindowAtMs = arrival; }
                     previousBurstArrivalMs = arrival;
                 }
                 if (!started) primingSignal?.Set();
@@ -247,12 +257,13 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                     DiscardPcm(); decoder.ResetState(); started = false; restartWaited = false;
                     expectedTimestamp = FirstPacket.Key; hasPosition = true;
                     missingSamples = 0; fadeRemaining = 240; trims++; resyncs++;
+                    clockBiasAfter = requestedSamples + 5 * 48000;
                 }
             }
             finally
             {
                 if (tracing) pipeline!.Admitted(new(tracePeer, ssrc, timestamp, calledAt, lockAt, ProbeClock.Now,
-                    outcome, (queuedSamples + pcmCount - pcmOffset) / 48.0));
+                    outcome, (queuedSamples + pcmCount - pcmOffset) / 48.0, traceSamples));
             }
         }
     }
@@ -271,18 +282,22 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
             try
             {
                 destination.Clear(); requestedSamples += destination.Length / 2;
-                lastReadSamples = destination.Length / 2;
+                if (coarsePeerFloorSamples == 0 || destination.Length / 2 >= recentReadSamples || requestedSamples - maximumReadSeenAt >= 48000)
+                { recentReadSamples = destination.Length / 2; maximumReadSeenAt = requestedSamples; }
+                if (minimumReadSamples == 0 || destination.Length / 2 <= minimumReadSamples
+                    || requestedSamples - minimumReadSeenAt >= 48000)
+                { minimumReadSamples = destination.Length / 2; minimumReadSeenAt = requestedSamples; }
                 UpdateQueueBound();
                 readRequests.Add(destination.Length / 96.0);
                 if (disposed || suspended) return destination.Length;
-                clock.SetReserve(CurrentReserveSamples);
+                clock.SetReserve(PhaseReserveSamples);
                 if (experimental && started && packets.Count > 0)
                 {
                     // Trim at the consumption boundary, where a complete device pull
                     // is known. A capture burst must not reset a nearly full pull.
                     // Preserve a bounded observed arrival batch, otherwise trimming a
                     // 20ms capture batch to 15ms manufactures repeated PLC/discards.
-                    var keep = Math.Max(destination.Length / 2 + CurrentReserveSamples, recentBurstSamples);
+                    var keep = Math.Max(recentReadSamples + PhaseReserveSamples, recentBurstSamples);
                     var discarded = false;
                     while (packets.Count > 1 && queuedSamples - FirstPacket.Value.Samples >= keep)
                     {
@@ -304,7 +319,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         && highestTimestamp - recentRebuffers.Peek() <= RecoveryPressureWindowSamples);
                     var restartReserve = gapRestart && pressure && recoveryReserveSamples > 0
                         ? Math.Max(PeerReserveFloorSamples, Math.Min(CurrentReserveSamples, recoveryReserveSamples)) : CurrentReserveSamples;
-                    var startupSamples = Math.Min(MaximumSamples, Math.Max(restartReserve + destination.Length / 2, recentBurstSamples));
+                    var startupSamples = Math.Min(MaximumSamples, Math.Max((coarsePeerFloorSamples > 0 ? Math.Max(restartReserve, PhaseReserveSamples) : restartReserve) + destination.Length / 2, recentBurstSamples));
                     // Preserve a small reserve AFTER the first render request, accounting for
                     // resampler/device pull size instead of stacking another 40ms PCM queue.
                     if (packets.Count == 0 || queuedSamples < startupSamples)
@@ -400,8 +415,22 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 else { underflowActive = false; episodeSamples = 0; }
                 queueAfterRead = (queuedSamples + pcmCount - pcmOffset) / 48.0;
                 rateAdjustedSamples += consumedSamples - consumedBefore - filled / 2;
+                if (filled < destination.Length || plcFrames != plcBefore) clockBiasAfter = requestedSamples + 5 * 48000;
                 if (filled < destination.Length) clock.Reset();
-                else if (plcFrames == plcBefore) clock.Observe(queuedSamples + pcmCount - pcmOffset, filled / 2);
+                else if (plcFrames == plcBefore)
+                {
+                    if (clockEstimator is not null && hasTimestamp)
+                    {
+                        clockEstimator.Observe(requestedSamples, highestTimestamp + latestRemoteSamples);
+                        // Qualify feed-forward only for the stable fractional
+                        // request/burst geometry tested by the A/B matrix.
+                        var qualified = requestedSamples >= clockBiasAfter && latestRemoteSamples == 120
+                            && minimumReadSamples == recentReadSamples && recentBurstSamples > 0
+                            && recentReadSamples >= recentBurstSamples && recentReadSamples % recentBurstSamples != 0;
+                        clock.SetRateBias(qualified && Math.Abs(clockEstimator.Bias) >= .0001 ? clockEstimator.Bias : 0);
+                    }
+                    clock.Observe(queuedSamples + pcmCount - pcmOffset, filled / 2);
+                }
                 adaptive.Advance(destination.Length / 2, plcFrames != plcBefore || filled < destination.Length);
                 provided = filled / 2;
                 return destination.Length;
@@ -430,8 +459,8 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     {
         // Until the first device pull, its demand is unknown. Keep a bounded
         // cold-start window; the first read then trims it to fresh reserve.
-        if (experimental) maximumQueuedSamples = lastReadSamples == 0 ? MaximumSamples : Math.Min(MaximumSamples,
-            Math.Max(configuredBacklogSamples, lastReadSamples + Math.Max(lastReadSamples, recentBurstSamples) + CurrentReserveSamples + quantumSamples));
+        if (experimental) maximumQueuedSamples = recentReadSamples == 0 ? MaximumSamples : Math.Min(MaximumSamples,
+            Math.Max(configuredBacklogSamples, recentReadSamples + Math.Max(recentReadSamples, recentBurstSamples) + PhaseReserveSamples + Math.Max(quantumSamples, latestRemoteSamples)));
     }
 
     private bool PreparePcm()
@@ -493,7 +522,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
             return Conceal(advanceTimestamp: false);
         if (packets.Count == 0 && adaptive.TryHold(quantumSamples))
         {
-            clock.SetReserve(CurrentReserveSamples);
+            clock.SetReserve(PhaseReserveSamples);
             return Conceal(advanceTimestamp: false);
         }
         return Conceal();
@@ -555,6 +584,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         timeline.Update(hash, old => old with { DecodeStart = began, DecodeEnd = ProbeClock.Now, QueuedAt = ProbeClock.Now });
     private void DiscardPcm()
     {
+        clockBiasAfter = requestedSamples + 5 * 48000;
         if (pcmHash is { } hash) OnFrameSubmitted?.Invoke(hash, ProbeClock.Now, true);
         if (pcmTrace is { } traced) pipeline!.Played(traced with { At = ProbeClock.Now, Outcome = "discarded" });
         pcmTrace = null;
@@ -570,6 +600,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         gapRestart = false;
         recentRebuffers.Clear();
         missingSamples = 0; fadeRemaining = 240;
+        clockEstimator?.Reset(); clockBiasAfter = requestedSamples + 5 * 48000;
         hasRemoteQuantum = false;
         latestRemoteSamples = 0; lastTimestampStepMs = null;
         previousBurstArrivalMs = null; arrivalBurstSamples = recentBurstSamples = 0;
@@ -606,7 +637,9 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 Encoding: pcmTransport ? "L16 PCM (loss: silence)" : "Opus", PacketQuantumMs: quantumSamples / 48.0,
                 LastPacketDurationMs: latestRemoteSamples > 0 ? latestRemoteSamples / 48.0 : null,
                 LastTimestampStepMs: lastTimestampStepMs, ForwardTimestampGapMs: forwardTimestampGapSamples / 48.0,
-                PacketDurationChanges: packetDurationChanges, RecentArrivalBurstMs: recentBurstSamples / 48.0);
+                PacketDurationChanges: packetDurationChanges, RecentArrivalBurstMs: recentBurstSamples / 48.0,
+                RtpClockBiasPpm: clockEstimator is null ? null : clockEstimator.Bias * 1000000,
+                RtpClockFitReady: clockEstimator?.Ready, ReserveLearningState: adaptive.LearningState, ReserveRelearns: adaptive.Relearns);
         }
     }
     public void Dispose()
