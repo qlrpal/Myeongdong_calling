@@ -8,6 +8,7 @@ internal static class ProductChecks
     { if (!condition) throw new InvalidOperationException(message); }
     public static async Task RunAsync(string directory)
     {
+        Require(SdkBuildIdentity.Read().ProductionPatched,"Default product runtime must load the patched SDK");
         TurnSignalingLogChecks.Run();
         MediaPortHistoryChecks.Run();
         await AudioSendLifetimeChecks.RunAsync();

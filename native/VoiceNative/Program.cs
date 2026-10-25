@@ -5,6 +5,11 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if(args is ["--sdk-build-info",var sdkInfoPath])
+        {
+            File.WriteAllText(sdkInfoPath,System.Text.Json.JsonSerializer.Serialize(SdkBuildIdentity.Read(),DiagnosticJson.Readable));
+            return;
+        }
         ApplicationConfiguration.Initialize();
         if (args is ["--ui-preview-small", var smallPath])
         {

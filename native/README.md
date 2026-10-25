@@ -12,6 +12,8 @@
 
 Windows10 2004 이상, .NET10 SDK, Node.js22 이상을 사용합니다. 저장소 루트에서 실행합니다.
 
+일반 실행·빌드·배포에는 수신 시작 보호와 UDP TURN 종료 삭제를 적용한 SDK가 자동 포함됩니다. 첫 빌드만 고정 상류 소스 약142MiB를 내려받고 이후 해시 검증 캐시를 사용합니다. Python이나 수동 DLL 교체는 필요 없습니다. [수정 SDK 빌드·식별 방법](docs/SDK-BUILD.md).
+
 ```powershell
 ./native/run.ps1
 # 현재 PC의 LAN 인터페이스를 명시할 때 (주소는 실행 환경에 맞게 선택)

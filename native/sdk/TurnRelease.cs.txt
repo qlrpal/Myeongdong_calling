@@ -1,0 +1,30 @@
+        private void ReleaseUdpTurnAllocations()
+        {
+            // RFC 8656 section 8: best-effort authenticated Refresh(0) before socket close.
+            lock (_iceServerResolver)
+            {
+                foreach (var server in _iceServerResolver.IceServers.Values)
+                {
+                    if (server.Protocol != ProtocolType.Udp || server.RelayEndPoint == null ||
+                        server.ServerEndPoint == null || server.Nonce == null || server.Realm == null ||
+                        server._username == null || server._password == null) continue;
+                    try
+                    {
+                        var request = new STUNMessage(STUNMessageTypesEnum.Refresh);
+                        request.Header.TransactionId = Encoding.ASCII.GetBytes(Crypto.GetRandomString(STUNHeader.TRANSACTION_ID_LENGTH));
+                        request.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Lifetime, (uint)0));
+                        var bytes = GetAuthenticatedStunRequest(request, server._username, server.Realm, server._password, server.Nonce);
+                        var endpoint = server.ServerEndPoint;
+                        if (endpoint.AddressFamily == AddressFamily.InterNetwork && RtpSocket.AddressFamily == AddressFamily.InterNetworkV6)
+                            endpoint = new IPEndPoint(endpoint.Address.MapToIPv6(), endpoint.Port);
+                        RtpSocket.SendTimeout = 100;
+                        RtpSocket.SendTo(bytes, endpoint);
+                        logger.LogDebug("TURN UDP allocation release requested before socket close.");
+                    }
+                    catch (SocketException ex)
+                    { logger.LogWarning("TURN UDP release send failed: {SocketErrorCode}.", ex.SocketErrorCode); }
+                    catch (ObjectDisposedException)
+                    { logger.LogDebug("TURN UDP release skipped: socket already closed."); }
+                }
+            }
+        }

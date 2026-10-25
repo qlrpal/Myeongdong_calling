@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SIPSorcery</AssemblyName>
+    <RootNamespace>SIPSorcery</RootNamespace>
+    <Version>10.0.17</Version>
+    <AssemblyVersion>10.0.17.0</AssemblyVersion>
+    <InformationalVersion>10.0.17+myeongdong.1</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <LangVersion>14.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Upstream source is built with its own warning policy, not the app's analyzer policy. -->
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591;CS1573;CS1587;SYSLIB0050</NoWarn>
+    <PolyArgumentExceptions>true</PolyArgumentExceptions>
+    <SdkSourceRoot Condition="'$(SdkSourceRoot)' == ''">$(MSBuildThisFileDirectory)missing-sdk-source</SdkSourceRoot>
+  </PropertyGroup>
+  <Import Project="RuntimeDependencies.props" />
+  <ItemGroup>
+    <Compile Include="$(SdkSourceRoot)/**/*.cs" Exclude="$(SdkSourceRoot)/obj/**;$(SdkSourceRoot)/bin/**;$(SdkSourceRoot)/net/RTSP/RTSPClient.cs;$(SdkSourceRoot)/net/RTSP/RTSPConnection.cs;$(SdkSourceRoot)/net/RTSP/RTSPServer.cs" />
+    <Compile Include="PatchIdentity.cs" />
+    <EmbeddedResource Include="$(SdkSourceRoot)/media/Macroform_-_Simplicity.raw" LogicalName="SIPSorcery.media.Macroform_-_Simplicity.raw" />
+    <EmbeddedResource Include="$(SdkSourceRoot)/media/testpattern.i420" LogicalName="SIPSorcery.media.testpattern.i420" />
+    <PackageReference Include="Polyfill" Version="11.3.0" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

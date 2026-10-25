@@ -2,7 +2,13 @@ using VoiceNative;
 
 try
 {
-    if (args is ["--turn-allocation-lifecycle", var lifecycleServer, var lifecycleReport, var lifecycleAddress])
+    if (args is ["--sdk-build-check"])
+    {
+        var sdk=SdkBuildIdentity.Read();
+        if(!sdk.ProductionPatched)throw new InvalidOperationException("The production patched SDK was not loaded.");
+        Console.WriteLine("PASS: loaded production SIPSorcery "+sdk.InformationalVersion+" / "+sdk.PatchRevision);
+    }
+    else if (args is ["--turn-allocation-lifecycle", var lifecycleServer, var lifecycleReport, var lifecycleAddress])
         await TurnAllocationLifecycleProbe.RunAsync(lifecycleServer,lifecycleReport,lifecycleAddress);
     else if (args is ["--sdk-receive-race", var longRaceReport, var longRaceAddress, var longRaceCount])
         await SdkReceiveRaceProbe.RunAsync(longRaceReport,longRaceAddress,int.Parse(longRaceCount,System.Globalization.CultureInfo.InvariantCulture));

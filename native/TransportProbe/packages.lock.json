@@ -3,9 +3,58 @@
   "dependencies": {
     "net10.0-windows10.0.19041": {
       "BouncyCastle.Cryptography": {
-        "type": "Transitive",
+        "type": "Direct",
+        "requested": "[2.7.0, )",
         "resolved": "2.7.0",
         "contentHash": "U+12df8UEWHgBi04YVf/Lgi2dy3SItlIYvHjjEVa/BngCQIzDCDRBk50DDByCfDvSbe5pRNFr3b7UrVK2kMcLw=="
+      },
+      "Concentus": {
+        "type": "Direct",
+        "requested": "[2.2.2, )",
+        "resolved": "2.2.2",
+        "contentHash": "2B9YmHPKO+k7YpAAnqmiXwiMJnfjfj1C868RszOll2iZWLnGTAiC1q21L/d7CvTan7T+hyqU8dR0Dcy3cpjVfQ=="
+      },
+      "DnsClient": {
+        "type": "Direct",
+        "requested": "[1.8.0, )",
+        "resolved": "1.8.0",
+        "contentHash": "RRwtaCXkXWsx0mmsReGDqCbRLtItfUbkRJlet1FpdciVhyMGKcPd57T1+8Jki9ojHlq9fntVhXQroOOgRak8DQ=="
+      },
+      "Makaretu.Dns.Multicast": {
+        "type": "Direct",
+        "requested": "[0.27.0, )",
+        "resolved": "0.27.0",
+        "contentHash": "MTMq3vca9yw8sMW0knox/lZcAkDghmH6FVLTRInJZWbuYE99QI/9k9EujsXusWQ8oDySXb/gX92bfZipKehQgw==",
+        "dependencies": {
+          "Common.Logging": "3.4.1",
+          "IPNetwork2": "2.1.2",
+          "Makaretu.Dns": "2.0.1",
+          "Tmds.LibC": "0.2.0"
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions": {
+        "type": "Direct",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "Ljd0Uxoq5XpScD2Bg0nM/r3mwx7Ao5Uq24eo2ARxbGvqJ7Zht6rt2cJtwVRH4Cv+1ZVMdXz6TB43KbpmsxRrvQ==",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11"
+        }
+      },
+      "SIPSorcery.WebSocketSharp": {
+        "type": "Direct",
+        "requested": "[0.0.1, )",
+        "resolved": "0.0.1",
+        "contentHash": "lBlR9rZmMty2v5kPzCseAyuSv95FSoGuYZJgDy6M/qqZ/xq1ejFnOVEpXMDqBIthiTUOH8rvMcpnva7HXK0ZVw=="
+      },
+      "SIPSorceryMedia.Abstractions": {
+        "type": "Direct",
+        "requested": "[10.0.17, )",
+        "resolved": "10.0.17",
+        "contentHash": "evBOSRAauanA8kwZbNclXhnSWwEdHTNg2ALkcHvDCzrZuNAqwnP3r9v207K6eMfSR22hrnI4dvf6UGG80emDCg==",
+        "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.11"
+        }
       },
       "Common.Logging": {
         "type": "Transitive",
@@ -19,16 +68,6 @@
         "type": "Transitive",
         "resolved": "3.4.1",
         "contentHash": "wLHldZHvxsSD6Ahonfj00/SkfHfKqO+YT6jsUwVm8Rch1REL9IArHAcSLXxYxYfu5/4ydGtmXvOtaH3AkVPu0A=="
-      },
-      "Concentus": {
-        "type": "Transitive",
-        "resolved": "2.2.2",
-        "contentHash": "2B9YmHPKO+k7YpAAnqmiXwiMJnfjfj1C868RszOll2iZWLnGTAiC1q21L/d7CvTan7T+hyqU8dR0Dcy3cpjVfQ=="
-      },
-      "DnsClient": {
-        "type": "Transitive",
-        "resolved": "1.8.0",
-        "contentHash": "RRwtaCXkXWsx0mmsReGDqCbRLtItfUbkRJlet1FpdciVhyMGKcPd57T1+8Jki9ojHlq9fntVhXQroOOgRak8DQ=="
       },
       "IPNetwork2": {
         "type": "Transitive",
@@ -46,29 +85,10 @@
           "SimpleBase": "1.3.1"
         }
       },
-      "Makaretu.Dns.Multicast": {
-        "type": "Transitive",
-        "resolved": "0.27.0",
-        "contentHash": "MTMq3vca9yw8sMW0knox/lZcAkDghmH6FVLTRInJZWbuYE99QI/9k9EujsXusWQ8oDySXb/gX92bfZipKehQgw==",
-        "dependencies": {
-          "Common.Logging": "3.4.1",
-          "IPNetwork2": "2.1.2",
-          "Makaretu.Dns": "2.0.1",
-          "Tmds.LibC": "0.2.0"
-        }
-      },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "Transitive",
         "resolved": "10.0.11",
         "contentHash": "/a1aJz4m7ylhEDf25ugQChLQoN5XwoGjWw/BoR/ZWWKsO1v4DdJElS1uyngahz4B/eOzjFk1KNTkarRLE5wsIg=="
-      },
-      "Microsoft.Extensions.Logging.Abstractions": {
-        "type": "Transitive",
-        "resolved": "10.0.11",
-        "contentHash": "Ljd0Uxoq5XpScD2Bg0nM/r3mwx7Ao5Uq24eo2ARxbGvqJ7Zht6rt2cJtwVRH4Cv+1ZVMdXz6TB43KbpmsxRrvQ==",
-        "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11"
-        }
       },
       "Microsoft.NETCore.Platforms": {
         "type": "Transitive",
@@ -159,33 +179,6 @@
         "resolved": "1.3.1",
         "contentHash": "TqqQc+WFg3s10/PdnI2Dio0U7xEmVXhkf+ey4tOGZzjyd054rnNOLNVahJhMYmfBQdS7/jkVqC8xzLm/bkR3EA=="
       },
-      "SIPSorcery": {
-        "type": "Transitive",
-        "resolved": "10.0.17",
-        "contentHash": "7JB9LxHiuF7wKKi4NUNKm7u39TN6awW1fIbfioHTON2gCMHuPrxYEy2NBxTVUbYNalXkR8tUDAIPbeJs/OFsQw==",
-        "dependencies": {
-          "BouncyCastle.Cryptography": "2.7.0",
-          "Concentus": "2.2.2",
-          "DnsClient": "1.8.0",
-          "Makaretu.Dns.Multicast": "0.27.0",
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.11",
-          "SIPSorcery.WebSocketSharp": "0.0.1",
-          "SIPSorceryMedia.Abstractions": "10.0.17"
-        }
-      },
-      "SIPSorcery.WebSocketSharp": {
-        "type": "Transitive",
-        "resolved": "0.0.1",
-        "contentHash": "lBlR9rZmMty2v5kPzCseAyuSv95FSoGuYZJgDy6M/qqZ/xq1ejFnOVEpXMDqBIthiTUOH8rvMcpnva7HXK0ZVw=="
-      },
-      "SIPSorceryMedia.Abstractions": {
-        "type": "Transitive",
-        "resolved": "10.0.17",
-        "contentHash": "evBOSRAauanA8kwZbNclXhnSWwEdHTNg2ALkcHvDCzrZuNAqwnP3r9v207K6eMfSR22hrnI4dvf6UGG80emDCg==",
-        "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.11"
-        }
-      },
       "System.Numerics.Tensors": {
         "type": "Transitive",
         "resolved": "9.0.0",
@@ -199,11 +192,16 @@
       "voicenative": {
         "type": "Project",
         "dependencies": {
+          "BouncyCastle.Cryptography": "[2.7.0, )",
           "Concentus": "[2.2.2, )",
+          "DnsClient": "[1.8.0, )",
+          "Makaretu.Dns.Multicast": "[0.27.0, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[10.0.11, )",
           "NAudio": "[3.0.0, )",
           "NAudio.Wasapi": "[3.0.0, )",
           "NAudio.WinMM": "[3.0.0, )",
-          "SIPSorcery": "[10.0.17, )"
+          "SIPSorcery.WebSocketSharp": "[0.0.1, )",
+          "SIPSorceryMedia.Abstractions": "[10.0.17, )"
         }
       }
     }

@@ -1,0 +1,12 @@
+<Project>
+  <!-- Runtime versions from the pinned SIPSorcery 10.0.17 source/package graph. -->
+  <ItemGroup>
+    <PackageReference Include="SIPSorceryMedia.Abstractions" Version="10.0.17" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <PackageReference Include="DnsClient" Version="1.8.0" />
+    <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
+    <PackageReference Include="SIPSorcery.WebSocketSharp" Version="0.0.1" />
+  </ItemGroup>
+</Project>

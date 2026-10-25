@@ -1,0 +1,10 @@
+        // Claim ownership atomically; APM callbacks/packet handlers run outside the lock.
+        lock (_receiveBeginSync)
+        {
+            if (m_isClosed && m_isRunningReceive) m_isRunningReceive = false;
+            if (m_isRunningReceive || m_isClosed) return;
+            m_isRunningReceive = true;
+        }
+
+        try
+        {

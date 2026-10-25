@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'VoiceNative' Or '$(MSBuildProjectName)' == 'TransportProbe'">
+    <PatchedSdkRoot>$(MSBuildThisFileDirectory).local/patched-sdk</PatchedSdkRoot>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(PatchedSdkRoot)' != ''">
+    <Reference Include="SIPSorcery">
+      <HintPath>$(PatchedSdkRoot)/SIPSorcery.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Content Include="$(PatchedSdkRoot)/SIPSorcery.LICENSE.md" Link="SIPSorcery.LICENSE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="PreparePatchedSdk" BeforeTargets="ResolveAssemblyReferences;ComputeFilesToPublish" Condition="'$(PatchedSdkRoot)' != '' And '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)sdk/build.ps1&quot;" StdOutEncoding="UTF-8" StdErrEncoding="UTF-8" />
+  </Target>
+  <Target Name="VerifyPatchedSdkOutput" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(PatchedSdkRoot)' != '' And '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)sdk/build.ps1&quot; -VerifyDirectory &quot;$(TargetDir).&quot;" StdOutEncoding="UTF-8" StdErrEncoding="UTF-8" />
+  </Target>
+  <Target Name="VerifyPatchedSdkPublish" AfterTargets="Publish" Condition="'$(PatchedSdkRoot)' != '' And '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)sdk/build.ps1&quot; -VerifyDirectory &quot;$(PublishDir).&quot;" StdOutEncoding="UTF-8" StdErrEncoding="UTF-8" />
+  </Target>
+</Project>

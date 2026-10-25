@@ -17,6 +17,8 @@ git pull --ff-only origin codex/extreme-latency
 
 .NET10 SDK·Node.js22 이상이 필요하다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다. 이 문서 정리는 커밋·푸시를 실행하는 작업과 별도다.
 
+일반 빌드는 수정 SDK를 자동으로 구성한다. `native/Directory.Build.targets`, `native/sdk/`의 빌드·패치 조각·공유 의존성·잠금 파일을 함께 받아야 한다. 첫 빌드의 상류 소스 다운로드 약142MiB 이후에는 캐시를 재사용한다. [SDK 빌드와 실행 식별](SDK-BUILD.md)을 참고한다.
+
 ## 반영 범위
 
 | 경로 | 내용 |
