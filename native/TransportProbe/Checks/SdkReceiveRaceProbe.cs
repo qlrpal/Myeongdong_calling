@@ -75,7 +75,8 @@ internal static class SdkReceiveRaceProbe
             }
             await Task.Delay(100);
             var duplicates=seen.Sum(n=>Math.Max(0,n-1));var missing=seen.Count(n=>n==0);
-            results.Add(new {mode,sent,callbacks,duplicates,missing,malformed,recoveryAttempts,error});
+            results.Add(new {mode,sent,callbacks,duplicates,missing,malformed,recoveryAttempts,error,
+                sdkReceiveDiagnostics=SdkReceiveDiagnostics.Snapshot()});
             Console.WriteLine($"SDK RECEIVE {mode}: sent={sent}, callbacks={callbacks}, recoveryCalls={recoveryAttempts}, duplicates={duplicates}, missing={missing}, malformed={malformed}");
         }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);

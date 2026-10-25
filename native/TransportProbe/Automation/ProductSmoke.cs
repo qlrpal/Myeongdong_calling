@@ -5,16 +5,20 @@ namespace VoiceNative;
 
 internal static class ProductSmoke
 {
-    public static async Task RunAsync(string server, string room, string report, string role, string wave)
+    public static async Task RunAsync(string server, string room, string report, string role, string wave, bool osMediaPorts = false)
     {
+        using var sdkLog = new TurnSignalingLog();
+        SIPSorcery.LogFactory.Set(sdkLog);
+        var eventClock = Stopwatch.StartNew();
         var samples = new List<object>(); var events = new List<string>(); var sync = new object();
         var fixture = SpeechFixture.Load(wave);
-        await using var engine = new WebRtcCallEngine { ForceRelay = true, IntermediateCapture = false, DiagnosticCaptureTransform = fixture.Fill };
+        await using var engine = new WebRtcCallEngine { ForceRelay = true, IntermediateCapture = false, DiagnosticCaptureTransform = fixture.Fill, DiagnosticOsMediaPorts = osMediaPorts };
         engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
         await using var session = new CallSession(engine);
-        engine.Status += value => { lock (sync) events.Add(value); };
-        session.Changed += value => { lock (sync) events.Add(value); };
+        engine.Status += value => { lock (sync) events.Add($"{eventClock.Elapsed.TotalSeconds:F3}s {value}"); };
+        session.Changed += value => { lock (sync) events.Add($"{eventClock.Elapsed.TotalSeconds:F3}s {value}"); };
         string? error = null;
+        CallDiagnostics? failureDiagnostics = null;
         var muteLevels = new List<double>(); var activeLevels = new List<double>();
         async Task Connected()
         {
@@ -24,6 +28,7 @@ internal static class ProductSmoke
         }
         async Task Window(string phase, int seconds)
         {
+            sdkLog.Phase = phase;
             var clock = Stopwatch.StartNew();
             while (clock.Elapsed.TotalSeconds < seconds)
             {
@@ -46,11 +51,13 @@ internal static class ProductSmoke
             var peer = engine.GetDiagnostics().Peers.Single(); engine.SetPeerVolume(peer.Id, 0); await Window("peer-muted", 3);
             engine.SetPeerVolume(peer.Id, 1); await Window("peer-restored", 3);
             engine.SetMicrophoneMuted(true);
+            sdkLog.Phase = "recovery";
             session.RequestRecovery("Product forced recovery"); await Connected();
             if (!session.WantsCall || !session.State.Contains("재연결 완료", StringComparison.Ordinal)) throw new InvalidOperationException("Product recovery failed");
             await Window("muted", 4);
             engine.SetMicrophoneMuted(false); await Window("reconnected", 5);
             await Task.Delay(2000); // Let the other host finish its observation before the deliberate switch.
+            sdkLog.Phase = "default-device-rejoin";
             await session.DisconnectAsync();
             await session.ConnectAsync(request with { CaptureId = null, RenderId = null }); await Connected();
             await Window("default-devices", 5);
@@ -60,12 +67,14 @@ internal static class ProductSmoke
             await Task.Delay(500);
             if (session.WantsCall || engine.GetDiagnostics().InCall) throw new InvalidOperationException("Leave rejoined unexpectedly");
         }
-        catch (Exception ex) { error = ex.ToString(); }
+        catch (Exception ex) { error = ex.ToString(); failureDiagnostics = engine.GetDiagnostics(); }
         finally { await session.DisconnectAsync(); }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
         string[] captured; lock (sync) captured = events.ToArray();
-        await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { role, error, samples, events = captured,
-            muteLevels, activeLevels, notes = "Real shared capture/render and TURN using synthetic speech. Explicit endpoint selection, local PCM mute/unmute, peer gain control, full-room recovery and leave. No physical or subjective audio quality claim." }, DiagnosticJson.Readable));
+        await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { role, error, osMediaPorts, samples, events = captured,
+            muteLevels, activeLevels, failureDiagnostics, sdkIceLog = sdkLog.Snapshot(),
+            sdkReceiveDiagnostics = SdkReceiveDiagnostics.Snapshot(),
+            notes = "Real shared capture/render and TURN using synthetic speech. Explicit endpoint selection, local PCM mute/unmute, peer gain control, full-room recovery and leave. No physical or subjective audio quality claim." }, DiagnosticJson.Readable));
         if (error is not null) throw new InvalidOperationException(error);
         Console.WriteLine("PASS: selected devices, live microphone mute/unmute, peer volume, reconnect and leave: " + role);
     }

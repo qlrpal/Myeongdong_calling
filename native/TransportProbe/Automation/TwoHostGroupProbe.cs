@@ -137,6 +137,7 @@ internal static class TwoHostGroupProbe
         string[] logged;lock(sync) logged=events.ToArray();
         await File.WriteAllTextAsync(report,JsonSerializer.Serialize(new {
             role,epoch,quick,soakOnly,soakSeconds,mediaAddress,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            sdkReceiveDiagnostics=SdkReceiveDiagnostics.Snapshot(),
             error,failures,cleanupOk,membership,phaseResources,samples,traces,events=logged,
             resources=new {cpuCores=(process.TotalProcessorTime-cpuStart).TotalSeconds/elapsed.Elapsed.TotalSeconds,
                 beforeHandles,afterHandles=process.HandleCount,beforeBytes,afterBytes=process.PrivateMemorySize64},

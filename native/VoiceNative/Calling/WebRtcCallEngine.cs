@@ -22,6 +22,8 @@ public sealed class WebRtcCallEngine : ICallEngine
     private readonly object framePolicySync = new();
     private FrameAdaptationDiagnostics? frameAdaptation;
     private readonly List<RTCIceServer> iceServers = new();
+    private static readonly MediaPortHistory RecentMediaPorts = new();
+    internal bool DiagnosticOsMediaPorts { get; init; }
     private CancellationTokenSource? cancellation;
     private Task? eventLoop;
     private Uri? server;
@@ -106,6 +108,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         ConcurrentDictionary<string, byte> CandidateFamilies)
     {
         public AudioSendLifetime SendLifetime { get; } = new();
+        public MediaPortHistory.Lease PortLease { get; init; }
         public AdaptiveFramePolicy FramePolicy { get; } = new();
         public long LastSentSequence { get; set; }
         public long FirstSequence { get; set; }
@@ -237,14 +240,28 @@ public sealed class WebRtcCallEngine : ICallEngine
         var rawOutput = RawRender ?? (preferRawOutput && preferLowLatency && lowDelay && useRtpPlayout);
         var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId, experiment: experiment);
         RTCPeerConnection? pc = null;
+        var socketLease = default(MediaPortHistory.Lease);
         try
         {
-            pc = new RTCPeerConnection(new RTCConfiguration { iceServers = iceServers,
+            var configuration = new RTCConfiguration { iceServers = iceServers,
                 iceTransportPolicy = ForceRelay ? RTCIceTransportPolicy.relay : RTCIceTransportPolicy.all,
-                X_BindAddress = selectedInterface is null ? null : System.Net.IPAddress.Parse(selectedInterface.Address!) });
+                X_BindAddress = selectedInterface is null ? null : System.Net.IPAddress.Parse(selectedInterface.Address!) };
+            if (DiagnosticOsMediaPorts) pc = new RTCPeerConnection(configuration);
+            Exception? bindFailure = null;
+            for (var attempt = 0; pc is null && attempt < 16; attempt++)
+            {
+                // Windows can immediately return a recently closed UDP port for Bind(0).
+                // Choose before constructing the SDK channel, which starts TURN gathering itself.
+                var port = System.Security.Cryptography.RandomNumberGenerator.GetInt32(24576,32768)*2;
+                if (!RecentMediaPorts.TryActivate(port, ProbeClock.Now, out var candidateLease)) continue;
+                try { pc = new RTCPeerConnection(configuration, port); socketLease = candidateLease; }
+                catch (ApplicationException ex) { bindFailure = ex; RecentMediaPorts.Retire(candidateLease, ProbeClock.Now); }
+                catch { RecentMediaPorts.Retire(candidateLease, ProbeClock.Now); throw; }
+            }
+            if (pc is null) throw new InvalidOperationException("새 음성 연결용 UDP 포트를 확보하지 못했습니다.", bindFailure);
             if (selectedInterface is not null) MediaInterfaceSelection.Apply(pc.GetRtpChannel().RtpSocket, selectedInterface);
         }
-        catch { pc?.Close("media interface unavailable"); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
+        catch { pc?.Close("media interface unavailable"); RecentMediaPorts.Retire(socketLease, ProbeClock.Now); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
         var receivedPayloadType = 111;
         var rtpChannel = pc.GetRtpChannel();
         var receiveBufferBytes = rtpChannel.RtpSocket.ReceiveBufferSize;
@@ -280,7 +297,9 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             Status?.Invoke($"{name}: ICE {state}");
             if (state == RTCIceConnectionState.failed)
-                Status?.Invoke("직접 연결 경로 확인 실패 · 두 PC의 앱 방화벽 허용과 Wi-Fi 기기 간 통신 차단 설정을 확인하세요.");
+                Status?.Invoke(ForceRelay
+                    ? "TURN 연결 경로 확인 실패 · 진단 보고서의 중계 후보 수집과 서버 응답을 확인하세요."
+                    : "음성 연결 경로 확인 실패 · 진단 보고서의 후보와 네트워크 상태를 확인하세요.");
         };
         pc.onicegatheringstatechange += state => Status?.Invoke($"{name}: 연결 후보 수집 {state}");
         pc.addTrack(new MediaStreamTrack(sink.GetAudioSinkFormats(), MediaStreamStatusEnum.SendRecv));
@@ -301,7 +320,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         };
         sink.OnAudioSinkError += message => Status?.Invoke("출력 오류: " + message);
         sink.OnAudioSinkRecovered += message => Status?.Invoke(name + ": " + message);
-        var peer = new Peer(pc, sink, decoder, name, metrics, precision, candidateFamilies);
+        var peer = new Peer(pc, sink, decoder, name, metrics, precision, candidateFamilies) { PortLease = socketLease };
         pc.ondatachannel += channel => { if (channel.label == "voice-latency-v1") AttachTelemetry(peer, channel); };
         pc.OnAudioFormatsNegotiated += formats =>
         {
@@ -836,6 +855,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         try { peer.Connection.Close(reason); }
         finally
         {
+            RecentMediaPorts.Retire(peer.PortLease, ProbeClock.Now);
             try { await peer.Sink.Close(); }
             finally { peer.Decoder.Dispose(); }
         }

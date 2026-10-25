@@ -2,7 +2,9 @@ using VoiceNative;
 
 try
 {
-    if (args is ["--sdk-receive-race", var longRaceReport, var longRaceAddress, var longRaceCount])
+    if (args is ["--turn-allocation-lifecycle", var lifecycleServer, var lifecycleReport, var lifecycleAddress])
+        await TurnAllocationLifecycleProbe.RunAsync(lifecycleServer,lifecycleReport,lifecycleAddress);
+    else if (args is ["--sdk-receive-race", var longRaceReport, var longRaceAddress, var longRaceCount])
         await SdkReceiveRaceProbe.RunAsync(longRaceReport,longRaceAddress,int.Parse(longRaceCount,System.Globalization.CultureInfo.InvariantCulture));
     else if (args is ["--sdk-receive-race", var raceReport, var raceAddress])
         await SdkReceiveRaceProbe.RunAsync(raceReport,raceAddress);
@@ -58,6 +60,7 @@ try
             Path.Combine(seriesDirectory, seriesRole + "-" + modes[i] + "-call.json"), seriesRole, seriesWave, modes[i], 15, start.AddSeconds(i * 40));
     }
     else if (args is ["--extreme-checks"]) ExtremeChecks.Run();
+    else if (args is ["--product-smoke-os-ports", var osSmokeServer, var osSmokeRoom, var osSmokeReport, var osSmokeRole, var osSmokeWave]) await ProductSmoke.RunAsync(osSmokeServer, osSmokeRoom, osSmokeReport, osSmokeRole, osSmokeWave, true);
     else if (args is ["--product-smoke", var smokeServer, var smokeRoom, var smokeReport, var smokeRole, var smokeWave]) await ProductSmoke.RunAsync(smokeServer, smokeRoom, smokeReport, smokeRole, smokeWave);
     else if (args is ["--product-checks", var productDirectory]) await ProductChecks.RunAsync(productDirectory);
     else if (args is ["--scheduled-route-speech-once", var onceServer, var onceRoom, var onceReport, var onceRole, var onceWave, var onceEpoch, var onceMode])
