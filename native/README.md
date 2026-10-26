@@ -1,6 +1,6 @@
 # 명동 콜링 Native 0.6.0
 
-지연을 우선하는 Windows 음성 통화 앱입니다. 우선순위는 지연 감소, 음질, 부가 기능 순서입니다. WebRTC 직접 연결을 우선하고 필요하면 OCI TURN으로 중계합니다. [통화 앱 사용법](docs/USER-GUIDE.md).
+지연을 우선하는 Windows 음성 통화 앱입니다. 우선순위는 실제 지연 감소, 게임 중 연속성, CPU·GC·스케줄링 부담, 음질, 부가 기능 순서입니다. WebRTC 직접 연결을 우선하고 필요하면 OCI TURN으로 중계합니다. [통화 앱 사용법](docs/USER-GUIDE.md).
 
 ## 통화 화면
 
@@ -71,6 +71,7 @@ RTT·API 추정값·루프백 값은 실제 입→귀 지연과 다릅니다. 0.
 dotnet run --project native/TransportProbe -c Release -- --opus-comparison native/.local/reports/opus-comparison.json
 dotnet run --project native/TransportProbe -c Release -- --opus-ab-test https://qlrpal.ddns.net/ UNIQUE_PREFIX pc-report.json pc
 ./native/verify.ps1 -NoRestore -Integration
+./native/verify.ps1 -NoRestore -Integration -Stress # 분수 요청·시계 차이를 포함한83조건과 회귀 검사
 ```
 
 기본 검사는 정적 분석·회귀·서버 검사입니다. `-Integration`은 실제 네트워크 검사를 추가합니다. 마이크/스피커 검사는 자동 기본 실행에 포함하지 않습니다.
@@ -147,3 +148,12 @@ dotnet run --project native/TransportProbe -c Release -- --opus-ab-test https://
 
 
 2026-10-23 보완: 자동 조절은 수신 부족·폐기를 함께 평가하고, 정상20ms 묶음이 큐 정리에 버려져 PLC를 만드는 문제를 수정했습니다. 양쪽 최신 빌드가 필요합니다. [081 정책 보완](docs/reports/EXTREME-081.md), [082 제어된 대조](docs/reports/EXTREME-082.md)를 참고하세요. 합성 검사 통과와 친구 환경의 실제 끊김 해결 여부는 구분합니다.
+# WASAPI 저지연 장치 확인
+
+Windows에서 기본 입력·출력 장치가 실제로 공유 모드 저지연 스트림을 시작하는지 확인합니다. 입력은 3초간 콜백과 수집 프레임을 확인하고, 출력은 무음만 3초간 재생합니다. 음성은 저장하지 않습니다.
+
+```powershell
+dotnet run --project native/TransportProbe/TransportProbe.csproj -- --wasapi-ll-check
+```
+
+입력과 출력이 모두 `PASS`이고 종료 코드가 0이면 현재 기본 장치 조합에서 10 ms 미만의 WASAPI 공유 모드 저지연 경로가 동작합니다. `FAIL`에는 장치 이름, 실제 엔진 주기, 복귀 사유 또는 오류를 표시합니다. 이 검사는 물리적 입출력 지연이나 통화 전체 지연을 측정하지 않습니다.

@@ -14,8 +14,12 @@ internal static class TwoHostGroupProbe
         new("reconnect", 60, [0,1,2,3,4,5]), new("empty", 20, []),
         new("soak-six", 600, [0,1,2,3,4,5])];
 
-    public static async Task RunAsync(string server, string room, string report, string role, string wave, long epoch, bool quick = false, string? mediaAddress = null, bool soakOnly = false, int soakSeconds = 600)
+    public static async Task RunAsync(string server, string room, string report, string role, string wave, long epoch, bool quick = false, string? mediaAddress = null, bool soakOnly = false, int soakSeconds = 600, string? senderMode = null, bool captureTrace = true)
     {
+        if (senderMode is not (null or "baseline" or "inline" or "dedicated")) throw new ArgumentException("Expected baseline/inline/dedicated sender");
+        var options = senderMode == "baseline" ? null : LatencyExperiment.FromName("opus-auto-frames")!;
+        if (senderMode is "inline" or "dedicated") options = options! with { InlineSend = senderMode == "inline", DedicatedSend = senderMode == "dedicated", AdaptiveFrames = false };
+        options?.Validate();
         if (soakSeconds is not (90 or 600)) throw new ArgumentException("Boundary/soak duration must be 90/600s");
         if (role is not ("pc" or "laptop")) throw new ArgumentException("Expected pc/laptop role");
         using var sdkLog = new TurnSignalingLog();
@@ -28,6 +32,7 @@ internal static class TwoHostGroupProbe
         var joined = new HashSet<int>();
         var samples = new List<Sample>(); var events = new List<string>(); var sync = new object();
         var membership = new List<object>(); var phaseResources = new List<object>(); var traces = new Dictionary<int,PipelineTraceSnapshot>();
+        var phaseTraces = new Dictionary<string,Dictionary<int,PipelineTraceSnapshot>>();
         var failures = new HashSet<string>(); var cleanupOk = false;
         using var process = Process.GetCurrentProcess();
         var beforeHandles = process.HandleCount; var beforeBytes = process.PrivateMemorySize64;
@@ -66,13 +71,13 @@ internal static class TwoHostGroupProbe
                 var engine = new WebRtcCallEngine { DirectOnly = true, DiagnosticCaptureTransform = fixture.Fill };
                 engine.SetMediaInterface(mediaAddress);
                 engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
-                engine.SetLatencyExperiment(LatencyExperiment.FromName("opus-auto-frames"));
+                engine.SetLatencyExperiment(options);
                 engine.Status += line => { lock(sync) events.Add($"{elapsed.Elapsed.TotalSeconds:F3}s {slot}: {line}"); };
                 engines.Add(slot,engine);
             }
             if (start > DateTimeOffset.UtcNow) await Task.Delay(start-DateTimeOffset.UtcNow);
             var phaseStart = start;
-            var phases = quick ? new[] { new Phase("three", 60, [0,3,4]), new Phase("six", 90, [0,1,2,3,4,5]) } : soakOnly ? new[] { new Phase("soak-six", soakSeconds, [0,1,2,3,4,5]) } : Phases;
+            var phases = senderMode is not null && soakOnly ? new[] {new Phase("soak-six",soakSeconds,[0,1,2,3,4,5])} : senderMode == "baseline" ? new[] {new Phase("pair",45,[0,3])} : senderMode is not null ? new[] { new Phase("pair",45,[0,3]), new Phase("three",60,[0,3,4]), new Phase("six",90,[0,1,2,3,4,5]) } : quick ? new[] { new Phase("three", 60, [0,3,4]), new Phase("six", 90, [0,1,2,3,4,5]) } : soakOnly ? new[] { new Phase("soak-six", soakSeconds, [0,1,2,3,4,5]) } : Phases;
             foreach (var phase in phases)
             {
                 sdkLog.Phase = phase.Name;
@@ -111,7 +116,7 @@ internal static class TwoHostGroupProbe
                         if (d.Peers.Length>1 && d.FrameAdaptation?.AllPeersReady == true)
                             failures.Add("Multi-peer frame control unexpectedly enabled");
                     }
-                    if (phase.Name=="soak-six" && !traced && (deadline-DateTimeOffset.UtcNow).TotalSeconds<=11)
+                    if (captureTrace && (phase.Name=="soak-six" || senderMode is not null) && !traced && (deadline-DateTimeOffset.UtcNow).TotalSeconds<=11)
                     { foreach(var engine in engines.Values) engine.StartPipelineTrace(5); traced=true; }
                     if(DateTimeOffset.UtcNow>=nextProgress)
                     { Console.WriteLine($"PROGRESS {role} {phase.Name} remaining={(deadline-DateTimeOffset.UtcNow).TotalSeconds:F0}s"); nextProgress=DateTimeOffset.UtcNow.AddSeconds(30); }
@@ -124,7 +129,13 @@ internal static class TwoHostGroupProbe
                     allocatedBytes=GC.GetTotalAllocatedBytes()-allocatedBefore,
                     gcPauseMs=(GC.GetTotalPauseDuration()-pauseBefore).TotalMilliseconds,
                     gcCollections=new[] {GC.CollectionCount(0)-collections[0],GC.CollectionCount(1)-collections[1],GC.CollectionCount(2)-collections[2]} });
-                if (traced) foreach(var pair in engines) traces[pair.Key]=pair.Value.StopPipelineTrace();
+                if (traced)
+                {
+                    var recorded = new Dictionary<int,PipelineTraceSnapshot>();
+                    foreach(var slot in joined) recorded[slot]=engines[slot].StopPipelineTrace();
+                    foreach(var pair in recorded) traces[pair.Key]=pair.Value;
+                    if (senderMode is not null) phaseTraces[phase.Name]=recorded;
+                }
                 if (deadline>DateTimeOffset.UtcNow) await Task.Delay(deadline-DateTimeOffset.UtcNow);
                 phaseStart=deadline;
             }
@@ -143,11 +154,11 @@ internal static class TwoHostGroupProbe
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
         string[] logged;lock(sync) logged=events.ToArray();
         await File.WriteAllTextAsync(report,JsonSerializer.Serialize(new {
-            role,epoch,quick,soakOnly,soakSeconds,mediaAddress,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            role,epoch,quick,soakOnly,soakSeconds,mediaAddress,senderMode,options,captureTrace,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
             sdkBuild=SdkBuildIdentity.Read(),sdkIceLog=sdkLog.Snapshot(),
             opusBackend=OpusBackend.Snapshot(),
             sdkReceiveDiagnostics=SdkReceiveDiagnostics.Snapshot(),
-            error,failures,cleanupOk,membership,phaseResources,samples,traces,events=logged,
+            error,failures,cleanupOk,membership,phaseResources,samples,traces,phaseTraces,events=logged,
             resources=new {cpuCores=(process.TotalProcessorTime-cpuStart).TotalSeconds/elapsed.Elapsed.TotalSeconds,
                 beforeHandles,afterHandles=process.HandleCount,beforeBytes,afterBytes=process.PrivateMemorySize64},
             notes="Three real engines on each host, actual shared capture/render with synthetic microphone replacement; per-test-peer gain .015. Host load is concentrated, not six independent PCs. Same-host links do not cross the LAN. Manual engine leave/rejoin is not a real ISP outage. No physical mouth-to-ear measurement."

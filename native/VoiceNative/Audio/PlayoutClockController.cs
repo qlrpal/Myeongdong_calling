@@ -5,7 +5,7 @@ namespace VoiceNative;
 internal sealed class PlayoutClockController(int reserveSamples, bool enabled, bool fixedReserveTarget = false, bool responsive = false, bool fineClock = false)
 {
     private double filteredQueue, learnedTarget, observedSamples, rateBias;
-    private bool initialized;
+    private bool initialized, subBurstFeedback;
     private int targetReserveSamples = reserveSamples;
     public double Rate { get; private set; } = 1;
     public bool Enabled { get; } = enabled;
@@ -26,12 +26,15 @@ internal sealed class PlayoutClockController(int reserveSamples, bool enabled, b
             return;
         }
         var error = filteredQueue - learnedTarget;
-        var outsideBand = Math.Sign(error) * Math.Max(0, Math.Abs(error) - (responsive ? 120 : 240));
+        var outsideBand = Math.Sign(error) * Math.Max(0, Math.Abs(error) - (subBurstFeedback ? 24 : responsive ? 120 : 240));
         // Candidate follows a falling reserve without leaving tens of seconds
         // of residual queue. Keep the existing -0.2%/+1% rate safety limits.
         var correction = Math.Clamp(outsideBand / 48000 * (responsive ? 0.25 : 0.1) + rateBias, -0.002, 0.01);
         Rate += (1 + correction - Rate) * Math.Min(1, outputSamples / 12000.0);
     }
+    // A broad deadband would leave unnecessary steady queue after disabling
+    // fractional packet shedding. Other feedback geometries retain their policy.
+    public void SetSubBurstFeedback(bool enabled) => subBurstFeedback = fineClock && enabled;
     public void SetRateBias(double bias) { if (fineClock) rateBias = Math.Clamp(bias, -.001, .001); }
     public void SetReserve(int samples)
     {

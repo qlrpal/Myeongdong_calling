@@ -7,6 +7,16 @@ internal static class PipelineTraceChecks
 {
     public static void Run()
     {
+        var capture = new PipelineTrace(2);
+        capture.Captured(new(1,2,3,480,4));
+        if (capture.Snapshot().CaptureCallbacks is not null) throw new InvalidOperationException("Disabled capture tracing allocated storage");
+        capture.Start(5);
+        for(var i=0;i<3;i++) capture.Captured(new(i,i+.1,i+.2,480,4));
+        if(capture.Snapshot() is not { CaptureCallbacks.Length:2,EvictedRecords:1 }) throw new InvalidOperationException("Capture trace unbounded");
+        capture.Stop();capture.Captured(new(4,5,6,480,4));
+        if(capture.Snapshot().CaptureCallbacks![^1].CalledAt!=2) throw new InvalidOperationException("Stopped capture trace accepted data");
+        capture.Start(5);
+        if(capture.Snapshot().CaptureCallbacks!.Length!=0) throw new InvalidOperationException("Capture trace restart retained data");
         var limited = new PipelineTrace(2); limited.Start(5);
         for (var i = 0; i < 3; i++) limited.Sent(new(1, (uint)i, i, 1, 2, 3, 4, null));
         var bounded = limited.Snapshot();

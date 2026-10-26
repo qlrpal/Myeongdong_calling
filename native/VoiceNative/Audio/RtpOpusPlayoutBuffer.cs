@@ -56,6 +56,11 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private int ReserveForRead(int samples) => recentBurstSamples > 0 && samples >= recentBurstSamples
         && samples % recentBurstSamples != 0 ? Math.Max(CurrentReserveSamples, recentBurstSamples) : CurrentReserveSamples;
     private int PhaseReserveSamples => ReserveForRead(recentReadSamples);
+    // A sub-burst pull samples the arrival sawtooth throughout its cycle.
+    // Its feedback target must cover that geometry, not drive the cycle mean
+    // below the audio needed until the next batch. This is not an extra PCM queue.
+    private int ClockReserveSamples => clockEstimator is not null && recentReadSamples < recentBurstSamples
+        ? Math.Max(PhaseReserveSamples, recentBurstSamples / 2) : PhaseReserveSamples;
     private readonly bool experimental;
     private readonly int emptyHoldSamples;
     private readonly int coarsePeerFloorSamples;
@@ -252,7 +257,12 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 if (queuedSamples + pcmCount - pcmOffset > maximumQueuedSamples)
                 {
                     // Shed old backlog; do not play PLC for deliberately discarded speech.
-                    while (packets.Count > 1 && queuedSamples > (maximumQueuedSamples == MaximumSamples ? 2880 : Math.Max(480, maximumQueuedSamples / 2)))
+                    // A restart must retain enough compressed audio to satisfy its
+                    // own priming gate. Half of a fractional/burst-aware bound can
+                    // be smaller than startup, causing an endless trim/wait loop.
+                    var keep = maximumQueuedSamples == MaximumSamples ? 2880 : Math.Max(480, maximumQueuedSamples / 2);
+                    if (experimental) keep = Math.Min(MaximumSamples, Math.Max(keep, Math.Max(PhaseReserveSamples + recentReadSamples, recentBurstSamples)));
+                    while (packets.Count > 1 && (experimental ? queuedSamples - FirstPacket.Value.Samples >= keep : queuedSamples > keep))
                     {
                         if (experimental) { recoveryDiscardedPackets++; recoveryDiscardedSamples += FirstPacket.Value.Samples; }
                         RemoveFirst(discarded: true);
@@ -294,9 +304,15 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 UpdateQueueBound();
                 readRequests.Add(destination.Length / 96.0);
                 if (disposed || suspended) return destination.Length;
-                clock.SetReserve(PhaseReserveSamples);
-                if (experimental && started && packets.Count > 0)
+                clock.SetSubBurstFeedback(recentReadSamples < recentBurstSamples);
+                clock.SetReserve(ClockReserveSamples);
+                if (experimental && started && packets.Count > 0
+                    && (clockEstimator is null || recentReadSamples >= recentBurstSamples))
                 {
+                    // Fine-clock sub-burst pulls drain surplus through rate feedback;
+                    // trimming a compressed packet and its decoded tail at an arbitrary
+                    // fractional phase can manufacture recurring PLC on a clean stream.
+                    // The admission hard bound still applies to every mode.
                     // Trim at the consumption boundary, where a complete device pull
                     // is known. A capture burst must not reset a nearly full pull.
                     // Preserve a bounded observed arrival batch, otherwise trimming a
@@ -536,7 +552,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         }
         if (packets.Count == 0 && adaptive.TryHold(quantumSamples))
         {
-            clock.SetReserve(PhaseReserveSamples);
+            clock.SetReserve(ClockReserveSamples);
             return Conceal(advanceTimestamp: false);
         }
         return Conceal();

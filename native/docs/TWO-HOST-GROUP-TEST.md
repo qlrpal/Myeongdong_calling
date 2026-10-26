@@ -48,3 +48,21 @@ python native/TransportProbe/Analysis/analyze_group_probe.py --pairs PC_REPORT.j
 ```
 
 실패 보고서·미완료 단계·정리 실패·피어 수 불일치·미수신/미디코딩·피어 카운터 역행은 거부한다. 각 안정 구간의 첫10초를 제외하고 피어별 큐 중앙값/P95,PLC·부족·폐기와 송수신 프레임을 집계한다. CPU는 해당 시험 프로세스 안의 전체 엔진 합이며 단일 사용자 CPU나 시스템 전체 CPU가 아니다. 프로세스에 청구된 사용자/커널 시간을 포함하며 audiodg.exe·다른 프로세스·별도 시스템/드라이버 작업 전체의 부하는 포함하지 않는다. 프로세스 메모리에는 보존 중인 진단 자료가 포함되어 전후 값만으로 누수를 판정하지 않는다. 송신 최대 대기는 참가 이후 누적값이다. 단위는 앱 큐/네트워크 지표이며 물리 입→귀 지연을 표시하지 않는다.
+
+
+## 송신 방식 단일 변수 대조 · EXTREME-100
+
+두 호스트에서 같은 빌드·합성 WAV·방을 사용하고, 각 호스트 시계를 확인해 대응하는 시작 epoch를 지정한다. 서로 다른 PC QPC를 직접 빼지 않는다. 명령의 pc/laptop은 실제 두 호스트 역할이다. 상세 설정과 실패는 [100 보고서](reports/EXTREME-100.md)를 참고한다.
+
+```powershell
+TransportProbe.exe --two-host-send-compare SERVER ROOM REPORT.json pc FIXTURE.wav EPOCH inline
+# 상대는 laptop 역할. 같은 프레임/여유에서 다음 대조는 dedicated, 마지막은 inline.
+TransportProbe.exe --two-host-send-boundary SERVER ROOM REPORT.json pc FIXTURE.wav EPOCH dedicated
+# 고빈도 추적 없이 같은6엔진90초 대조. 상세 패킷 지연 분포는 생성하지 않는다.
+TransportProbe.exe --two-host-send-untraced SERVER ROOM REPORT.json pc FIXTURE.wav EPOCH dedicated
+python native/TransportProbe/Analysis/analyze_sender_comparison.py INPUT.json OUTPUT.json
+```
+
+`send-compare`는1:1 45초→3명60초→6명90초, `send-boundary`/`send-untraced`는6명90초다. baseline은 기본10ms 기준선1:1이며 인라인/전용과 프레임·여유가 달라 직접적인 송신 A/B에 섞지 않는다. 세 경로 모두 직접 연결만 사용하며, TURN 시험은 기존 제품/route 도구로 별도 수행한다. 합성6엔진은 독립6대 PC가 아니다.
+
+단계별5초 추적은 켜진 경우에만 보존한다. 추적 비활성 자료에는 `analyze_group_probe.py`를 사용하며 상세 송신 분석기는 불완전한 추적을 거부한다. 송신 처리의 기본값은 이번 대조로 바꾸지 않았다. 새 `--fractional-network-checks`는 미해결 주기를 재현하며 현재 실패한다.

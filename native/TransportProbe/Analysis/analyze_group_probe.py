@@ -16,6 +16,9 @@ def analyze(report):
         raise ValueError("Failed/incompletely cleaned trial")
     required={"three":3,"six":6} if report.get("quick") else {
         "three":3,"six":6,"leave-one":5,"rejoin":6,"reconnect":6,"empty":0,"soak-six":6}
+    if report.get("senderMode") == "baseline":required={"pair":2}
+    elif report.get("senderMode") in ("inline","dedicated"):required={"pair":2,"three":3,"six":6}
+    elif report.get("senderMode") is not None:raise ValueError("Invalid sender comparison mode")
     if report.get("soakOnly"):required={"soak-six":6}
     phases={p["Name"]:len(p["members"]) for p in report["membership"]}
     if phases!=required:raise ValueError("Missing or incorrect membership phases")
@@ -75,7 +78,7 @@ def analyze(report):
             senderDropsSinceJoin=max((c.get("Sender") or {}).get("DroppedFrames",0) for c in calls),
             encodeRollingP95MaxMs=max(c["Microphone"]["ProcessingP95Ms"] or 0 for c in calls),
             frameMs=sorted({c["FrameMs"] for c in calls})))
-    if not report.get("quick"):
+    if report.get("soakOnly") or not report.get("quick") and report.get("senderMode") is None:
         soak=[r for r in rows if r["phase"]=="soak-six"]
         if not soak or min(r["seconds"] for r in soak)<report.get("soakSeconds",600)-30:raise ValueError("Six-peer soak too short")
     return dict(role=report["role"],quick=report.get("quick",False),cleanupOk=True,streams=rows,sources=source_rows,
@@ -119,6 +122,17 @@ def self_test():
     r=dict(role="pc",quick=True,error=None,failures=[],cleanupOk=True,resources={},
         membership=[dict(Name="three",members=[0,3,4]),dict(Name="six",members=list(range(6)))],
         samples=[dict(Phase=p,Slot=slot,Call=call(at,n)) for p,n in [("three",3),("six",6)] for slot in ([0] if p=="three" else [0,1,2]) for at in (0,11,12)])
+    baseline={**r,"quick":False,"senderMode":"baseline",
+        "membership":[dict(Name="pair",members=[0,3])],
+        "samples":[dict(Phase="pair",Slot=0,Call=call(at,2)) for at in (0,11,12)]}
+    assert len(analyze(baseline)["streams"])==1
+    comparison={**r,"quick":False,"senderMode":"inline",
+        "membership":baseline["membership"]+r["membership"],"samples":baseline["samples"]+r["samples"]}
+    assert len(analyze(comparison)["streams"])==18
+    boundary={**r,"quick":False,"senderMode":"dedicated","soakOnly":True,"soakSeconds":90,
+        "membership":[dict(Name="soak-six",members=list(range(6)))],
+        "samples":[dict(Phase="soak-six",Slot=slot,Call=call(at,6)) for slot in (0,1,2) for at in (0,11,80)]}
+    assert len(analyze(boundary)["streams"])==15
     result=analyze(r)
     assert len(result["streams"])==17 and all(s["queueMedianMs"]==5 for s in result["streams"])
     assert all(s["plcHoldMs"]==0 and s["plcAdvanceMs"]==0 for s in result["streams"])

@@ -18,9 +18,11 @@ internal sealed record PipelinePlayout(string Peer, uint Ssrc, uint Timestamp, d
     double? DecodeEnd, double? SubmittedAt, string Outcome, double QueueMs);
 internal sealed record PipelineRead(string Peer, double CalledAt, double LockAt, double ReturnedAt,
     int RequestedSamples, int ProvidedSamples, long PlcFrames, double QueueBeforeMs, double QueueAfterMs, bool PlayoutStarted);
+internal sealed record PipelineCaptureCallback(double CalledAt, double LockAt, double ReturnedAt,
+    int InputSamples, int EncodedFrames);
 internal sealed record PipelineTraceSnapshot(PipelineSend[] Sends, PipelineReceive[] Receives,
     PipelineAdmission[] Admissions, PipelinePlayout[] Playout, PipelineRead[] Reads,
-    long EvictedRecords, double MaxRecorderMs, PipelineRtpChannel[]? RtpChannel = null);
+    long EvictedRecords, double MaxRecorderMs, PipelineRtpChannel[]? RtpChannel = null, PipelineCaptureCallback[]? CaptureCallbacks = null);
 
 // Opt-in, bounded timestamp metadata only. No payload bytes, audio, tokens or raw datagrams.
 internal sealed class PipelineTrace
@@ -42,6 +44,7 @@ internal sealed class PipelineTrace
     private readonly Queue<PipelinePlayout> playout;
     private readonly Queue<PipelineRead> reads;
     private readonly Queue<PipelineRtpChannel> rtpChannel;
+    private Queue<PipelineCaptureCallback>? captureCallbacks;
     private double until, maxRecorderMs;
     private long evicted;
     public bool Enabled => ProbeClock.Now < Volatile.Read(ref until);
@@ -52,6 +55,7 @@ internal sealed class PipelineTrace
         {
             Volatile.Write(ref until, 0);
             sends.Clear(); receives.Clear(); admissions.Clear(); playout.Clear(); reads.Clear(); rtpChannel.Clear();
+            captureCallbacks ??= new(capacity); captureCallbacks.Clear();
             evicted = 0; maxRecorderMs = 0;
             Volatile.Write(ref until, ProbeClock.Now + seconds);
         }
@@ -80,6 +84,8 @@ internal sealed class PipelineTrace
             BinaryPrimitives.ReadUInt32BigEndian(packet[4..]), BinaryPrimitives.ReadUInt16BigEndian(packet[2..]),
             packet.Length, receiveBufferBytes, ProbeClock.Now));
     }
+    public void Captured(PipelineCaptureCallback record)
+    { if (captureCallbacks is { } records) Add(records, record); }
     public void Sent(PipelineSend record) => Add(sends, record);
     public void Received(PipelineReceive record) => Add(receives, record);
     public void Admitted(PipelineAdmission record) => Add(admissions, record);
@@ -88,6 +94,6 @@ internal sealed class PipelineTrace
     public PipelineTraceSnapshot Snapshot()
     {
         lock (sync) return new(sends.ToArray(), receives.ToArray(), admissions.ToArray(),
-            playout.ToArray(), reads.ToArray(), evicted, maxRecorderMs, rtpChannel.ToArray());
+            playout.ToArray(), reads.ToArray(), evicted, maxRecorderMs, rtpChannel.ToArray(), captureCallbacks?.ToArray());
     }
 }

@@ -2,6 +2,11 @@ using VoiceNative;
 
 try
 {
+    if (args is ["--wasapi-ll-check"])
+    {
+        Environment.ExitCode = await WasapiLowLatencyCheck.RunAsync();
+        return;
+    }
     _ = OpusBackend.Snapshot();
     if (args is ["--srtp-protection-checks",var srtpReuseReport])
     { SrtpProtectionChecks.Run(srtpReuseReport); return; }
@@ -17,6 +22,12 @@ try
         await SdkReceiveRaceProbe.RunAsync(longRaceReport,longRaceAddress,int.Parse(longRaceCount,System.Globalization.CultureInfo.InvariantCulture));
     else if (args is ["--sdk-receive-race", var raceReport, var raceAddress])
         await SdkReceiveRaceProbe.RunAsync(raceReport,raceAddress);
+    else if (args is ["--two-host-send-untraced", var suServer, var suRoom, var suReport, var suRole, var suWave, var suEpoch, var suMode])
+        await TwoHostGroupProbe.RunAsync(suServer,suRoom,suReport,suRole,suWave,long.Parse(suEpoch,System.Globalization.CultureInfo.InvariantCulture),soakOnly:true,soakSeconds:90,senderMode:suMode,captureTrace:false);
+    else if (args is ["--two-host-send-boundary", var sbServer, var sbRoom, var sbReport, var sbRole, var sbWave, var sbEpoch, var sbMode])
+        await TwoHostGroupProbe.RunAsync(sbServer,sbRoom,sbReport,sbRole,sbWave,long.Parse(sbEpoch,System.Globalization.CultureInfo.InvariantCulture),soakOnly:true,soakSeconds:90,senderMode:sbMode);
+    else if (args is ["--two-host-send-compare", var sendServer, var sendRoom, var sendReport, var sendRole, var sendWave, var sendEpoch, var sendMode])
+        await TwoHostGroupProbe.RunAsync(sendServer,sendRoom,sendReport,sendRole,sendWave,long.Parse(sendEpoch,System.Globalization.CultureInfo.InvariantCulture),senderMode:sendMode);
     else if (args is ["--two-host-group-soak", var autoSoakServer, var autoSoakRoom, var autoSoakReport, var autoSoakRole, var autoSoakWave, var autoSoakEpoch])
         await TwoHostGroupProbe.RunAsync(autoSoakServer, autoSoakRoom, autoSoakReport, autoSoakRole, autoSoakWave, long.Parse(autoSoakEpoch, System.Globalization.CultureInfo.InvariantCulture), soakOnly: true);
     else if (args is ["--two-host-group-boundary", var automaticServer, var automaticRoom, var automaticReport, var automaticRole, var automaticWave, var automaticEpoch])
@@ -37,6 +48,8 @@ try
     else if (args is ["--adaptive-clock-baseline-checks", var adaptiveClockBaseline]) AdaptiveNetworkChecks.Run(adaptiveClockBaseline, 300, false);
     else if (args is ["--adaptive-clock-candidate-checks", var adaptiveClockReport]) AdaptiveNetworkChecks.Run(adaptiveClockReport, 300, true);
     else if (args is ["--adaptive-network-long-checks", var adaptiveLongReport]) AdaptiveNetworkChecks.Run(adaptiveLongReport, 300);
+    else if (args is ["--fractional-network-long-checks", var fractionalLongReport]) AdaptiveNetworkChecks.Run(fractionalLongReport,300,includeFractional:true);
+    else if (args is ["--fractional-network-checks", var fractionalReport]) AdaptiveNetworkChecks.Run(fractionalReport,includeFractional:true);
     else if (args is ["--adaptive-network-checks", var adaptiveNetworkReport]) AdaptiveNetworkChecks.Run(adaptiveNetworkReport);
     else if (args is ["--audio-hotpath-benchmark", var hotpathReport]) AudioHotpathBenchmark.Run(hotpathReport);
     else if (args is ["--sender-scheduling-benchmark", var senderSchedulingReport]) await SenderSchedulingBenchmark.RunAsync(senderSchedulingReport);

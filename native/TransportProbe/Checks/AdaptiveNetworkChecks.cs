@@ -3,7 +3,7 @@ using VoiceNative;
 
 internal static class AdaptiveNetworkChecks
 {
-    private sealed record Scenario(string Name, string Impairment, int CaptureMs = 10, int ReadSamples = 480, bool AlternatingRead = false, int DriftPpm = 0);
+    private sealed record Scenario(string Name, string Impairment, double CaptureMs = 10, int ReadSamples = 480, bool AlternatingRead = false, int DriftPpm = 0);
     private sealed record Packet(uint Stamp, byte[] Payload);
     private sealed record Feedback(double At, ReceiverFrameFeedback Value);
     private sealed record Point(double AtMs, double FrameMs, double QueueMs, double PlcMs, double UnderfillMs,
@@ -11,7 +11,7 @@ internal static class AdaptiveNetworkChecks
     private sealed record Transition(double AtMs, double FrameMs, string Reason);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly int[] Sizes = [120, 240, 480];
-    public static void Run(string path, int seconds = 120, bool fineClock = true, bool initialLearning = false)
+    public static void Run(string path, int seconds = 120, bool fineClock = true, bool initialLearning = false, bool includeFractional = false)
     {
         if (seconds is < 120 or > 1800) throw new ArgumentOutOfRangeException(nameof(seconds));
         var durationMs = seconds * 1000.0; var tailAt = durationMs - 20000;
@@ -29,6 +29,17 @@ internal static class AdaptiveNetworkChecks
             new("clock-slow-200ppm-488", "drift", ReadSamples: 488, DriftPpm: -200),
             new("clock-fast-500ppm-variable", "drift", AlternatingRead: true, DriftPpm: 500),
             new("clock-slow-500ppm-variable", "drift", AlternatingRead: true, DriftPpm: -500)];
+        if(includeFractional) scenarios=[..scenarios,
+            new("render-128", "none", ReadSamples:128), new("render-256", "none", ReadSamples:256),
+            new("capture20-render-128", "none", CaptureMs:20, ReadSamples:128),
+            new("capture20-render-256", "none", CaptureMs:20, ReadSamples:256),
+            new("capture256-render128", "none", CaptureMs:256.0/48, ReadSamples:128),
+            new("capture256-render480", "none", CaptureMs:256.0/48, ReadSamples:480),
+            new("capture256-render256", "none", CaptureMs:256.0/48, ReadSamples:256),
+            new("fractional-clock-fast-200ppm", "drift", ReadSamples:128, DriftPpm:200),
+            new("fractional-clock-slow-200ppm", "drift", ReadSamples:128, DriftPpm:-200),
+            new("capture20-clock-fast-200ppm", "drift", CaptureMs:20, ReadSamples:256, DriftPpm:200),
+            new("capture20-clock-slow-200ppm", "drift", CaptureMs:20, ReadSamples:256, DriftPpm:-200)];
         var results = new List<object>();
         var failures = new List<string>();
         foreach (var scenario in scenarios)
@@ -46,6 +57,8 @@ internal static class AdaptiveNetworkChecks
             long producedSamples = 0, order = 0, received = 0, injectedLoss = 0;
             double peakQueue = 0, frame = mode == "fixed-5" ? 5 : 2.5;
             Point? tailStart = null; Point? warmStart = null;
+            double tailQueueWeighted = 0, tailQueueMinimum = double.PositiveInfinity, tailQueueMaximum = 0;
+            long tailOutputSamples = 0, tailRenderRequests = 0;
             Point Sample(double at)
             {
                 var a = buffer.Snapshot(); var r = buffer.Details();
@@ -86,7 +99,16 @@ internal static class AdaptiveNetworkChecks
                 if (now >= nextRender)
                 {
                     var readSamples = scenario.AlternatingRead && renderIndex % 2 == 1 ? 960 : scenario.ReadSamples;
-                    if (!renderPaused) buffer.Read(output.AsSpan(0, readSamples * 2));
+                    if (!renderPaused)
+                    {
+                        buffer.Read(output.AsSpan(0, readSamples * 2));
+                        if (now >= tailAt)
+                        {
+                            var queue = buffer.Snapshot().QueueMs;
+                            tailQueueWeighted += queue * readSamples; tailOutputSamples += readSamples; tailRenderRequests++;
+                            tailQueueMinimum = Math.Min(tailQueueMinimum, queue); tailQueueMaximum = Math.Max(tailQueueMaximum, queue);
+                        }
+                    }
                     nextRender += readSamples / 48.0; renderIndex++;
                 }
                 // Model 500ms telemetry polling and 100ms feedback delivery, not instantaneous oracle control.
@@ -128,11 +150,13 @@ internal static class AdaptiveNetworkChecks
                 || learnedOutput && (warmStart!.PlcMs > 20 || warmStart.UnderfillMs > 20)))
                 failures.Add($"Clean capture/transition produced gaps: {scenario.Name}/{mode}; PLC={last.PlcMs}, underfill={last.UnderfillMs}");
             results.Add(new { scenario.Name, mode, mediaSeconds = seconds, received, injectedLoss, peakQueue,
-                learningState = detail.ReserveLearningState, relearns = detail.ReserveRelearns, final = last, warmStart, tailPlc, tailUnderfill, tailDiscard, transitions, points });
+                learningState = detail.ReserveLearningState, relearns = detail.ReserveRelearns, final = last, warmStart, tailPlc, tailUnderfill, tailDiscard,
+                tailQueueAfterReadMs = tailOutputSamples > 0 ? tailQueueWeighted / tailOutputSamples : (double?)null,
+                tailQueueMinimum, tailQueueMaximum, tailRenderRequests, transitions, points });
             Console.WriteLine($"CHECK: {scenario.Name}/{mode}: PLC={last.PlcMs:F1}ms underfill={last.UnderfillMs:F1}ms discard={last.DiscardMs:F1}ms; final20s={tailPlc:F1}/{tailUnderfill:F1}/{tailDiscard:F1}ms");
         }
         var parent = Path.GetDirectoryName(Path.GetFullPath(path))!; Directory.CreateDirectory(parent);
-        File.WriteAllText(path, JsonSerializer.Serialize(new { schemaVersion = 2, fineClock, initialLearning,
+        File.WriteAllText(path, JsonSerializer.Serialize(new { schemaVersion = 2, fineClock, initialLearning, includeFractional,
             failures, limits = "Deterministic synthetic packets/virtual clocks. Not a replay of second-level friend diagnostics; not acoustic/device/external network measurement.", results }, JsonOptions));
         if (failures.Count > 0) throw new InvalidOperationException(string.Join("; ", failures));
     }

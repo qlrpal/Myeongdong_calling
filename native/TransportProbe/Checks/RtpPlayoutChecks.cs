@@ -34,6 +34,8 @@ internal static class RtpPlayoutChecks
         Check(buffer.Snapshot().DecodedMs == 40 && buffer.Snapshot().ConsumedMs == 50, "Decoded and concealed duration must remain separate.");
 
         CheckDemandBoundedHold(payloads);
+        CheckRestartRetention();
+        CheckAdmissionPreservesPartialPcm();
 
         // Experimental initial trimming must preserve reserve + current render demand.
         // Default construction keeps the original initial backlog policy.
@@ -120,6 +122,38 @@ internal static class RtpPlayoutChecks
             "A held deadline must accept the original packet exactly once instead of advancing and rejecting it.");
         waiting.Suspend(); waiting.Resume();
         Check(waiting.Details().TargetReserveMs == 20 && waiting.Snapshot().QueueMs == 0, "Device reset must clear adaptive waiting state.");
+    }
+    private static void CheckAdmissionPreservesPartialPcm()
+    {
+        var options=LatencyExperiment.FromName("opus-adaptive")!;
+        using var encoder=new OpusAudioEncoder(OpusProfile.LowDelay64,options);
+        var payload=encoder.EncodeAudio(new short[120],encoder.SupportedFormats.Single());
+        using var buffer=new RtpOpusPlayoutBuffer(new(),correctClock:false,experiment:options);
+        var output=new byte[256];buffer.Read(output);
+        for(uint i=0;i<4;i++)buffer.Add(1,i*120,payload,0);
+        buffer.Read(output); // Leaves part of a decoded frame, below backlog bound.
+        var before=buffer.Details().RecoveryDiscardedMs;
+        for(uint i=4;i<8;i++)buffer.Add(1,i*120,payload,10);
+        Check(buffer.Details().RecoveryDiscardedMs==before && buffer.Snapshot().QueueMs>17,
+            "Admission performed render-boundary trimming of a partial decoded frame");
+        Console.WriteLine("PASS: normal arrival below backlog bound preserves partial decoded PCM until render demand.");
+    }
+    private static void CheckRestartRetention()
+    {
+        var options=LatencyExperiment.FromName("opus-adaptive-5")!;
+        using var encoder=new OpusAudioEncoder(OpusProfile.LowDelay64,options);
+        var payload=encoder.EncodeAudio(new short[240],encoder.SupportedFormats.Single());
+        using var buffer=new RtpOpusPlayoutBuffer(new(),correctClock:false,experiment:options);
+        var output=new byte[256];buffer.Read(output); // Actual 128-sample demand.
+        for(uint i=0;i<4;i++)buffer.Add(1,i*240,payload,0);
+        buffer.Read(output);
+        Check(buffer.Details().DecodedPackets==1,"Restart fixture did not start");
+        for(uint i=4;i<8;i++)buffer.Add(1,i*240,payload,20);
+        Check(buffer.Snapshot().QueueMs>=20,"Backlog trim retained less than its own startup gate");
+        buffer.Read(output);
+        Check(buffer.Details().DecodedPackets==2 && buffer.Snapshot().UnderfillMs==0,
+            "Fresh full batch remained stuck behind restart threshold");
+        Console.WriteLine("PASS: fractional-demand backlog trim retains a full priming batch and restarts instead of looping in silence.");
     }
     private static void CheckDemandBoundedHold(byte[][] payloads)
     {

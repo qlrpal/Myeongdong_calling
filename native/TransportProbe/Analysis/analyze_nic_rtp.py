@@ -10,10 +10,16 @@ from export_raw_network import frequency
 from turn_payload import rtp_payload
 
 
-def parse_rtp(prefix):
-    """Ethernet/VLAN or Native Wi-Fi LLC SNAP. Reject truncated IPv4 options/UDP/RTP."""
+def parse_rtp(prefix, packet_type=None):
+    """Ethernet/VLAN, Wi-Fi SNAP, or explicitly declared Pktmon raw IP.
+
+    A raw IP header is accepted only when the event declares PacketType=IP;
+    never guess it from a MAC address's first nibble.
+    """
     snap = prefix.find(bytes.fromhex('aaaa030000000800'), 0, 64)
-    if snap >= 0:
+    if packet_type == 'IP':
+        offset = 0
+    elif snap >= 0:
         offset = snap + 8
     elif len(prefix) >= 14 and prefix[12:14] == b'\x08\x00':
         offset = 14
@@ -75,7 +81,7 @@ def analyze(csv_path, report_path, metadata_path, summary_path, output):
             data = row[payload_at:]; at = int(row[clock_at])/freq; clocks.append(at)
             if int(data[11]) != len(bytes.fromhex(data[12].strip().removeprefix('0x'))):
                 raise ValueError('LoggedPayloadSize mismatch')
-            packet = parse_rtp(bytes.fromhex(data[12].strip().removeprefix('0x')))
+            packet = parse_rtp(bytes.fromhex(data[12].strip().removeprefix('0x')), packet_type=data[4].strip())
             if packet is None: continue
             retained += 1; components[data[5].strip()] += 1
             key = (packet['ssrc'], packet['timestamp'], packet['sequence'])
@@ -121,6 +127,10 @@ def self_test():
         p=parse_rtp(x);assert p['sequence']==0x1234 and p['timestamp']==0xfffffffe and p['ssrc']==0xabcdef01
     assert parse_rtp(wifi[:54]) is None
     assert parse_rtp(wifi[:73]) is None
+    assert parse_rtp(ip+udp, packet_type='IP')['timestamp'] == 0xfffffffe
+    assert parse_rtp(ip+udp) is None
+    assert parse_rtp((ip+udp)[:-1], packet_type='IP') is None
+    assert parse_rtp(b'\x60'+(ip+udp)[1:], packet_type='IP') is None
     bad=bytearray(eth);bad[14+6]=0x20;assert parse_rtp(bad) is None
     assert parse_rtp(b'\0'*128) is None
     options=bytearray(ip);options[0]=0x46

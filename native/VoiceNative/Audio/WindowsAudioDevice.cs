@@ -181,6 +181,8 @@ internal sealed class WindowsAudioDevice
     private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt, double callbackAt, int callbackSamples, int flags)
     {
         var callbackStarted = Stopwatch.GetTimestamp();
+        var tracing = pipeline?.Enabled == true;
+        var callbackFrames = 0;
         lock (audioLock)
         {
             var lockAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
@@ -225,11 +227,17 @@ internal sealed class WindowsAudioDevice
                     EncodedTraceHash = hash;
                     if (firstProbeFrame) LastInjectedHash = hash;
                     totalProcessingMs += duration; processedFrames++; processing.Add(duration); lastFrameAt = Stopwatch.GetTimestamp();
+                    callbackFrames++;
                     OnAudioSourceEncodedSample?.Invoke((uint)frameSamples, encoded);
                 }
             }
             catch (Exception ex) { OnAudioSourceError?.Invoke(ex.Message); }
-            finally { captureWork.Add(Stopwatch.GetElapsedTime(callbackStarted).TotalMilliseconds); }
+            finally
+            {
+                captureWork.Add(Stopwatch.GetElapsedTime(callbackStarted).TotalMilliseconds);
+                if (tracing) pipeline!.Captured(new(callbackStarted / (double)Stopwatch.Frequency,
+                    lockAt, ProbeClock.Now, captured.Length / 2, callbackFrames));
+            }
         }
     }
     private byte[] captureFrameBytes => captureFrames.Bytes;

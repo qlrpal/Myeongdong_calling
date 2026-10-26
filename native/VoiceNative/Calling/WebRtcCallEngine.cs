@@ -180,10 +180,10 @@ public sealed class WebRtcCallEngine : ICallEngine
             microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
             // Short frames can arrive in a single device-period burst. A one-frame
             // asynchronous queue would discard valid siblings before the worker wakes.
-            var sendCapacity = experiment?.DedicatedSend == true
-                ? AudioSendQueue.BurstCapacity(microphone.Snapshot().EnginePeriodMs ?? 10, FrameDurationMs)
-                : experiment?.LatestSend == true ? 1 : 3;
-            sendQueue = new AudioSendQueue(sendCapacity); sendCancellation = new CancellationTokenSource();
+            var dedicatedLimits = experiment?.DedicatedSend == true
+                ? AudioSendQueue.DedicatedLimits(microphone.Snapshot().EnginePeriodMs ?? 10, FrameDurationMs) : default;
+            var sendCapacity = experiment?.DedicatedSend == true ? dedicatedLimits.Capacity : experiment?.LatestSend == true ? 1 : 3;
+            sendQueue = new AudioSendQueue(sendCapacity, experiment?.DedicatedSend == true ? dedicatedLimits.MaximumAgeMs : null); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
             dedicatedSender = experiment?.DedicatedSend == true ? new(activeQueue,
                 frame => DispatchFrame(frame, pipeline.Enabled ? ProbeClock.Now : 0), experiment.CriticalAudioPriority) : null;
