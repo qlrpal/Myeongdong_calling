@@ -33,6 +33,8 @@ internal static class RtpPlayoutChecks
         Check(details.DecodedPackets == 4 && details.PlcFrames == 1 && details.ConcealedMs == 10 && details.DuplicatePackets == 1 && details.LatePackets == 2, "Loss/duplicate/deadline accounting failed.");
         Check(buffer.Snapshot().DecodedMs == 40 && buffer.Snapshot().ConsumedMs == 50, "Decoded and concealed duration must remain separate.");
 
+        CheckDemandBoundedHold(payloads);
+
         // Experimental initial trimming must preserve reserve + current render demand.
         // Default construction keeps the original initial backlog policy.
         using var initialBaseline = new RtpOpusPlayoutBuffer(new(), correctClock: false, adaptiveReserve: false);
@@ -81,7 +83,12 @@ internal static class RtpPlayoutChecks
         Check(legacy.Snapshot().DecodedMs == 40 && legacy.Details().DecodedPackets == 2, "20ms packet compatibility failed.");
         using var malformed = new RtpOpusPlayoutBuffer(new());
         var random = new Random(42);
-        for (var i = 0; i < 500; i++) { var bytes = new byte[random.Next(20)]; random.NextBytes(bytes); malformed.Add(1, (uint)i * 480, bytes); malformed.Read(output); }
+        for (var i = 0; i < 500; i++)
+        {
+            var bytes = new byte[random.Next(20)]; random.NextBytes(bytes);
+            malformed.Add(1, (uint)i * 480, bytes); malformed.Read(output);
+            Check(malformed.Snapshot().QueueMs >= 0, "Malformed input retained a negative PCM length.");
+        }
         Check(malformed.Snapshot().QueueMs <= 120, "Malformed packet backlog exceeded its bound.");
         CheckClockAndSamples(payloads);
         CheckAdaptiveReserve(payloads);
@@ -113,6 +120,29 @@ internal static class RtpPlayoutChecks
             "A held deadline must accept the original packet exactly once instead of advancing and rejecting it.");
         waiting.Suspend(); waiting.Resume();
         Check(waiting.Details().TargetReserveMs == 20 && waiting.Snapshot().QueueMs == 0, "Device reset must clear adaptive waiting state.");
+    }
+    private static void CheckDemandBoundedHold(byte[][] payloads)
+    {
+        foreach(var bounded in new[]{false,true})
+        foreach(var correctClock in new[]{false,true})
+        {
+            using var buffer=new RtpOpusPlayoutBuffer(new(),correctClock:correctClock,adaptiveReserve:false,
+                transientEmptyQueueHold:true,demandBoundedHold:bounded);
+            var half=new byte[480];
+            for(var i=0;i<3;i++)buffer.Add(1,(uint)i*480,payloads[i]);
+            for(var i=0;i<6;i++)buffer.Read(half);
+            buffer.Read(half);
+            Check(buffer.Details().HeldMs==(bounded?5:10),"Short render demand overproduced held PLC");
+            buffer.Add(1,1440,payloads[3]);buffer.Read(half);
+            Check(buffer.Details().DecodedPackets==(bounded?4:3),"Arriving packet waited behind speculative held PLC");
+            Check(buffer.Details().LatePackets==0 && buffer.Details().Rebuffers==0,"Short hold changed deadline/rebuffer behavior");
+        }
+        using var outage=new RtpOpusPlayoutBuffer(new(),correctClock:false,adaptiveReserve:false,transientEmptyQueueHold:true);
+        var output=new byte[480];
+        for(var i=0;i<3;i++)outage.Add(1,(uint)i*480,payloads[i]);
+        for(var i=0;i<40;i++)outage.Read(output);
+        Check(outage.Details() is {HeldMs:10,ConcealedMs:60,Rebuffers:1},"Split holds extended the existing outage budget");
+        Console.WriteLine("PASS: demand-sized hold submits arriving RTP 5ms earlier on a 5ms pull without extending the hold/outage budget.");
     }
     private static void CheckClockAndSamples(byte[][] payloads)
     {

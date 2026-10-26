@@ -15,7 +15,7 @@ public sealed record EncoderDiagnostics(string Profile, string Application, int?
 internal sealed class OpusAudioEncoder : IAudioEncoder, IDisposable
 {
     public const OpusProfile DefaultProfile = OpusProfile.LowDelay64;
-    private readonly AudioEncoder baseline = new(includeOpus: true);
+    private readonly AudioEncoder baseline;
     private readonly IOpusEncoder? configured;
     private readonly byte[] packet = new byte[1275];
     private readonly EncoderDiagnostics diagnostics;
@@ -28,6 +28,8 @@ internal sealed class OpusAudioEncoder : IAudioEncoder, IDisposable
     public List<AudioFormat> SupportedFormats => experiment is not null ? [ExperimentFormat(experiment)] : baseline.SupportedFormats;
     public OpusAudioEncoder(OpusProfile profile, LatencyExperiment? experiment = null)
     {
+        _ = OpusBackend.Snapshot();
+        baseline = new(includeOpus: true);
         experiment?.Validate(); this.experiment = experiment; pcmTransport = experiment?.Pcm == true;
         if (!Enum.IsDefined(profile)) { baseline.Dispose(); throw new ArgumentOutOfRangeException(nameof(profile)); }
         Profile = profile;

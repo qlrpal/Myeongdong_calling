@@ -30,7 +30,7 @@ public sealed record PeerDiagnostics(string Id, string Name, string State, strin
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,
     double? RemoteLossPercent, double? RemoteReportAgeSeconds, AudioDiagnostics Audio, NetworkPrecision? Precision = null, LatencyView? Latency = null,
     string? CandidateTransport = null, string? LocalAddressFamily = null, string? RemoteAddressFamily = null,
-    string[]? CollectedAddressFamilies = null);
+    string[]? CollectedAddressFamilies = null, string? SrtpCipher = null);
 public sealed record CallDiagnostics(DateTimeOffset Timestamp, bool InCall, AudioDiagnostics? Microphone, PeerDiagnostics[] Peers, double MonotonicSeconds = 0, SendDiagnostics? Sender = null, AcousticLatencyResult? Acoustic = null, double FrameMs = 20, EncoderDiagnostics? Encoder = null, string PlaybackPolicy = "Compatible", string? MediaAddress = null, LatencyExperiment? Experiment = null, FrameAdaptationDiagnostics? FrameAdaptation = null);
 
 internal sealed class PeerMetrics

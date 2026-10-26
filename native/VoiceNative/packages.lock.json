@@ -14,6 +14,21 @@
         "resolved": "2.2.2",
         "contentHash": "2B9YmHPKO+k7YpAAnqmiXwiMJnfjfj1C868RszOll2iZWLnGTAiC1q21L/d7CvTan7T+hyqU8dR0Dcy3cpjVfQ=="
       },
+      "Concentus.Native": {
+        "type": "Direct",
+        "requested": "[1.5.2, )",
+        "resolved": "1.5.2",
+        "contentHash": "Vv5JirlvJpHxsF16yP3sB3EUUxsgWRJTqTQ219WDo+NEjkwI8AvYpJD3TxGE4kJsswE/hqQRJJuIIOIcKcMflg==",
+        "dependencies": {
+          "Concentus.Native.NetCore": "1.5.1"
+        }
+      },
+      "Concentus.Native.NetCore": {
+        "type": "Direct",
+        "requested": "[1.5.2, )",
+        "resolved": "1.5.2",
+        "contentHash": "ry9TdS2Su3dOtWalTT6d0aJyx3NPQ/NjisotmAKxmgPdnhYpymZeZHZz4WnRA5Vw71yUnhj1lHqPQP71O5hHTg=="
+      },
       "DnsClient": {
         "type": "Direct",
         "requested": "[1.8.0, )",

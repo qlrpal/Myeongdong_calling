@@ -2,6 +2,8 @@
 
 브랜치: `codex/extreme-latency`. Windows WASAPI 공유 모드에서 짧은 패킷과 제한된 재생 여유를 비교한다. 기본 실행과 배포용 dist는 유지한다.
 
+여기서 `baseline`은 프레임·재생 정책의 기본 구성을 뜻한다. 현재 소스는 모든 모드에서 [네이티브 Opus 우선 백엔드](NATIVE-OPUS.md)를 사용한다. 과거 관리형 코덱의 CPU·할당을 재현할 때는 실행 전에 `VOICE_OPUS_BACKEND=managed`를 명시하고 실제 보고서의 백엔드를 확인한다.
+
 ## 모드 선택 기준 · 2026-10-25
 
 | 구분 | 모드 | 사용 범위 |

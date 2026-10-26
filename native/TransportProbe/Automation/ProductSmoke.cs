@@ -71,7 +71,7 @@ internal static class ProductSmoke
         finally { await session.DisconnectAsync(); }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
         string[] captured; lock (sync) captured = events.ToArray();
-        await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { role, error, osMediaPorts, samples, events = captured,
+        await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { role, error, osMediaPorts, sdkBuild=SdkBuildIdentity.Read(), opusBackend=OpusBackend.Snapshot(), samples, events = captured,
             muteLevels, activeLevels, failureDiagnostics, sdkIceLog = sdkLog.Snapshot(),
             sdkReceiveDiagnostics = SdkReceiveDiagnostics.Snapshot(),
             notes = "Real shared capture/render and TURN using synthetic speech. Explicit endpoint selection, local PCM mute/unmute, peer gain control, full-room recovery and leave. No physical or subjective audio quality claim." }, DiagnosticJson.Readable));

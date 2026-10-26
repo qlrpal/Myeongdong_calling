@@ -8,7 +8,7 @@ internal static class PlayoutReplay
 {
     private sealed record Event(double At, int Index, bool Read);
     private sealed record Mode(string Name, bool Fixed, bool Adaptive, bool TransientHold = false, bool FreshRestart = false, bool FreshInitialStart = false, int ReserveMs = 20, bool Responsive = false, int RecoveryReserveMs = 0, bool Contiguous = false, bool Repeated = false);
-    private sealed record Point(double At, double QueueMs, long Plc, long Late, long Rebuffers, double UnderfillMs);
+    private sealed record Point(double At, double QueueMs, double Plc, long Late, long Rebuffers, double UnderfillMs);
     private static object Summary(IEnumerable<double> values)
     {
         var sorted = values.Order().ToArray();
@@ -78,7 +78,7 @@ internal static class PlayoutReplay
                 {
                     buffer.Read(destination.AsSpan(0, trace.Reads[e.Index].RequestedSamples * 2));
                     var state = buffer.Snapshot(); var detail = buffer.Details();
-                    points.Add(new(e.At, state.QueueMs, detail.PlcFrames, detail.LatePackets, detail.Rebuffers, state.UnderfillMs));
+                    points.Add(new(e.At, state.QueueMs, detail.ConcealedMs, detail.LatePackets, detail.Rebuffers, state.UnderfillMs));
                     readTimes.Add(e.At);
                 }
             }
@@ -103,7 +103,7 @@ internal static class PlayoutReplay
                 windows.Add(new { trimSeconds = trim, durationSeconds = last.At - first.At,
                     queueAfterReadMs = Summary(selected.Select(p => p.QueueMs)),
                     admissionToDecodeRenderMs = Summary(delays.Where(p => p.Arrived >= low && p.Arrived <= high).Select(p => p.Delay)),
-                    plcMs = (last.Plc - first.Plc) * 10, latePackets = last.Late - first.Late,
+                    plcMs = last.Plc - first.Plc, latePackets = last.Late - first.Late,
                     rebuffers = last.Rebuffers - first.Rebuffers, underfillMs = last.UnderfillMs - first.UnderfillMs });
             }
             var startupPoints = points.Where(p => p.At < events[0].At + 5).ToArray();
@@ -111,7 +111,7 @@ internal static class PlayoutReplay
                 queueAfterReadMs = Summary(startupPoints.Select(p => p.QueueMs)),
                 admissionToDecodeRenderMs = Summary(delays.Where(p => p.Arrived < events[0].At + 5).Select(p => p.Delay)),
                 underfillMs = startupPoints.LastOrDefault()?.UnderfillMs,
-                plcMs = (startupPoints.LastOrDefault()?.Plc ?? 0) * 10,
+                plcMs = startupPoints.LastOrDefault()?.Plc ?? 0,
                 rebuffers = startupPoints.LastOrDefault()?.Rebuffers ?? 0
             };
             var final = buffer.Snapshot();

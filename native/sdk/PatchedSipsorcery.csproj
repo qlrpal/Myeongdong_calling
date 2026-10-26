@@ -5,7 +5,7 @@
     <RootNamespace>SIPSorcery</RootNamespace>
     <Version>10.0.17</Version>
     <AssemblyVersion>10.0.17.0</AssemblyVersion>
-    <InformationalVersion>10.0.17+myeongdong.1</InformationalVersion>
+    <InformationalVersion>10.0.17+myeongdong.2</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <LangVersion>14.0</LangVersion>
     <Nullable>disable</Nullable>

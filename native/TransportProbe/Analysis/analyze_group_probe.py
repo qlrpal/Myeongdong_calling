@@ -54,11 +54,19 @@ def analyze(report):
         tx,rx=delta(["TxFrames"]),delta(["RxPackets"])
         decoded=delta(["Audio","RtpPlayout","DecodedMs"]) if "DecodedMs" in last["Audio"]["RtpPlayout"] else delta(["Audio","DecodedMs"])
         if min(tx,rx,decoded)<=0:raise ValueError("Missing bidirectional decoded media")
+        plc=delta(["Audio","RtpPlayout","ConcealedMs"])
+        def optional_playout(key):
+            if key not in first["Audio"]["RtpPlayout"] or key not in last["Audio"]["RtpPlayout"]:return None
+            return delta(["Audio","RtpPlayout",key])
+        held=optional_playout("HeldMs")
+        if held is not None and held>plc+1e-6:raise ValueError("PLC hold exceeds total concealment")
         rows.append(dict(phase=phase,slot=slot,peer=last["Name"],sameHost=last["Name"].startswith("group-"+report["role"]+"-"),
             seconds=duration,txFrames=tx,rxPackets=rx,
             queueMedianMs=percentile((p["Audio"]["QueueMs"] for _,p in chosen),.5),
             queueP95Ms=percentile((p["Audio"]["QueueMs"] for _,p in chosen),.95),
-            plcMs=delta(["Audio","RtpPlayout","ConcealedMs"]),underfillMs=delta(["Audio","UnderfillMs"]),
+            plcMs=plc,plcHoldMs=held,plcAdvanceMs=max(0,plc-held) if held is not None else None,
+            latePackets=optional_playout("LatePackets"),duplicatePackets=optional_playout("DuplicatePackets"),rebuffers=optional_playout("Rebuffers"),
+            underfillMs=delta(["Audio","UnderfillMs"]),
             discardMs=delta(["Audio","RtpPlayout","RecoveryDiscardedMs"])))
     source_rows=[]
     for (phase,slot),calls in sources.items():
@@ -71,10 +79,12 @@ def analyze(report):
         soak=[r for r in rows if r["phase"]=="soak-six"]
         if not soak or min(r["seconds"] for r in soak)<report.get("soakSeconds",600)-30:raise ValueError("Six-peer soak too short")
     return dict(role=report["role"],quick=report.get("quick",False),cleanupOk=True,streams=rows,sources=source_rows,
+        sdkBuild=report.get("sdkBuild"),
         phaseResources=report.get("phaseResources"),resources=report["resources"],
         traceEvicted={k:v["EvictedRecords"] for k,v in report.get("traces",{}).items()},
         limits="Per-peer counters after 10s warmup, receiver-local duration only. Same-host streams bypass the LAN. "
-        "Source maxima are cumulative since join, not isolated phase maxima. Probe process CPU includes all local clients but excludes audiodg.exe, kernel/driver and other-process CPU. "
+        "Source maxima are cumulative since join, not isolated phase maxima. Probe process CPU includes all local clients and charged user/kernel time, but excludes audiodg.exe, other processes and uncharged system/driver work. "
+        "PLC hold repeats without advancing RTP; advance PLC reflects a playout deadline decision, not proof of physical packet loss. "
         "Retained diagnostics affect memory; before/after private bytes are not a leak verdict. No physical mouth-to-ear claim.")
 
 
@@ -83,6 +93,8 @@ def compare_groups(left,right):
     analyze(left);analyze(right)
     if {left["role"],right["role"]}!={"pc","laptop"} or left["engineBuild"]!=right["engineBuild"]:
         raise ValueError("Matching builds on distinct host roles are required")
+    if left.get("sdkBuild")!=right.get("sdkBuild"):
+        raise ValueError("Matching SDK identities are required; do not mix original and patched runtimes")
     traces={int(k):v for report in (left,right) for k,v in report.get("traces",{}).items()}
     if set(traces)!=set(range(6)):raise ValueError("Six participant traces required")
     rows=[]
@@ -101,7 +113,7 @@ def self_test():
         for i in range(n-1):
             peers.append(dict(Id=str(i),Name="group-laptop-"+str(i),State="connected",TxFrames=at+1,RxPackets=at+1,
                 Audio=dict(DeviceError=None,QueueMs=5,DecodedMs=at+1,UnderfillMs=0,
-                    RtpPlayout=dict(InvalidPackets=0,ConcealedMs=0,RecoveryDiscardedMs=0))))
+                    RtpPlayout=dict(InvalidPackets=0,ConcealedMs=0,HeldMs=0,RecoveryDiscardedMs=0))))
         return dict(InCall=True,MonotonicSeconds=at,Peers=peers,FrameMs=2.5,
                     Microphone=dict(ProcessingP95Ms=.2),Sender=dict(MaxWaitMs=.1,DroppedFrames=0))
     r=dict(role="pc",quick=True,error=None,failures=[],cleanupOk=True,resources={},
@@ -109,6 +121,23 @@ def self_test():
         samples=[dict(Phase=p,Slot=slot,Call=call(at,n)) for p,n in [("three",3),("six",6)] for slot in ([0] if p=="three" else [0,1,2]) for at in (0,11,12)])
     result=analyze(r)
     assert len(result["streams"])==17 and all(s["queueMedianMs"]==5 for s in result["streams"])
+    assert all(s["plcHoldMs"]==0 and s["plcAdvanceMs"]==0 for s in result["streams"])
+    import copy
+    split=copy.deepcopy(r)
+    for sample in split["samples"]:
+        at=sample["Call"]["MonotonicSeconds"]
+        for peer in sample["Call"]["Peers"]:
+            peer["Audio"]["RtpPlayout"].update(ConcealedMs=at*3,HeldMs=at)
+    assert all(s["plcHoldMs"]==1 and s["plcAdvanceMs"]==2 for s in analyze(split)["streams"])
+    legacy=copy.deepcopy(split)
+    for sample in legacy["samples"]:
+        for peer in sample["Call"]["Peers"]:del peer["Audio"]["RtpPlayout"]["HeldMs"]
+    assert all(s["plcHoldMs"] is None and s["plcAdvanceMs"] is None for s in analyze(legacy)["streams"])
+    for sample in split["samples"]:
+        for peer in sample["Call"]["Peers"]:peer["Audio"]["RtpPlayout"]["HeldMs"]*=4
+    try:analyze(split)
+    except ValueError:pass
+    else:raise AssertionError("Concealment decomposition accepted impossible hold")
     try:analyze({**r,"cleanupOk":False})
     except ValueError:pass
     else:raise AssertionError("Cleanup failure accepted")

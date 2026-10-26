@@ -2,6 +2,9 @@ using VoiceNative;
 
 try
 {
+    _ = OpusBackend.Snapshot();
+    if (args is ["--srtp-protection-checks",var srtpReuseReport])
+    { SrtpProtectionChecks.Run(srtpReuseReport); return; }
     if (args is ["--sdk-build-check"])
     {
         var sdk=SdkBuildIdentity.Read();
@@ -14,6 +17,10 @@ try
         await SdkReceiveRaceProbe.RunAsync(longRaceReport,longRaceAddress,int.Parse(longRaceCount,System.Globalization.CultureInfo.InvariantCulture));
     else if (args is ["--sdk-receive-race", var raceReport, var raceAddress])
         await SdkReceiveRaceProbe.RunAsync(raceReport,raceAddress);
+    else if (args is ["--two-host-group-soak", var autoSoakServer, var autoSoakRoom, var autoSoakReport, var autoSoakRole, var autoSoakWave, var autoSoakEpoch])
+        await TwoHostGroupProbe.RunAsync(autoSoakServer, autoSoakRoom, autoSoakReport, autoSoakRole, autoSoakWave, long.Parse(autoSoakEpoch, System.Globalization.CultureInfo.InvariantCulture), soakOnly: true);
+    else if (args is ["--two-host-group-boundary", var automaticServer, var automaticRoom, var automaticReport, var automaticRole, var automaticWave, var automaticEpoch])
+        await TwoHostGroupProbe.RunAsync(automaticServer, automaticRoom, automaticReport, automaticRole, automaticWave, long.Parse(automaticEpoch, System.Globalization.CultureInfo.InvariantCulture), soakOnly: true, soakSeconds: 90);
     else if (args is ["--two-host-group-boundary-pinned", var boundaryServer, var boundaryRoom, var boundaryReport, var boundaryRole, var boundaryWave, var boundaryEpoch, var boundaryAddress])
         await TwoHostGroupProbe.RunAsync(boundaryServer, boundaryRoom, boundaryReport, boundaryRole, boundaryWave, long.Parse(boundaryEpoch, System.Globalization.CultureInfo.InvariantCulture), false, boundaryAddress, true, 90);
     else if (args is ["--two-host-group-quick-pinned", var groupPinServer, var groupPinRoom, var groupPinReport, var groupPinRole, var groupPinWave, var groupPinEpoch, var groupPinAddress])

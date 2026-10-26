@@ -327,6 +327,8 @@ public sealed partial class CallForm : Form
         schemaVersion = 2,
         generatedAt = DateTimeOffset.Now,
         applicationVersion = typeof(CallForm).Assembly.GetName().Version?.ToString(),
+        sdkBuild = SdkBuildIdentity.Read(),
+        opusBackend = OpusBackend.Snapshot(),
         os = Environment.OSVersion.ToString(),
         notes = ReportNotes,
         interfaces = NetworkInterface.GetAllNetworkInterfaces().Select(a => new { name = a.Name, status = a.OperationalStatus.ToString(), addresses = a.GetIPProperties().UnicastAddresses.Select(x => x.Address.ToString()).ToArray() }).ToArray(),

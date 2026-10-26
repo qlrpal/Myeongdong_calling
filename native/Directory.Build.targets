@@ -8,6 +8,8 @@
       <Private>true</Private>
     </Reference>
     <Content Include="$(PatchedSdkRoot)/SIPSorcery.LICENSE.md" Link="SIPSorcery.LICENSE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Keep the attested SDK bytes; optional R2R still compiles the other assemblies. -->
+    <PublishReadyToRunExclude Include="SIPSorcery.dll" />
   </ItemGroup>
   <Target Name="PreparePatchedSdk" BeforeTargets="ResolveAssemblyReferences;ComputeFilesToPublish" Condition="'$(PatchedSdkRoot)' != '' And '$(DesignTimeBuild)' != 'true'">
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)sdk/build.ps1&quot;" StdOutEncoding="UTF-8" StdErrEncoding="UTF-8" />

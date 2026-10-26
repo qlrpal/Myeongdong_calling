@@ -654,7 +654,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                 nominated is null ? null : FormatEndpoint(nominated.RemoteCandidate),
                 sample.Tx, sample.Rx, sample.TxKbps, sample.RxKbps, sample.Jitter, detail.SendLossPercent, detail.SendReportAgeSeconds, audio, detail, view,
                 nominated?.LocalCandidate.protocol.ToString(), nominated is null ? null : AddressFamily(nominated.LocalCandidate.address),
-                nominated is null ? null : AddressFamily(nominated.RemoteCandidate.address), peer.CandidateFamilies.Keys.Order().ToArray());
+                nominated is null ? null : AddressFamily(nominated.RemoteCandidate.address), peer.CandidateFamilies.Keys.Order().ToArray(), peer.Connection.MyeongdongSrtpCipherName);
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
             System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, FrameDurationMs, encoder?.Snapshot(),

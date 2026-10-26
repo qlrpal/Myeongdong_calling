@@ -48,6 +48,7 @@ internal static class AudioHotpathBenchmark
         var senderBytes = (GC.GetAllocatedBytesForCurrentThread() - before) / 10000.0;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         File.WriteAllText(output, JsonSerializer.Serialize(new { build = typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            opusBackend = OpusBackend.Snapshot(),
             runtime = Environment.Version.ToString(), senderMetadataBytesPerPacket = senderBytes, results,
             note = "Synthetic warmed synchronous buffer and sender metadata microbenchmark; excludes encoder, transport, device, scheduling and physical latency. Stopwatch overhead retained; no general tail-latency guarantee." }, DiagnosticJson.Readable));
         Console.WriteLine($"PASS: hot-path continuity and allocation benchmark: {output}");

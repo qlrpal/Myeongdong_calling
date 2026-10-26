@@ -10,6 +10,8 @@ internal static class ProductChecks
     {
         Require(SdkBuildIdentity.Read().ProductionPatched,"Default product runtime must load the patched SDK");
         TurnSignalingLogChecks.Run();
+        OpusBackendChecks.Run();
+        SrtpProtectionChecks.Run(Path.Combine(directory,"srtp-protection.json"));
         MediaPortHistoryChecks.Run();
         await AudioSendLifetimeChecks.RunAsync();
         PacketStorageChecks.Run();

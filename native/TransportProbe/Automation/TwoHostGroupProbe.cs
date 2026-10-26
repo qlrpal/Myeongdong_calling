@@ -18,6 +18,8 @@ internal static class TwoHostGroupProbe
     {
         if (soakSeconds is not (90 or 600)) throw new ArgumentException("Boundary/soak duration must be 90/600s");
         if (role is not ("pc" or "laptop")) throw new ArgumentException("Expected pc/laptop role");
+        using var sdkLog = new TurnSignalingLog();
+        SIPSorcery.LogFactory.Set(sdkLog);
         var start = DateTimeOffset.FromUnixTimeSeconds(epoch);
         if (start - DateTimeOffset.UtcNow > TimeSpan.FromSeconds(120) || start < DateTimeOffset.UtcNow.AddSeconds(-5))
             throw new ArgumentException("Start must be within the next 120s");
@@ -65,7 +67,7 @@ internal static class TwoHostGroupProbe
                 engine.SetMediaInterface(mediaAddress);
                 engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency);
                 engine.SetLatencyExperiment(LatencyExperiment.FromName("opus-auto-frames"));
-                engine.Status += line => { lock(sync) events.Add($"{slot}: {line}"); };
+                engine.Status += line => { lock(sync) events.Add($"{elapsed.Elapsed.TotalSeconds:F3}s {slot}: {line}"); };
                 engines.Add(slot,engine);
             }
             if (start > DateTimeOffset.UtcNow) await Task.Delay(start-DateTimeOffset.UtcNow);
@@ -73,6 +75,7 @@ internal static class TwoHostGroupProbe
             var phases = quick ? new[] { new Phase("three", 60, [0,3,4]), new Phase("six", 90, [0,1,2,3,4,5]) } : soakOnly ? new[] { new Phase("soak-six", soakSeconds, [0,1,2,3,4,5]) } : Phases;
             foreach (var phase in phases)
             {
+                sdkLog.Phase = phase.Name;
                 var deadline = phaseStart.AddSeconds(phase.Seconds);
                 foreach (var slot in slots.Where(s=>!phase.Members.Contains(s))) await Leave(slot);
                 if (phase.Name == "reconnect")
@@ -89,6 +92,8 @@ internal static class TwoHostGroupProbe
                 process.Refresh(); var phaseCpu = process.TotalProcessorTime;
                 var phaseWatch = Stopwatch.StartNew();
                 var collections = new[] { GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2) };
+                var allocatedBefore = GC.GetTotalAllocatedBytes();
+                var pauseBefore = GC.GetTotalPauseDuration();
                 var traced = false; var nextProgress = DateTimeOffset.UtcNow.AddSeconds(30);
                 while (DateTimeOffset.UtcNow < deadline.AddSeconds(-5))
                 {
@@ -116,6 +121,8 @@ internal static class TwoHostGroupProbe
                 phaseResources.Add(new { phase.Name, seconds=phaseWatch.Elapsed.TotalSeconds,
                     cpuCores=(process.TotalProcessorTime-phaseCpu).TotalSeconds/phaseWatch.Elapsed.TotalSeconds,
                     memoryBytes=process.PrivateMemorySize64,handles=process.HandleCount,threads=process.Threads.Count,
+                    allocatedBytes=GC.GetTotalAllocatedBytes()-allocatedBefore,
+                    gcPauseMs=(GC.GetTotalPauseDuration()-pauseBefore).TotalMilliseconds,
                     gcCollections=new[] {GC.CollectionCount(0)-collections[0],GC.CollectionCount(1)-collections[1],GC.CollectionCount(2)-collections[2]} });
                 if (traced) foreach(var pair in engines) traces[pair.Key]=pair.Value.StopPipelineTrace();
                 if (deadline>DateTimeOffset.UtcNow) await Task.Delay(deadline-DateTimeOffset.UtcNow);
@@ -137,6 +144,8 @@ internal static class TwoHostGroupProbe
         string[] logged;lock(sync) logged=events.ToArray();
         await File.WriteAllTextAsync(report,JsonSerializer.Serialize(new {
             role,epoch,quick,soakOnly,soakSeconds,mediaAddress,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            sdkBuild=SdkBuildIdentity.Read(),sdkIceLog=sdkLog.Snapshot(),
+            opusBackend=OpusBackend.Snapshot(),
             sdkReceiveDiagnostics=SdkReceiveDiagnostics.Snapshot(),
             error,failures,cleanupOk,membership,phaseResources,samples,traces,events=logged,
             resources=new {cpuCores=(process.TotalProcessorTime-cpuStart).TotalSeconds/elapsed.Elapsed.TotalSeconds,

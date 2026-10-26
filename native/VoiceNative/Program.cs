@@ -10,6 +10,12 @@ internal static class Program
             File.WriteAllText(sdkInfoPath,System.Text.Json.JsonSerializer.Serialize(SdkBuildIdentity.Read(),DiagnosticJson.Readable));
             return;
         }
+        if(args is ["--codec-build-info",var codecInfoPath])
+        {
+            File.WriteAllText(codecInfoPath,System.Text.Json.JsonSerializer.Serialize(OpusBackend.Snapshot(),DiagnosticJson.Readable));
+            return;
+        }
+        _ = OpusBackend.Snapshot();
         ApplicationConfiguration.Initialize();
         if (args is ["--ui-preview-small", var smallPath])
         {

@@ -34,16 +34,17 @@ internal static class PlayoutTargetChecks
         var payload = encoder.EncodeAudio(new short[480], format);
         CheckTransientHold(payload);
         var results = new List<object>();
-        foreach (var readMs in new[] { 5, 10, 20, 40 })
+        foreach (var readSamples in new[] { 240, 480, 488, 960, 1920 })
         foreach (var phaseMs in new[] { 0, 3, 7 })
         foreach (var pauseMs in new[] { 0, 30 })
         foreach (var driftPpm in new[] { -200, 0, 200 })
-        foreach (var (fixedTarget, transientHold) in new[] { (false, false), (true, false), (true, true) })
+        foreach (var (fixedTarget, transientHold, demandBoundedHold) in new[] { (false, false, true), (true, false, true), (true, true, false), (true, true, true) })
         {
-            using var buffer = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false, fixedReserveClockTarget: fixedTarget, transientEmptyQueueHold: transientHold);
-            var output = new byte[readMs * 96];
+            using var buffer = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false, fixedReserveClockTarget: fixedTarget, transientEmptyQueueHold: transientHold, demandBoundedHold: demandBoundedHold);
+            var readMs = readSamples / 48.0;
+            var output = new byte[readSamples * 2];
             var next = 0; var queues = new List<double>();
-            for (var now = 0; now < 60000; now += readMs)
+            for (var now = 0.0; now < 60000; now += readMs)
             {
                 while (next < 6010)
                 {
@@ -61,12 +62,12 @@ internal static class PlayoutTargetChecks
                 throw new InvalidOperationException("Target comparison bounds/progress failed.");
             if (pauseMs == 0 && (detail.PlcFrames != 0 || state.Underruns != 0))
                 throw new InvalidOperationException("Regular source must remain lossless in either target mode.");
-            results.Add(new { readMs, phaseMs, pauseMs, driftPpm, fixedTarget, transientHold, meanQueueLast30SecondsMs = queues.Average(),
+            results.Add(new { readMs, phaseMs, pauseMs, driftPpm, fixedTarget, transientHold, demandBoundedHold, meanQueueLast30SecondsMs = queues.Average(),
                 state.Trims, state.Underruns, state.UnderfillMs, state.MaxUnderfillMs, detail });
         }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         File.WriteAllText(path, JsonSerializer.Serialize(new { notes = "Deterministic 60s simulation per case; identical arrivals in both modes. Not physical latency or an audio quality test.", results }, DiagnosticJson.Readable));
-        Console.WriteLine("PASS: 72 matched target/hold/phase/render-period/stall/drift comparisons; regular sources remain lossless.");
+        Console.WriteLine($"PASS: {results.Count} matched target/hold/phase/render-period/stall/drift comparisons; regular sources remain lossless.");
     }
 
     private static void CheckTransientHold(byte[] payload)

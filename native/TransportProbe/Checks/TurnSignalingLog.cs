@@ -7,7 +7,8 @@ internal sealed class TurnSignalingLog : ILoggerFactory
     private sealed record Entry(double At, string Phase, string Category, string Level,
         string Template, Dictionary<string, string?> Values);
     private static readonly HashSet<string> Allowed = new(StringComparer.Ordinal)
-    { "ErrorCode", "ErrorResponseCount", "RequestsSent", "SocketErrorCode", "SendResult", "Type", "MessageType", "CandidateCount", "Method", "RTPLocalEndPoint", "LocalEndPoint" };
+    { "ErrorCode", "ErrorResponseCount", "RequestsSent", "SocketErrorCode", "SendResult", "Type", "MessageType", "CandidateCount", "Method", "RTPLocalEndPoint", "LocalEndPoint",
+      "RemoteEndPoint", "LocalCandidate", "RemoteCandidate", "OldCandidate", "NewCandidate", "Duration" };
     private readonly object sync = new();
     private readonly Queue<Entry> entries = new();
     private string phase = "initial";

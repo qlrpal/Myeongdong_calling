@@ -19,6 +19,8 @@ git pull --ff-only origin codex/extreme-latency
 
 일반 빌드는 수정 SDK를 자동으로 구성한다. `native/Directory.Build.targets`, `native/sdk/`의 빌드·패치 조각·공유 의존성·잠금 파일을 함께 받아야 한다. 첫 빌드의 상류 소스 다운로드 약142MiB 이후에는 캐시를 재사용한다. [SDK 빌드와 실행 식별](SDK-BUILD.md)을 참고한다.
 
+`native/NativeOpus.props`와 갱신된 앱/프로브 잠금 파일도 포함한다. 네이티브 자산은 NuGet으로 복원하며 Git에 DLL을 넣지 않는다. 실행 출력과 publish 폴더 전체에 플랫폼 자산과 `Opus.LICENSE.txt`를 유지한다. [네이티브 Opus 안내](NATIVE-OPUS.md).
+
 ## 반영 범위
 
 | 경로 | 내용 |

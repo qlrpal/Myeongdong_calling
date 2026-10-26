@@ -31,7 +31,9 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private const int RecoveryPressureEpisodes = 3;
     private const int RecoveryPressureWindowSamples = 3 * 48000;
     private readonly object sync = new();
-    private readonly IOpusDecoder decoder = OpusCodecFactory.CreateDecoder(48000, 1);
+    private readonly IOpusDecoder decoder = CreateDecoder();
+    private static IOpusDecoder CreateDecoder()
+    { _ = OpusBackend.Snapshot(); return OpusCodecFactory.CreateDecoder(48000, 1); }
     // At most 120 one-ms packets plus the candidate before backlog trimming.
     // A small ordered array avoids a tree-node allocation for every packet.
     private readonly SortedList<long, Packet> packets = new(MaximumSamples / 48 + 1);
@@ -79,6 +81,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     private double? queueAfterRead;
     private readonly PlayoutClockController clock;
     private readonly bool transientEmptyQueueHold;
+    private readonly bool demandBoundedHold;
     private readonly bool freshRestart;
     private readonly bool freshInitialStart;
     private readonly bool contiguousRestart;
@@ -124,7 +127,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     public WaveFormat WaveFormat { get; } = new(48000, 16, 1);
     public Action<string, double, bool>? OnFrameSubmitted { get; set; }
 
-    public RtpOpusPlayoutBuffer(AudioFrameTimeline timeline, int targetReserveMs = 20, bool correctClock = true, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool freshInitialStart = false, bool contiguousRestart = false, bool boundedRestartWait = false, bool responsiveReserve = false, int recoveryReserveMs = 0, bool repeatedGapRecovery = false, LatencyExperiment? experiment = null, ArrayPool<byte>? packetPool = null)
+    public RtpOpusPlayoutBuffer(AudioFrameTimeline timeline, int targetReserveMs = 20, bool correctClock = true, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool freshInitialStart = false, bool contiguousRestart = false, bool boundedRestartWait = false, bool responsiveReserve = false, int recoveryReserveMs = 0, bool repeatedGapRecovery = false, LatencyExperiment? experiment = null, ArrayPool<byte>? packetPool = null, bool demandBoundedHold = true)
     {
         this.packetPool = packetPool ?? ArrayPool<byte>.Shared;
         if (targetReserveMs is < 10 or > 40) { decoder.Dispose(); throw new ArgumentOutOfRangeException(nameof(targetReserveMs)); }
@@ -145,6 +148,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         clock = new(reserveSamples, correctClock, fixedReserveClockTarget, responsiveReserve, experiment?.FineClock == true);
         clockEstimator = experiment?.FineClock == true ? new() : null;
         this.transientEmptyQueueHold = transientEmptyQueueHold;
+        this.demandBoundedHold = demandBoundedHold;
         this.freshRestart = freshRestart;
         this.freshInitialStart = freshInitialStart;
         this.contiguousRestart = contiguousRestart;
@@ -388,7 +392,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         var available = true;
                         while (phase >= 1)
                         {
-                            if (pcmOffset == pcmCount && !PreparePcm()) { available = false; break; }
+                            if (pcmOffset == pcmCount && !PreparePcm((destination.Length - filled) / 2)) { available = false; break; }
                             if (pcmHash is not null || pcmTrace is not null) SubmitFrame();
                             previousSample = currentSample; currentSample = pcm[pcmOffset++];
                             consumedSamples++; phase -= 1;
@@ -400,7 +404,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                         phase += clock.Rate;
                         continue;
                     }
-                    if (pcmOffset == pcmCount && !PreparePcm()) break;
+                    if (pcmOffset == pcmCount && !PreparePcm((destination.Length - filled) / 2)) break;
                     if (pcmHash is not null || pcmTrace is not null) SubmitFrame();
                     var take = Math.Min(pcmCount - pcmOffset, (destination.Length - filled) / 2);
                     for (var i = 0; i < take; i++)
@@ -463,7 +467,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
             Math.Max(configuredBacklogSamples, recentReadSamples + Math.Max(recentReadSamples, recentBurstSamples) + PhaseReserveSamples + Math.Max(quantumSamples, latestRemoteSamples)));
     }
 
-    private bool PreparePcm()
+    private bool PreparePcm(int requestedSamples)
     {
         pcmOffset = pcmCount = 0;
         var packetIndex = packets.IndexOfKey(expectedTimestamp);
@@ -481,11 +485,16 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                     pcmCount = packet.Samples;
                     for (var i = 0; i < pcmCount; i++) pcm[i] = BinaryPrimitives.ReadInt16BigEndian(packet.Payload.AsSpan(i * 2, 2));
                 }
-                else pcmCount = decoder.Decode(packet.Payload.AsSpan(0, packet.Length), pcm, pcm.Length, false);
-                if (pcmCount != packet.Samples) throw new ArgumentException("Unexpected decoded packet duration.");
+                else
+                {
+                    var decoded = decoder.Decode(packet.Payload.AsSpan(0, packet.Length), pcm, pcm.Length, false);
+                    if (decoded != packet.Samples) throw new ArgumentException("Unexpected decoded packet duration.");
+                    pcmCount = decoded;
+                }
             }
             catch (Exception error) when (error is OpusException or ArgumentException)
             {
+                pcmCount = pcmOffset = 0;
                 invalid++;
                 if (packet.Hash is { } badHash) OnFrameSubmitted?.Invoke(badHash, ProbeClock.Now, true);
                 if (pipeline?.Enabled == true) pipeline.Played(new(tracePeer, source ?? 0, packetTimestamp,
@@ -514,12 +523,17 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         // Future queued packets still reveal actual gaps and advance normal PLC.
         if (packets.Count == 0 && missingSamples + quantumSamples <= emptyHoldSamples)
             return Conceal(advanceTimestamp: false);
-        // Diagnostic candidate: one 10ms hold at the start of an empty-queue
-        // episode, without permanently raising the target. Future packets already
-        // queued imply a real RTP gap, so those still advance ordinary PLC.
-        // missingSamples includes this hold, preserving the total 60ms bound.
-        if (transientEmptyQueueHold && packets.Count == 0 && missingSamples == 0)
-            return Conceal(advanceTimestamp: false);
+        // Keep the same one-quantum hold budget, but do not synthesize a full
+        // 10ms frame for a 5ms device demand. A packet arriving before the next
+        // pull can then play immediately instead of waiting behind unused PLC.
+        // Opus PLC accepts 2.5ms units. Future queued packets still advance loss.
+        if (transientEmptyQueueHold && packets.Count == 0 && missingSamples < quantumSamples)
+        {
+            var holdSamples = demandBoundedHold
+                ? Math.Min(quantumSamples - missingSamples, Math.Max(120, (requestedSamples + 119) / 120 * 120))
+                : quantumSamples;
+            return Conceal(advanceTimestamp: false, samples: holdSamples);
+        }
         if (packets.Count == 0 && adaptive.TryHold(quantumSamples))
         {
             clock.SetReserve(PhaseReserveSamples);
@@ -528,15 +542,25 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         return Conceal();
     }
 
-    private bool Conceal(bool advanceTimestamp = true)
+    private bool Conceal(bool advanceTimestamp = true, int samples = 0)
     {
         // Ordinary loss advances RTP once. A bounded empty-queue hold inserts
         // PLC without declaring that RTP packet consumed; it may still arrive.
         // Both count toward the same 60ms PLC bound. FEC is not requested.
         pcmHash = null;
-        if (missingSamples + quantumSamples > maximumConcealSamples) { EnterRebuffer(); return false; }
-        if (pcmTransport) { pcmCount = quantumSamples; pcm.AsSpan(0, pcmCount).Clear(); }
-        else pcmCount = decoder.Decode(ReadOnlySpan<byte>.Empty, pcm, quantumSamples, false);
+        if (samples == 0) samples = quantumSamples;
+        if (missingSamples + samples > maximumConcealSamples) { EnterRebuffer(); return false; }
+        int concealed;
+        try { concealed = pcmTransport ? samples : decoder.Decode(ReadOnlySpan<byte>.Empty, pcm, samples, false); }
+        catch (Exception error) when (error is OpusException or ArgumentException) { concealed = 0; }
+        // Native Opus returns negative error codes; the managed backend throws.
+        // Never retain a negative PCM length across Read calls after malformed input.
+        if (concealed != samples)
+        {
+            pcmCount = pcmOffset = 0; invalid++; EnterRebuffer(); return false;
+        }
+        pcmCount = concealed;
+        if (pcmTransport) pcm.AsSpan(0, pcmCount).Clear();
         if (pipeline?.Enabled == true) pipeline.Played(new(tracePeer, source ?? 0, unchecked((uint)expectedTimestamp),
             ProbeClock.Now, null, null, null, advanceTimestamp ? "plc-loss" : "plc-hold", queuedSamples / 48.0));
         if (advanceTimestamp) expectedTimestamp += pcmCount;

@@ -6,5 +6,6 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <Import Project="../sdk/RuntimeDependencies.props" />
+  <Import Project="../NativeOpus.props" />
   <ItemGroup><ProjectReference Include="../VoiceNative/VoiceNative.csproj" /></ItemGroup>
 </Project>
