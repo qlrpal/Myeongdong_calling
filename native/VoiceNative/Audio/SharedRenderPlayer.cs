@@ -324,15 +324,39 @@ internal sealed class SharedRenderPlayer : IDisposable
     public void Stop()
     {
         if (disposed) return;
-        fallback?.Stop(); stop.Set();
-        if (thread is not null && Thread.CurrentThread != thread) thread.Join();
+        try { fallback?.Stop(); }
+        finally
+        {
+            stop.Set();
+            if (thread is not null && Thread.CurrentThread != thread) thread.Join();
+        }
     }
-    private void ReleaseClient() { RawActive = false; client?.Dispose(); client = null; device?.Dispose(); device = null; }
+    private void ReleaseClient()
+    {
+        RawActive = false;
+        var active = client; client = null; var endpoint = device; device = null;
+        var cleanup = new CallCleanup();
+        cleanup.Run("출력 클라이언트 해제", () => active?.Dispose());
+        cleanup.Run("출력 장치 해제", () => endpoint?.Dispose());
+        cleanup.ThrowIfFailed();
+    }
     public void Dispose()
     {
         if (disposed) return;
         if (Thread.CurrentThread == thread) throw new InvalidOperationException("Dispose output outside render callback.");
-        Stop(); fallback?.Dispose(); ReleaseClient(); ready.Dispose(); stop.Dispose(); disposed = true;
+        var cleanup = new CallCleanup();
+        cleanup.Run("출력 정지", Stop);
+        if (thread is { IsAlive: true })
+        {
+            cleanup.ThrowIfFailed();
+            throw new InvalidOperationException("출력 스레드 종료 전에는 장치를 해제할 수 없습니다.");
+        }
+        cleanup.Run("호환 출력 해제", () => fallback?.Dispose());
+        cleanup.Run("공유 출력 클라이언트", ReleaseClient);
+        cleanup.Run("출력 대기 이벤트", ready.Dispose);
+        cleanup.Run("출력 정지 이벤트", stop.Dispose);
+        disposed = true;
+        cleanup.ThrowIfFailed();
     }
     [DllImport("kernel32.dll", ExactSpelling = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

@@ -218,16 +218,39 @@ internal sealed class SharedCaptureRecorder : IDisposable
 
     public void StopRecording()
     {
-        fallback?.StopRecording(); stop.Set();
-        if (thread is not null && Thread.CurrentThread != thread) thread.Join();
+        if (disposed) return;
+        try { fallback?.StopRecording(); }
+        finally
+        {
+            stop.Set();
+            if (thread is not null && Thread.CurrentThread != thread) thread.Join();
+        }
     }
-    private void ReleaseClient() { client?.Dispose(); client = null; device?.Dispose(); device = null; }
+    private void ReleaseClient()
+    {
+        var active = client; client = null; var endpoint = device; device = null;
+        var cleanup = new CallCleanup();
+        cleanup.Run("입력 클라이언트 해제", () => active?.Dispose());
+        cleanup.Run("입력 장치 해제", () => endpoint?.Dispose());
+        cleanup.ThrowIfFailed();
+    }
     public void Dispose()
     {
         if (disposed) return;
         if (Thread.CurrentThread == thread) throw new InvalidOperationException("입력 콜백 밖에서 녹음기를 해제하세요.");
-        StopRecording(); fallback?.Dispose(); ReleaseClient();
-        ready.Dispose(); stop.Dispose(); disposed = true;
+        var cleanup = new CallCleanup();
+        cleanup.Run("입력 정지", StopRecording);
+        if (thread is { IsAlive: true })
+        {
+            cleanup.ThrowIfFailed();
+            throw new InvalidOperationException("입력 스레드 종료 전에는 장치를 해제할 수 없습니다.");
+        }
+        cleanup.Run("호환 입력 해제", () => fallback?.Dispose());
+        cleanup.Run("공유 입력 클라이언트", ReleaseClient);
+        cleanup.Run("입력 대기 이벤트", ready.Dispose);
+        cleanup.Run("입력 정지 이벤트", stop.Dispose);
+        disposed = true;
+        cleanup.ThrowIfFailed();
     }
 
 }

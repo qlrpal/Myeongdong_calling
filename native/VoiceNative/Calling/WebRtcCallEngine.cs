@@ -24,11 +24,21 @@ public sealed class WebRtcCallEngine : ICallEngine
     private readonly List<RTCIceServer> iceServers = new();
     private static readonly MediaPortHistory RecentMediaPorts = new();
     internal bool DiagnosticOsMediaPorts { get; init; }
+    internal bool DiagnosticSyntheticCapture { get; init; }
+    internal void SupplySyntheticCapture(ReadOnlySpan<byte> pcm)
+    {
+        if (!DiagnosticSyntheticCapture) throw new InvalidOperationException("Synthetic input is enabled only for an explicit diagnostic engine.");
+        Volatile.Read(ref microphone)?.InjectSyntheticCapture(pcm);
+    }
     private CancellationTokenSource? cancellation;
     private Task? eventLoop;
     private Uri? server;
     private Session? session;
     private WindowsAudioDevice? microphone;
+    private string? cleanupError;
+    private WindowsAudioDevice? sharedPlayback;
+    private SharedPlaybackMixer? playbackMixer;
+    public bool UseSharedOutput { get; init; }
     private OpusAudioEncoder? encoder;
     private OpusProfile opusProfile = OpusAudioEncoder.DefaultProfile;
     private AudioSendQueue? sendQueue;
@@ -102,6 +112,8 @@ public sealed class WebRtcCallEngine : ICallEngine
     private LoopbackLatencyCapture? loopback;
     private sealed record ProbeReply(ProbeMessage Message, double ReceivedAt);
     public event Action<string>? Status;
+    private void NotifyStatus(string message) => CallNotifications.Publish(Status, message);
+    internal Action<string>? DiagnosticAfterCleanup { get; init; }
     private sealed record Session(string Id, string Token, RemotePeer[] Peers);
     private sealed record RemotePeer(string Id, string Name);
     private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision,
@@ -140,15 +152,18 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             // The join snapshot can race a remote departure. The queued peer-left
             // event removes that peer once the negotiation gate is released.
-            Status?.Invoke("상대가 협상 중 나갔습니다 · 방 연결은 유지합니다.");
+            NotifyStatus("상대가 협상 중 나갔습니다 · 방 연결은 유지합니다.");
         }
     }
 
     public async Task JoinAsync(Uri address, string room, string name)
     {
         if (session is not null) throw new InvalidOperationException("이미 통화 중입니다.");
-        if (NAudio.Wave.WaveIn.DeviceCount == 0 || NAudio.Wave.WaveOut.DeviceCount == 0)
-            throw new InvalidOperationException("마이크와 출력 장치를 확인하세요.");
+        Volatile.Write(ref cleanupError, null); // A deliberate new join acknowledges the prior warning.
+        if (!DiagnosticSyntheticCapture && NAudio.Wave.WaveIn.DeviceCount == 0)
+            throw new CallOperationException(CallFailureKind.InputDevice, "사용 가능한 마이크가 없습니다.", new InvalidOperationException("No capture endpoint"));
+        if (NAudio.Wave.WaveOut.DeviceCount == 0)
+            throw new CallOperationException(CallFailureKind.OutputDevice, "사용 가능한 출력 장치가 없습니다.", new InvalidOperationException("No render endpoint"));
         server = address;
         try
         {
@@ -167,17 +182,21 @@ public sealed class WebRtcCallEngine : ICallEngine
                 });
             }
             if (DirectOnly) iceServers.RemoveAll(s => s.urls.StartsWith("turn:", StringComparison.OrdinalIgnoreCase) || s.urls.StartsWith("turns:", StringComparison.OrdinalIgnoreCase));
-            Status?.Invoke($"ICE 서버 {iceServers.Count}개 · TURN 중계 " +
+            NotifyStatus($"ICE 서버 {iceServers.Count}개 · TURN 중계 " +
                 (iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)) ? "사용 가능" : "미설정"));
             if (ForceRelay && !iceServers.Any(s => s.urls.StartsWith("turn:", StringComparison.Ordinal) || s.urls.StartsWith("turns:", StringComparison.Ordinal)))
                 throw new InvalidOperationException("TURN 강제 시험에 필요한 TURN 서버가 없습니다.");
             encoder = new OpusAudioEncoder(experiment is null ? opusProfile : OpusProfile.LowDelay64, experiment);
-            Status?.Invoke("송신 코덱 · " + (experiment is null ? OpusAudioEncoder.Label(opusProfile) : encoder.Snapshot().Profile) + $" · {FrameDurationMs}ms");
+            NotifyStatus("송신 코덱 · " + (experiment is null ? OpusAudioEncoder.Label(opusProfile) : encoder.Snapshot().Profile) + $" · {FrameDurationMs}ms");
             if (experiment is not null && (!useRtpPlayout || !preferLowLatency)) throw new InvalidOperationException("극저지연 실험은 공유 저지연·RTP 재생을 켜야 합니다.");
-            microphone = new WindowsAudioDevice(encoder, disableSink: true, preferLowLatency: preferLowLatency, frameMs: FrameDurationMs, pipeline: pipeline, intermediateCapture: IntermediateCapture && preferShortCapture, captureDeviceId: selectedCaptureId ?? CaptureDeviceId, experiment: experiment)
-            { DiagnosticCaptureTransform = DiagnosticCaptureTransform };
+            try
+            {
+                microphone = new WindowsAudioDevice(encoder, disableSource: DiagnosticSyntheticCapture, disableSink: true, preferLowLatency: preferLowLatency, frameMs: FrameDurationMs, pipeline: pipeline, intermediateCapture: IntermediateCapture && preferShortCapture, captureDeviceId: selectedCaptureId ?? CaptureDeviceId, experiment: experiment)
+                { DiagnosticCaptureTransform = DiagnosticCaptureTransform };
+            }
+            catch (Exception error) { throw new CallOperationException(CallFailureKind.InputDevice, "마이크를 준비하지 못했습니다.", error); }
             microphone.SetMuted(Volatile.Read(ref microphoneMuted));
-            microphone.OnAudioSourceError += message => Status?.Invoke("마이크 오류: " + message);
+            microphone.OnAudioSourceError += message => NotifyStatus("마이크 오류: " + message);
             // Short frames can arrive in a single device-period burst. A one-frame
             // asynchronous queue would discard valid siblings before the worker wakes.
             var dedicatedLimits = experiment?.DedicatedSend == true
@@ -221,12 +240,20 @@ public sealed class WebRtcCallEngine : ICallEngine
                     await peer.Connection.setLocalDescription(offer);
                     await Send(remote.Id, new { type = "offer", sdp = offer.sdp });
                 }
-                await microphone.StartAudio();
+                try { await microphone.StartAudio(); }
+                catch (Exception error) { throw new CallOperationException(CallFailureKind.InputDevice, "마이크를 시작하지 못했습니다.", error); }
             }
             finally { gate.Release(); }
-            Status?.Invoke($"방 참가 완료 · {(experiment?.Pcm == true ? "L16 PCM" : "Opus")} 48kHz / {FrameDurationMs}ms · 상대방 연결 대기");
+            NotifyStatus($"방 참가 완료 · {(experiment?.Pcm == true ? "L16 PCM" : "Opus")} 48kHz / {FrameDurationMs}ms · 상대방 연결 대기");
         }
-        catch { await LeaveAsync(); throw; }
+        catch (Exception failure)
+        {
+            try { await LeaveAsync(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("참가 실패 후 정리 오류 · 진단을 저장하고 앱을 다시 시작하세요.", failure, cleanupFailure); }
+            if (CallFailureMessage.IsCleanupFailure(failure)) Volatile.Write(ref cleanupError, CallFailureMessage.Describe(failure));
+            if (failure is SignalingException rejection) throw new CallOperationException(CallFailureKind.ServerRejected, rejection.Message, rejection);
+            throw;
+        }
     }
 
     private readonly HashSet<string> departed = new();
@@ -238,7 +265,32 @@ public sealed class WebRtcCallEngine : ICallEngine
         var lowDelay = experiment is not null || playoutPolicy is PlayoutPolicy.LowLatency or PlayoutPolicy.ResponsiveLowLatency;
         var responsive = ResponsiveReserve || playoutPolicy == PlayoutPolicy.ResponsiveLowLatency;
         var rawOutput = RawRender ?? (preferRawOutput && preferLowLatency && lowDelay && useRtpPlayout);
-        var sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId, experiment: experiment);
+        WindowsAudioDevice sink;
+        try
+        {
+            if (UseSharedOutput && sharedPlayback is null)
+            {
+                var mixer = new SharedPlaybackMixer();
+                try
+                {
+                    // The owner renders supplied PCM only; it never calls the
+                    // borrowed encoder. Peer decoders/timelines remain separate.
+                    sharedPlayback = new WindowsAudioDevice(encoder!, disableSource: true, outputLatencyMs: outputLatencyMs,
+                        preferLowLatency: preferLowLatency, frameMs: 10, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout),
+                        rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other,
+                        renderDeviceId: selectedRenderId, experiment: experiment, suppliedBuffer: mixer);
+                    playbackMixer = mixer;
+                }
+                catch { mixer.Dispose(); throw; }
+            }
+            sink = new WindowsAudioDevice(decoder, disableSource: true, outputLatencyMs: outputLatencyMs, preferLowLatency: preferLowLatency, frameMs: 10, useRtpPlayout: useRtpPlayout, adaptiveReserve: adaptivePlayout, pipeline: pipeline, tracePeer: id, fixedReserveClockTarget: FixedReserveClockTarget || lowDelay, transientEmptyQueueHold: TransientEmptyQueueHold || lowDelay, freshRestart: FreshRestart || lowDelay, boundedRender: BoundedRender ?? (lowDelay && useRtpPlayout), rawRender: rawOutput, renderCategory: rawOutput ? NAudio.CoreAudioApi.AudioStreamCategory.GameChat : NAudio.CoreAudioApi.AudioStreamCategory.Other, rtpReserveMs: responsive ? 15 : DiagnosticReserveMs, responsiveReserve: responsive, quickGapRecovery: QuickGapRecovery ?? responsive, renderDeviceId: selectedRenderId, experiment: experiment, sharedMixer: playbackMixer, sharedOutput: sharedPlayback);
+        }
+        catch (Exception error)
+        {
+            try { decoder.Dispose(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("출력 준비 후 수신 코덱 정리 오류", error, cleanupFailure); }
+            throw new CallOperationException(CallFailureKind.OutputDevice, "출력 장치를 준비하지 못했습니다.", error);
+        }
         RTCPeerConnection? pc = null;
         var socketLease = default(MediaPortHistory.Lease);
         try
@@ -261,7 +313,17 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (pc is null) throw new InvalidOperationException("새 음성 연결용 UDP 포트를 확보하지 못했습니다.", bindFailure);
             if (selectedInterface is not null) MediaInterfaceSelection.Apply(pc.GetRtpChannel().RtpSocket, selectedInterface);
         }
-        catch { pc?.Close("media interface unavailable"); RecentMediaPorts.Retire(socketLease, ProbeClock.Now); sink.Close().GetAwaiter().GetResult(); decoder.Dispose(); throw; }
+        catch (Exception failure)
+        {
+            var cleanup = new CallCleanup();
+            cleanup.Run("초기 미디어 연결", () => pc?.Close("media interface unavailable"));
+            cleanup.Run("초기 미디어 포트", () => RecentMediaPorts.Retire(socketLease, ProbeClock.Now));
+            cleanup.Run("초기 상대 출력", () => sink.Close().GetAwaiter().GetResult());
+            cleanup.Run("초기 수신 코덱", decoder.Dispose);
+            try { cleanup.ThrowIfFailed(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("미디어 연결 준비 후 정리 오류", failure, cleanupFailure); }
+            throw;
+        }
         var receivedPayloadType = 111;
         var rtpChannel = pc.GetRtpChannel();
         var receiveBufferBytes = rtpChannel.RtpSocket.ReceiveBufferSize;
@@ -295,13 +357,13 @@ public sealed class WebRtcCallEngine : ICallEngine
         pc.OnSendReport += (media, report) => { if (media == SDPMediaTypesEnum.audio) precision.Outgoing(report); };
         pc.oniceconnectionstatechange += state =>
         {
-            Status?.Invoke($"{name}: ICE {state}");
+            NotifyStatus($"{name}: ICE {state}");
             if (state == RTCIceConnectionState.failed)
-                Status?.Invoke(ForceRelay
+                NotifyStatus(ForceRelay
                     ? "TURN 연결 경로 확인 실패 · 진단 보고서의 중계 후보 수집과 서버 응답을 확인하세요."
                     : "음성 연결 경로 확인 실패 · 진단 보고서의 후보와 네트워크 상태를 확인하세요.");
         };
-        pc.onicegatheringstatechange += state => Status?.Invoke($"{name}: 연결 후보 수집 {state}");
+        pc.onicegatheringstatechange += state => NotifyStatus($"{name}: 연결 후보 수집 {state}");
         pc.addTrack(new MediaStreamTrack(sink.GetAudioSinkFormats(), MediaStreamStatusEnum.SendRecv));
         if (!useRtpPlayout) pc.OnAudioFrameReceived += frame => sink.GotEncodedMediaFrame(frame);
         pc.onicecandidate += candidate =>
@@ -309,17 +371,17 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (candidate is not null)
             {
                 candidateFamilies.TryAdd(AddressFamily(candidate.address), 0);
-                Status?.Invoke($"{name}: 로컬 후보 {candidate.type} {candidate.address}:{candidate.port}");
+                NotifyStatus($"{name}: 로컬 후보 {candidate.type} {candidate.address}:{candidate.port}");
                 _ = SendCandidate(id, candidate);
             }
         };
         pc.onconnectionstatechange += state =>
         {
-            Status?.Invoke($"{name}: {state}");
+            NotifyStatus($"{name}: {state}");
             if (state == RTCPeerConnectionState.connected) _ = StartSink(sink);
         };
-        sink.OnAudioSinkError += message => Status?.Invoke("출력 오류: " + message);
-        sink.OnAudioSinkRecovered += message => Status?.Invoke(name + ": " + message);
+        sink.OnAudioSinkError += message => NotifyStatus("출력 오류: " + message);
+        sink.OnAudioSinkRecovered += message => NotifyStatus(name + ": " + message);
         var peer = new Peer(pc, sink, decoder, name, metrics, precision, candidateFamilies) { PortLease = socketLease };
         pc.ondatachannel += channel => { if (channel.label == "voice-latency-v1") AttachTelemetry(peer, channel); };
         pc.OnAudioFormatsNegotiated += formats =>
@@ -337,7 +399,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private async Task StartSink(WindowsAudioDevice sink)
     {
         try { await sink.StartAudioSink(); }
-        catch (Exception ex) { Status?.Invoke("출력 오류: " + ex.Message); }
+        catch (Exception ex) { NotifyStatus("출력 오류: " + ex.Message); }
     }
     private async Task SendCandidate(string id, RTCIceCandidate candidate)
     {
@@ -354,7 +416,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                 }
             });
         }
-        catch (Exception ex) { if (session is not null) Status?.Invoke("연결 신호 오류: " + ex.Message); }
+        catch (Exception ex) { if (session is not null) NotifyStatus("연결 신호 오류: " + ex.Message); }
     }
     private readonly Dictionary<string, List<RTCIceCandidateInit>> pending = new();
     private async Task Handle(string kind, JsonElement data)
@@ -370,7 +432,8 @@ public sealed class WebRtcCallEngine : ICallEngine
                 Volatile.Write(ref sendPeers, peers.Values.ToArray());
             }
             pending.Remove(id);
-            if (peer is not null) { await ClosePeerAsync(peer, "left"); Status?.Invoke(peer.Name + ": 나감"); }
+            if (peer is not null) { await ClosePeerAsync(peer, "left"); NotifyStatus(peer.Name + ": 나감"); }
+            if (Volatile.Read(ref sendPeers).Length == 0) await CloseSharedOutputAsync();
             return;
         }
         if (kind != "signal") return;
@@ -383,7 +446,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             var element = signal.GetProperty("candidate");
             if (element.ValueKind == JsonValueKind.Null) return;
             var candidate = element.Deserialize<RTCIceCandidateInit>(Json)!;
-            Status?.Invoke($"상대 후보 수신: {candidate.candidate}");
+            NotifyStatus($"상대 후보 수신: {candidate.candidate}");
             Peer? peer;
             lock (peers) peers.TryGetValue(from, out peer);
             if (peer?.Connection.remoteDescription is not null) peer.Connection.addIceCandidate(candidate);
@@ -397,7 +460,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             sdp = signal.GetProperty("sdp").GetString()
         });
         if (result != SetDescriptionResultEnum.OK) throw new InvalidOperationException("SDP 협상 실패: " + result);
-        Status?.Invoke($"{data.GetProperty("name").GetString()}: {type} 수신 · SDP 협상 완료");
+        NotifyStatus($"{data.GetProperty("name").GetString()}: {type} 수신 · SDP 협상 완료");
         if (pending.Remove(from, out var candidates)) foreach (var candidate in candidates) connection.addIceCandidate(candidate);
         if (type == "offer")
         {
@@ -409,9 +472,10 @@ public sealed class WebRtcCallEngine : ICallEngine
 
     private async Task ReadEvents(TaskCompletionSource ready, CancellationToken token)
     {
+        var listening = session ?? throw new InvalidOperationException("신호 연결을 시작할 세션이 없습니다.");
         try
         {
-            using var response = await streamHttp.GetAsync(Endpoint($"api/events?id={session!.Id}&token={session.Token}"), HttpCompletionOption.ResponseHeadersRead, token);
+            using var response = await streamHttp.GetAsync(Endpoint($"api/events?id={listening.Id}&token={listening.Token}"), HttpCompletionOption.ResponseHeadersRead, token);
             response.EnsureSuccessStatusCode();
             using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(token));
             string kind = "", data = "";
@@ -437,59 +501,107 @@ public sealed class WebRtcCallEngine : ICallEngine
         catch (Exception ex)
         {
             ready.TrySetException(ex);
-            Status?.Invoke("연결 오류: " + ex.Message);
+            NotifyStatus("연결 오류: " + ex.Message);
             // Do not await the current event loop during its own cleanup.
-            _ = Task.Run(LeaveAsync, CancellationToken.None);
+            _ = Task.Run(() => CleanupAfterEventFailureAsync(listening), CancellationToken.None);
         }
     }
-    public async Task LeaveAsync()
+    public Task LeaveAsync() => LeaveCoreAsync(expectedSession: null);
+    private async Task LeaveCoreAsync(Session? expectedSession)
     {
         await cleanupGate.WaitAsync();
+        var cleanup = new CallCleanup(DiagnosticAfterCleanup);
         try
         {
-            cancellation?.Cancel();
-            if (eventLoop is not null) await eventLoop;
+            if (expectedSession is not null && !ReferenceEquals(session, expectedSession)) return;
+            cleanup.Run("신호 수신 취소", () => cancellation?.Cancel());
+            if (eventLoop is { } loop) await cleanup.RunAsync("신호 수신 종료", () => loop);
             await gate.WaitAsync();
+            Session? old; Uri? oldServer;
             try
             {
-                if (microphone is not null) { await microphone.Close(); microphone = null; }
-                frameAdaptation = null;
-                sendQueue?.Complete(); sendCancellation?.Cancel();
-                dedicatedSender?.Stop();
-                if (sendTask is not null) await sendTask;
-                dedicatedSender?.Dispose(); dedicatedSender = null;
-                sendCancellation?.Dispose(); sendCancellation = null; sendTask = null; sendQueue = null;
-                encoder?.Dispose(); encoder = null;
+                old = session; oldServer = server; session = null;
                 Peer[] closing;
                 lock (peers)
                 {
                     closing = peers.Values.ToArray(); peers.Clear();
                     Volatile.Write(ref sendPeers, []);
                 }
-                foreach (var peer in closing) await ClosePeerAsync(peer, "leave");
-                var old = session; session = null;
-                if (old is not null) { try { await Post("api/leave", new { old.Id, old.Token }); } catch { } }
+                var input = microphone; microphone = null;
+                if (input is not null) await cleanup.RunAsync("마이크", input.Close);
+                frameAdaptation = null;
+                cleanup.Run("송신 큐", () => sendQueue?.Complete());
+                cleanup.Run("송신 취소", () => sendCancellation?.Cancel());
+                cleanup.Run("송신 스레드 정지", () => dedicatedSender?.Stop());
+                if (sendTask is { } sending) await cleanup.RunAsync("송신 완료", () => sending);
+                var dedicated = dedicatedSender; dedicatedSender = null;
+                cleanup.Run("송신 스레드 해제", () => dedicated?.Dispose());
+                var sendToken = sendCancellation; sendCancellation = null; sendTask = null; sendQueue = null;
+                cleanup.Run("송신 취소 해제", () => sendToken?.Dispose());
+                var codec = encoder; encoder = null;
+                cleanup.Run("송신 코덱", () => codec?.Dispose());
+                foreach (var peer in closing)
+                    await cleanup.RunAsync("상대 연결", () => ClosePeerAsync(peer, "leave"));
+                await cleanup.RunAsync("공통 출력", CloseSharedOutputAsync);
                 pending.Clear(); departed.Clear();
-                loopback?.Dispose(); loopback = null;
-                cancellation?.Dispose(); cancellation = null; eventLoop = null;
+                var capture = loopback; loopback = null;
+                cleanup.Run("측정 캡처", () => capture?.Dispose());
+                var token = cancellation; cancellation = null; eventLoop = null;
+                cleanup.Run("신호 취소 해제", () => token?.Dispose());
             }
             finally { gate.Release(); }
-            Status?.Invoke("통화 종료 · 마이크 해제");
+            // Local cleanup was attempted first. Notify the captured OLD
+            // endpoint with a short bound, never a newly selected server.
+            if (old is not null && oldServer is not null)
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    using var response = await http.PostAsJsonAsync(new Uri(oldServer, "api/leave"), new { old.Id, old.Token }, Json, timeout.Token);
+                    // The server also removes a member when its SSE closes.
+                    if (!response.IsSuccessStatusCode && response.StatusCode is not (System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.NotFound))
+                        NotifyStatus("서버 퇴장 알림 실패 · 로컬 자원 해제는 모두 시도했습니다.");
+                }
+                catch (Exception) { NotifyStatus("서버 퇴장 알림을 전달하지 못했습니다 · 로컬 자원 해제는 모두 시도했습니다."); }
+            }
+            cleanup.ThrowIfFailed();
+            NotifyStatus("통화 종료 · 마이크 해제");
         }
+        catch (CallCleanupException error) { Volatile.Write(ref cleanupError, error.Message); NotifyStatus(error.Message); throw; }
         finally { cleanupGate.Release(); }
     }
-    public async ValueTask DisposeAsync() { await LeaveAsync(); http.Dispose(); streamHttp.Dispose(); }
+    public async ValueTask DisposeAsync()
+    {
+        try { await LeaveAsync(); }
+        finally { try { http.Dispose(); } finally { streamHttp.Dispose(); } }
+    }
+    private async Task CleanupAfterEventFailureAsync(Session listening)
+    {
+        try { await LeaveCoreAsync(listening); }
+        catch (Exception error) { NotifyStatus("연결 종료 정리 오류 · " + error.Message); }
+    }
+    internal Func<Task> DiagnosticCaptureStreamCleanup()
+    {
+        var listening = session ?? throw new InvalidOperationException("No active diagnostic session");
+        return () => CleanupAfterEventFailureAsync(listening);
+    }
     public async Task RestartOutputAsync()
     {
         await gate.WaitAsync();
         try
         {
+            if (sharedPlayback is not null)
+            {
+                await sharedPlayback.RestartOutputAsync();
+                NotifyStatus("공통 출력 재시작 완료");
+                return;
+            }
             Peer[] current;
             lock (peers) current = peers.Values.ToArray();
             foreach (var peer in current)
             {
-                try { await peer.Sink.RestartOutputAsync(); Status?.Invoke(peer.Name + ": 출력 재시작 완료"); }
-                catch (Exception ex) { Status?.Invoke(peer.Name + ": 출력 재시작 실패: " + ex.Message); }
+                try { await peer.Sink.RestartOutputAsync(); NotifyStatus(peer.Name + ": 출력 재시작 완료"); }
+                catch (Exception ex) { NotifyStatus(peer.Name + ": 출력 재시작 실패: " + ex.Message); }
             }
         }
         finally { gate.Release(); }
@@ -502,7 +614,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("재생 모드는 통화에서 나간 뒤 변경하세요.");
             useRtpPlayout = enabled;
-            Status?.Invoke(enabled ? "RTP 시간축 재생 · 20ms 목표 여유·PLC 활성" : "기존 PCM 재생 경로 사용");
+            NotifyStatus(enabled ? "RTP 시간축 재생 · 20ms 목표 여유·PLC 활성" : "기존 PCM 재생 경로 사용");
         }
         finally { gate.Release(); }
     }
@@ -514,7 +626,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (session is not null || microphone is not null) throw new InvalidOperationException("적응 여유는 통화에서 나간 뒤 변경하세요.");
             if (enabled && playoutPolicy != PlayoutPolicy.Compatible) throw new InvalidOperationException("지터 적응은 기존 재생 정책에서 선택하세요.");
             adaptivePlayout = enabled;
-            Status?.Invoke(enabled ? "지터 적응 여유 · 20~40ms" : "고정 여유 · 20ms, 소비율 보정 유지");
+            NotifyStatus(enabled ? "지터 적응 여유 · 20~40ms" : "고정 여유 · 20ms, 소비율 보정 유지");
         }
         finally { gate.Release(); }
     }
@@ -526,7 +638,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (session is not null || microphone is not null) throw new InvalidOperationException("네트워크는 통화에서 나간 뒤 변경하세요.");
             var selected = MediaInterfaceSelection.Resolve(address);
             mediaAddress = selected?.Address;
-            Status?.Invoke(selected is null ? "미디어 네트워크: OS 자동 · VPN 경로 유지" : $"미디어 네트워크: {selected.Label} · 이 앱의 UDP만 선택한 인터페이스 사용");
+            NotifyStatus(selected is null ? "미디어 네트워크: OS 자동 · VPN 경로 유지" : $"미디어 네트워크: {selected.Label} · 이 앱의 UDP만 선택한 인터페이스 사용");
         }
         finally { gate.Release(); }
     }
@@ -537,7 +649,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("출력 효과 설정은 통화에서 나간 뒤 변경하세요.");
             preferRawOutput = enabled;
-            Status?.Invoke(enabled ? "저지연 재생에서 통화 출력 효과 우회 우선 · 미지원 시 공유 출력 복귀" : "기존 통화 출력 효과 사용");
+            NotifyStatus(enabled ? "저지연 재생에서 통화 출력 효과 우회 우선 · 미지원 시 공유 출력 복귀" : "기존 통화 출력 효과 사용");
         }
         finally { gate.Release(); }
     }
@@ -548,7 +660,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("입력 모드는 통화에서 나간 뒤 변경하세요.");
             preferShortCapture = enabled;
-            Status?.Invoke(enabled ? "짧은 공유 입력 주기 우선 · 미지원 시 기존 공유 입력 사용" : "기존 공유 입력 사용 · 출력 설정 유지");
+            NotifyStatus(enabled ? "짧은 공유 입력 주기 우선 · 미지원 시 기존 공유 입력 사용" : "기존 공유 입력 사용 · 출력 설정 유지");
         }
         finally { gate.Release(); }
     }
@@ -561,7 +673,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (session is not null || microphone is not null) throw new InvalidOperationException("재생 정책은 통화에서 나간 뒤 변경하세요.");
             playoutPolicy = policy;
             if (policy != PlayoutPolicy.Compatible) adaptivePlayout = false;
-            Status?.Invoke(policy switch
+            NotifyStatus(policy switch
             {
                 PlayoutPolicy.ResponsiveLowLatency => "자동 저지연 · 20ms 시작·15~30ms 적응·반복 공백 빠른 복구 (시험)",
                 PlayoutPolicy.LowLatency => "저지연 재생 · 20ms 목표·짧은 공백 보류·최신 큐 복귀",
@@ -578,7 +690,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("코덱은 통화에서 나간 뒤 변경하세요.");
             opusProfile = profile;
-            Status?.Invoke("송신 코덱 선택 · " + OpusAudioEncoder.Label(profile));
+            NotifyStatus("송신 코덱 선택 · " + OpusAudioEncoder.Label(profile));
         }
         finally { gate.Release(); }
     }
@@ -589,7 +701,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         {
             if (session is not null || microphone is not null) throw new InvalidOperationException("저지연 모드는 통화에서 나간 뒤 변경하세요.");
             preferLowLatency = enabled;
-            Status?.Invoke(enabled ? "공유 저지연 우선 · 실제 지원 여부는 진단에 표시됩니다." : "표준 공유 모드 사용 · 기존 10ms 입력/출력 요청 설정으로 연결합니다.");
+            NotifyStatus(enabled ? "공유 저지연 우선 · 실제 지원 여부는 진단에 표시됩니다." : "표준 공유 모드 사용 · 기존 10ms 입력/출력 요청 설정으로 연결합니다.");
         }
         finally { gate.Release(); }
     }
@@ -600,6 +712,12 @@ public sealed class WebRtcCallEngine : ICallEngine
         try
         {
             outputLatencyMs = milliseconds;
+            if (sharedPlayback is not null)
+            {
+                await sharedPlayback.RestartOutputAsync(outputLatencyMs: milliseconds);
+                NotifyStatus($"공통 출력 복귀 요청 {milliseconds}ms 적용");
+                return;
+            }
             Peer[] current;
             lock (peers) current = peers.Values.ToArray();
             foreach (var peer in current)
@@ -607,11 +725,11 @@ public sealed class WebRtcCallEngine : ICallEngine
                 try { await peer.Sink.RestartOutputAsync(outputLatencyMs: milliseconds); }
                 catch (Exception ex)
                 {
-                    Status?.Invoke(peer.Name + ": 출력 설정 적용 실패: " + ex.Message);
+                    NotifyStatus(peer.Name + ": 출력 설정 적용 실패: " + ex.Message);
                     throw;
                 }
             }
-            Status?.Invoke($"출력 복귀 요청 {milliseconds}ms 적용 · 저지연이 활성화돼 있으면 기존 엔진 주기를 유지합니다.");
+            NotifyStatus($"출력 복귀 요청 {milliseconds}ms 적용 · 저지연이 활성화돼 있으면 기존 엔진 주기를 유지합니다.");
         }
         finally { gate.Release(); }
     }
@@ -658,7 +776,9 @@ public sealed class WebRtcCallEngine : ICallEngine
         }).ToArray();
         return new CallDiagnostics(DateTimeOffset.Now, session is not null, mic, snapshots,
             System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency, sender, acousticResult, FrameDurationMs, encoder?.Snapshot(),
-            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress, experiment, frameAdaptation);
+            FixedReserveClockTarget || TransientEmptyQueueHold || FreshRestart ? "experimental" : playoutPolicy.ToString(), mediaAddress, experiment, frameAdaptation,
+            UseSharedOutput ? new SharedOutputDiagnostics(playbackMixer?.SourceCount ?? 0, playbackMixer?.ActiveSources ?? 0, sharedPlayback?.OwnsOutputStream == true ? 1 : 0, playbackMixer?.ClippedSamples ?? 0) : null,
+            Volatile.Read(ref cleanupError));
     }
     private void UpdateFramePolicy(IEnumerable<Peer> current)
     {
@@ -721,10 +841,10 @@ public sealed class WebRtcCallEngine : ICallEngine
                 {
                     loopback ??= new LoopbackLatencyCapture(peer.Sink.OutputDeviceId);
                     loopback.Arm(message.Id, onDetected);
-                    Status?.Invoke("루프백 측정 수신 대기 · 출력 장치 " + loopback.Device);
+                    NotifyStatus("루프백 측정 수신 대기 · 출력 장치 " + loopback.Device);
                 }
                 else microphone.Acoustic.Arm(message.Id, onDetected);
-                if (message.Kind == "arm") Status?.Invoke("음향 측정 수신 대기 · 상대가 400ms 음성형 테스트음을 보냅니다.");
+                if (message.Kind == "arm") NotifyStatus("음향 측정 수신 대기 · 상대가 400ms 음성형 테스트음을 보냅니다.");
                 SendProbe(peer, new("ready", message.Id));
             }
             else if (message.Kind == "cancel") { microphone?.Acoustic.Cancel(message.Id); loopback?.Cancel(message.Id); }
@@ -762,7 +882,7 @@ public sealed class WebRtcCallEngine : ICallEngine
             lock (peers) connected = peers.Values.Where(p => p.Connection.connectionState == RTCPeerConnectionState.connected).ToArray();
             if (connected.Length != 1 || microphone is null || cancellation is null) throw new InvalidOperationException("음향 측정은 연결된 1:1 통화에서 사용하세요.");
             target = connected[0]; var token = cancellation.Token;
-            Status?.Invoke(useLoopback ? "루프백 측정 시작 · 상대 출력 장치의 디지털 신호를 감지합니다. 400ms 테스트음을 전송합니다." : "음향 측정 시작 · 상대는 스피커 소리를 마이크로 받을 수 있게 하고 잠시 말하지 마세요. 400ms 음성형 테스트음을 전송합니다.");
+            NotifyStatus(useLoopback ? "루프백 측정 시작 · 상대 출력 장치의 디지털 신호를 감지합니다. 400ms 테스트음을 전송합니다." : "음향 측정 시작 · 상대는 스피커 소리를 마이크로 받을 수 있게 하고 잠시 말하지 마세요. 400ms 음성형 테스트음을 전송합니다.");
             (double Low, double High)? best = null;
             for (var i = 0; i < 8; i++)
             {
@@ -799,7 +919,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                 (best.Value.High - best.Value.Low) * 1000, 20,
                 useLoopback ? "송신 캡처 프레임 QPC→상대 출력 장치 WASAPI 루프백 QPC. 시계 범위와 검출 여유 ±20ms 포함. 루프백 캡처 지연/드라이버 수집 지점 포함. 물리 스피커/마이크·실제 입→귀 지연 아님." :
                 "송신 캡처 프레임의 QPC 시각→상대 스피커를 상대 마이크로 재캡처한 시각. 시계 보정 범위와 검출 여유 ±20ms 포함. 검출 여유는 보장 오차가 아님. 마이크 하드웨어 앞단·실제 귀 도달 시점은 별도이며 스피커→마이크 공기 전파가 포함됨.", useLoopback ? "wasapi-loopback" : "acoustic", sourceStages, receiverStages, stageBreakdown);
-            Status?.Invoke($"{(useLoopback ? "루프백" : "음향 경로")} 측정: 내→{target.Name} {acousticResult.MinimumMs:F1}~{acousticResult.MaximumMs:F1}ms · 시계 범위 {acousticResult.ClockUncertaintyMs:F1}ms · 검출 ±20ms");
+            NotifyStatus($"{(useLoopback ? "루프백" : "음향 경로")} 측정: 내→{target.Name} {acousticResult.MinimumMs:F1}~{acousticResult.MaximumMs:F1}ms · 시계 범위 {acousticResult.ClockUncertaintyMs:F1}ms · 검출 ±20ms");
         }
         finally
         {
@@ -846,19 +966,24 @@ public sealed class WebRtcCallEngine : ICallEngine
             catch (Exception ex) { error = peer.Name + ": 음성 송신 오류: " + ex.Message; }
             finally { peer.SendLifetime.Exit(); }
             // User callbacks must not hold a send lease needed by peer shutdown.
-            if (error is not null) Status?.Invoke(error);
+            if (error is not null) NotifyStatus(error);
         }
     }
     private static async Task ClosePeerAsync(Peer peer, string reason)
     {
         await peer.SendLifetime.StopAsync();
-        try { peer.Connection.Close(reason); }
-        finally
-        {
-            RecentMediaPorts.Retire(peer.PortLease, ProbeClock.Now);
-            try { await peer.Sink.Close(); }
-            finally { peer.Decoder.Dispose(); }
-        }
+        var cleanup = new CallCleanup();
+        cleanup.Run("미디어 연결", () => peer.Connection.Close(reason));
+        cleanup.Run("미디어 포트", () => RecentMediaPorts.Retire(peer.PortLease, ProbeClock.Now));
+        await cleanup.RunAsync("상대 출력", peer.Sink.Close);
+        cleanup.Run("수신 코덱", peer.Decoder.Dispose);
+        cleanup.ThrowIfFailed();
+    }
+    private async Task CloseSharedOutputAsync()
+    {
+        var closing = sharedPlayback;
+        sharedPlayback = null; playbackMixer = null;
+        if (closing is not null) await closing.Close();
     }
     private void TraceSentFrame(string hash, double at) =>
         microphone?.Timeline.Update(hash, old => old with { SentAt = at });

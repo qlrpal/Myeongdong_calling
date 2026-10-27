@@ -55,6 +55,10 @@ internal sealed class WindowsAudioDevice
     private readonly PipelineTrace? pipeline;
     private readonly string? renderDeviceId;
     private readonly LatencyExperiment? experiment;
+    private readonly WindowsAudioDevice? sharedOutput;
+    private SharedPlaybackMixer.Source? mixedSource;
+    private readonly SharedPlaybackMixer? sharedMixer;
+    private TaskCompletionSource? closeCompletion;
     private PlaybackGain? playbackGain;
     private bool muted;
     public void SetMuted(bool value) => Volatile.Write(ref muted, value);
@@ -67,7 +71,7 @@ internal sealed class WindowsAudioDevice
     public event Action<string>? OnAudioSinkError;
     public event Action<string>? OnAudioSinkRecovered;
 
-    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, double frameMs = 20, bool useRtpPlayout = false, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool intermediateCapture = true, bool boundedRender = false, bool rawRender = false, AudioStreamCategory renderCategory = AudioStreamCategory.Other, int rtpReserveMs = 20, string? captureDeviceId = null, bool responsiveReserve = false, bool quickGapRecovery = false, string? renderDeviceId = null, LatencyExperiment? experiment = null)
+    public WindowsAudioDevice(IAudioEncoder encoder, bool disableSource = false, bool disableSink = false, int outputLatencyMs = 40, bool preferLowLatency = true, double frameMs = 20, bool useRtpPlayout = false, bool adaptiveReserve = true, PipelineTrace? pipeline = null, string tracePeer = "", bool fixedReserveClockTarget = false, bool transientEmptyQueueHold = false, bool freshRestart = false, bool intermediateCapture = true, bool boundedRender = false, bool rawRender = false, AudioStreamCategory renderCategory = AudioStreamCategory.Other, int rtpReserveMs = 20, string? captureDeviceId = null, bool responsiveReserve = false, bool quickGapRecovery = false, string? renderDeviceId = null, LatencyExperiment? experiment = null, SharedPlaybackMixer? sharedMixer = null, WindowsAudioDevice? sharedOutput = null, IPlayoutBuffer? suppliedBuffer = null)
     {
         if (outputLatencyMs is not (20 or 40)) throw new ArgumentOutOfRangeException(nameof(outputLatencyMs));
         if (rtpReserveMs is < 10 or > 40) throw new ArgumentOutOfRangeException(nameof(rtpReserveMs));
@@ -81,6 +85,9 @@ internal sealed class WindowsAudioDevice
         this.encoder = encoder;
         this.pipeline = pipeline;
         this.renderDeviceId = renderDeviceId;
+        if ((sharedMixer is null) != (sharedOutput is null) || (sharedOutput is not null || suppliedBuffer is not null) && (!disableSource || disableSink)
+            || suppliedBuffer is not null && sharedOutput is not null) throw new ArgumentException("Shared output requires a sink-only device.");
+        this.sharedMixer = sharedMixer; this.sharedOutput = sharedOutput;
         try
         {
             if (!disableSource)
@@ -122,20 +129,40 @@ internal sealed class WindowsAudioDevice
             if (!disableSink)
             {
                 if (useRtpPlayout && experiment?.StagedDeviceBuffers == true) PlayoutWarmup.Ensure(experiment);
-                buffer = useRtpPlayout ? new RtpOpusPlayoutBuffer(Timeline, targetReserveMs: rtpReserveMs, adaptiveReserve: adaptiveReserve, pipeline: pipeline, tracePeer: tracePeer, fixedReserveClockTarget: fixedReserveClockTarget, transientEmptyQueueHold: transientEmptyQueueHold, freshRestart: freshRestart, responsiveReserve: responsiveReserve, recoveryReserveMs: quickGapRecovery ? 10 : 0, repeatedGapRecovery: quickGapRecovery, experiment: experiment) : new PcmPlayoutBuffer();
+                buffer = suppliedBuffer ?? (useRtpPlayout ? new RtpOpusPlayoutBuffer(Timeline, targetReserveMs: rtpReserveMs, adaptiveReserve: adaptiveReserve, pipeline: pipeline, tracePeer: tracePeer, fixedReserveClockTarget: fixedReserveClockTarget, transientEmptyQueueHold: transientEmptyQueueHold, freshRestart: freshRestart, responsiveReserve: responsiveReserve, recoveryReserveMs: quickGapRecovery ? 10 : 0, repeatedGapRecovery: quickGapRecovery, experiment: experiment) : new PcmPlayoutBuffer());
                 buffer.OnFrameSubmitted = (hash, at, discarded) => Timeline.Update(hash, old => old with { OutputSubmittedAt = discarded ? null : at, Discarded = discarded });
                 playbackGain = new PlaybackGain(buffer);
-                output = CreateOutput();
+                if (sharedOutput is null) output = CreateOutput();
+                else
+                {
+                    mixedSource = sharedMixer!.Add(playbackGain, buffer);
+                    sharedOutput.OnAudioSinkError += SharedSinkError;
+                    sharedOutput.OnAudioSinkRecovered += SharedSinkRecovered;
+                }
             }
         }
-        catch { input?.Dispose(); output?.Dispose(); (buffer as IDisposable)?.Dispose(); throw; }
+        catch (Exception failure)
+        {
+            var cleanup = new CallCleanup();
+            cleanup.Run("입력 초기화 정리", () => input?.Dispose());
+            cleanup.Run("출력 초기화 정리", () => output?.Dispose());
+            cleanup.Run("공통 출력 등록 정리", () => mixedSource?.DisposeAsync().AsTask().GetAwaiter().GetResult());
+            cleanup.Run("재생 버퍼 초기화 정리", () => (buffer as IDisposable)?.Dispose());
+            try { cleanup.ThrowIfFailed(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("오디오 초기화 후 정리 오류", failure, cleanupFailure); }
+            throw;
+        }
     }
+    private void SharedSinkError(string message) { lock (audioLock) { if (closed) return; } OnAudioSinkError?.Invoke(message); }
+    private void SharedSinkRecovered(string message) { lock (audioLock) { if (closed) return; } OnAudioSinkRecovered?.Invoke(message); }
     private SharedRenderPlayer CreateOutput()
     {
         var priming = experiment?.StagedDeviceBuffers == true ? buffer as RtpOpusPlayoutBuffer : null;
+        var mixPriming = experiment?.StagedDeviceBuffers == true ? buffer as SharedPlaybackMixer : null;
+        Func<int, bool>? canPrime = priming is not null ? priming.CanPrimeOutput : mixPriming is not null ? mixPriming.CanPrimeOutput : null;
         var player = new SharedRenderPlayer(requestedOutputMs, preferLowLatency, boundedRender, rawRender, renderCategory, renderDeviceId, experiment?.MinimalOutput == true, experiment?.OutputHeadroomMs ?? 0,
             experiment?.StagedDeviceBuffers == true, experiment?.RenderPeriodWatchdog == true, experiment?.TraceRenderWork == true,
-            priming is null ? null : priming.CanPrimeOutput, priming?.PrimingSignal, experiment?.CriticalAudioPriority == true);
+            canPrime, priming?.PrimingSignal ?? mixPriming?.PrimingSignal, experiment?.CriticalAudioPriority == true);
         try
         {
             using var enumerator = new MMDeviceEnumerator();
@@ -147,7 +174,12 @@ internal sealed class WindowsAudioDevice
             player.Init(source);
             buffer!.ConfigureForOutput(player.LowLatencyActive, player.LatencyMilliseconds);
         }
-        catch { player.Dispose(); throw; }
+        catch (Exception failure)
+        {
+            try { player.Dispose(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("출력 초기화 후 정리 오류", failure, cleanupFailure); }
+            throw;
+        }
         player.PlaybackStopped += (_, args) =>
         {
             if (args.Exception is null) return;
@@ -176,8 +208,15 @@ internal sealed class WindowsAudioDevice
         };
         return player;
     }
-    public string OutputDeviceId => output?.DeviceId ?? throw new InvalidOperationException("출력 장치가 없습니다.");
+    public string OutputDeviceId => sharedOutput?.OutputDeviceId ?? output?.DeviceId ?? throw new InvalidOperationException("출력 장치가 없습니다.");
+    internal bool OwnsOutputStream => Volatile.Read(ref output) is not null;
     public List<AudioFormat> GetAudioSinkFormats() => experiment is not null ? [OpusAudioEncoder.ExperimentFormat(experiment)] : encoder.SupportedFormats.Where(f => f.Codec == AudioCodecsEnum.OPUS).ToList();
+    internal void InjectSyntheticCapture(ReadOnlySpan<byte> pcm)
+    {
+        if (input is not null || buffer is not null) throw new InvalidOperationException("Synthetic injection requires a capture-free diagnostic source.");
+        if ((pcm.Length & 1) != 0) throw new ArgumentException("PCM16 requires whole samples.", nameof(pcm));
+        Capture(pcm, null, ProbeClock.Now, pcm.Length / 2, 0);
+    }
     private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt, double callbackAt, int callbackSamples, int flags)
     {
         var callbackStarted = Stopwatch.GetTimestamp();
@@ -267,6 +306,7 @@ internal sealed class WindowsAudioDevice
     public void GotRtpAudioPacket(uint source, uint timestamp, byte[] payload)
     {
         if (buffer is RtpOpusPlayoutBuffer rtp) rtp.Add(source, timestamp, payload);
+        sharedMixer?.NotifyMedia();
     }
     private void TraceEncodedFrame(string hash, double? capturedAt, long started) =>
         Timeline.Update(hash, old => old with { CaptureAt = capturedAt, EncodeStart = started / (double)Stopwatch.Frequency, EncodeEnd = ProbeClock.Now });
@@ -315,6 +355,20 @@ internal sealed class WindowsAudioDevice
                 RtpPlayout = detail
             };
         }
+        if (sharedOutput is not null)
+        {
+            var shared = sharedOutput.Snapshot();
+            return snapshot with
+            {
+                Device = shared.Device, DeviceFormat = shared.DeviceFormat,
+                DeviceLatencyMs = shared.DeviceLatencyMs, DeviceAverageLatencyMs = shared.DeviceAverageLatencyMs,
+                Render = shared.Render, RequestedOutputMs = shared.RequestedOutputMs,
+                LowLatencyRequested = shared.LowLatencyRequested, LowLatencyActive = shared.LowLatencyActive,
+                LowLatencyUnavailableReason = shared.LowLatencyUnavailableReason, EnginePeriodMs = shared.EnginePeriodMs,
+                DeviceError = mixedSource?.Error ?? shared.DeviceError, DeviceRestarts = shared.DeviceRestarts,
+                PlaybackState = closed ? "종료" : mixedSource?.Error is not null ? "상대 재생 오류" : sinkStarted ? shared.PlaybackState : "대기"
+            };
+        }
         // Core Audio calls can block during device reconfiguration. Never hold
         // the capture/decoder callback lock across these diagnostic-only queries.
         snapshot = snapshot with
@@ -342,12 +396,18 @@ internal sealed class WindowsAudioDevice
     public async Task StartAudioSink()
     {
         await playbackGate.WaitAsync();
-        try { lock (audioLock) { if (closed) return; sinkStarted = true; } output?.Play(); }
+        try
+        {
+            lock (audioLock) { if (closed) return; sinkStarted = true; }
+            if (sharedOutput is null) output?.Play();
+            else { mixedSource!.Activate(); await sharedOutput.StartAudioSink(); }
+        }
         finally { playbackGate.Release(); }
     }
     public async Task RestartOutputAsync(bool manual = true, int? outputLatencyMs = null)
     {
         if (outputLatencyMs is not (null or 20 or 40)) throw new ArgumentOutOfRangeException(nameof(outputLatencyMs));
+        if (sharedOutput is not null) { await sharedOutput.RestartOutputAsync(manual, outputLatencyMs); return; }
         await playbackGate.WaitAsync();
         try
         {
@@ -363,7 +423,10 @@ internal sealed class WindowsAudioDevice
                 if (manual) automaticRecoveryUsed = false;
                 old = output; output = null; sinkFailed = true; buffer.Suspend();
             }
-            old?.Stop(); old?.Dispose();
+            var cleanup = new CallCleanup();
+            cleanup.Run("이전 출력 정지", () => old?.Stop());
+            cleanup.Run("이전 출력 해제", () => old?.Dispose());
+            cleanup.ThrowIfFailed();
             var replacement = CreateOutput();
             bool play, dispose;
             lock (audioLock)
@@ -377,18 +440,51 @@ internal sealed class WindowsAudioDevice
         catch (Exception ex) { lock (audioLock) { sinkFailed = true; sinkError = ex.Message; buffer?.Suspend(); } throw; }
         finally { playbackGate.Release(); }
     }
-    public async Task Close()
+    public Task Close()
     {
-        lock (audioLock) { if (closed) return; closed = true; buffer?.Suspend(); Acoustic.Cancel(); }
-        // Dispose outside the callback lock: stopping capture can wait for callbacks.
-        if (input is not null) { input.StopRecording(); input.Dispose(); }
-        await playbackGate.WaitAsync();
+        TaskCompletionSource completion;
+        lock (audioLock)
+        {
+            if (closeCompletion is not null) return closeCompletion.Task;
+            closed = true;
+            closeCompletion = completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        _ = CloseCoreAsync(completion);
+        return completion.Task;
+    }
+    private async Task CloseCoreAsync(TaskCompletionSource completion)
+    {
         try
         {
-            SharedRenderPlayer? old;
-            lock (audioLock) { old = output; output = null; }
-            old?.Stop(); old?.Dispose();
+            var cleanup = new CallCleanup();
+            // Stop/dispose never holds audioLock: capture may need it before
+            // StopRecording can finish. Preserve failures from BOTH halves.
+            cleanup.Run("재생 버퍼 중지", () => buffer?.Suspend());
+            cleanup.Run("음향 측정 취소", () => Acoustic.Cancel());
+            if (input is not null)
+            {
+                cleanup.Run("마이크 정지", input.StopRecording);
+                cleanup.Run("마이크 해제", input.Dispose);
+            }
+            await playbackGate.WaitAsync();
+            try
+            {
+                if (sharedOutput is not null)
+                {
+                    sharedOutput.OnAudioSinkError -= SharedSinkError;
+                    sharedOutput.OnAudioSinkRecovered -= SharedSinkRecovered;
+                    if (mixedSource is not null)
+                        await cleanup.RunAsync("공통 출력 소스 분리", () => mixedSource.DisposeAsync().AsTask());
+                }
+                SharedRenderPlayer? old;
+                lock (audioLock) { old = output; output = null; }
+                cleanup.Run("출력 정지", () => old?.Stop());
+                cleanup.Run("출력 해제", () => old?.Dispose());
+                cleanup.Run("재생 버퍼 해제", () => (buffer as IDisposable)?.Dispose());
+            }
+            finally { playbackGate.Release(); }
+            cleanup.ThrowIfFailed(); completion.TrySetResult();
         }
-        finally { (buffer as IDisposable)?.Dispose(); playbackGate.Release(); }
+        catch (Exception error) { completion.TrySetException(error); }
     }
 }

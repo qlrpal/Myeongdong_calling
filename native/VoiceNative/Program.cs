@@ -34,6 +34,7 @@ internal static class Program
         try
         {
             string? mediaAddress = null, experiment = null;
+            var sharedOutput = false;
             if (args.Length % 2 != 0) throw new ArgumentException("옵션에는 값이 필요합니다.");
             for (var i = 0; i < args.Length; i += 2)
             {
@@ -41,10 +42,11 @@ internal static class Program
                 {
                     case "--media-address": mediaAddress = args[i + 1]; break;
                     case "--experiment": experiment = args[i + 1]; break;
+                    case "--shared-output": sharedOutput = bool.TryParse(args[i + 1], out var enabled) ? enabled : throw new ArgumentException("공통 출력 옵션에는 true 또는 false가 필요합니다."); break;
                     default: throw new ArgumentException("알 수 없는 실행 옵션: " + args[i]);
                 }
             }
-            Application.Run(new CallForm(mediaAddress, experiment));
+            Application.Run(new CallForm(mediaAddress, experiment, sharedOutput));
         }
         catch (ArgumentException error) { MessageBox.Show(error.Message, "실행 설정"); }
     }

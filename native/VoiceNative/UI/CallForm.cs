@@ -9,7 +9,7 @@ namespace VoiceNative;
 public sealed partial class CallForm : Form
 {
     private static readonly string[] ReportNotes = new[] { "Payload bitrate excludes network headers.", "ICMP/RTCP RTT is not end-to-end audio latency.", "Remote loss is outbound; local RTCP loss is inbound. Both are last report interval; inspect age.", "Queue is application compressed RTP plus remaining decoded PCM in RTP mode, or PCM in legacy mode; excludes device buffering. PLC duration is separate from decoded duration and zero-fill underflow.", "Device API latency is an implementation estimate, not physical mouth-to-ear latency.", "Latency model assumes RTT/2 and the sender frame duration. Device buffering may overlap; codec and physical delays are unverified. Not an end-to-end measurement.", "Processing percentiles cover the most recent 256 frames. Sequence duplicate window is bounded." };
-    private readonly ICallEngine engine = new WebRtcCallEngine();
+    private readonly ICallEngine engine;
     private readonly TextBox server = new() { Text = "https://qlrpal.ddns.net/", Dock = DockStyle.Fill };
     private readonly TextBox room = new() { Text = "test", Dock = DockStyle.Fill };
     private readonly TextBox nickname = new() { Text = Environment.UserName, Dock = DockStyle.Fill };
@@ -35,8 +35,9 @@ public sealed partial class CallForm : Form
     private readonly List<LocalLatencyTrial> localTrials = new();
     private readonly Dictionary<string, (double At, PeerDiagnostics Peer)> previousDiagnostics = new();
     public CallForm() : this(null) { }
-    public CallForm(string? initialMediaAddress, string? initialExperiment = null)
+    public CallForm(string? initialMediaAddress, string? initialExperiment = null, bool sharedOutput = false)
     {
+        engine = new WebRtcCallEngine { UseSharedOutput = sharedOutput };
         Text = "명동 콜링"; ClientSize = new Size(900, 780); MinimumSize = new Size(740, 680); Font = new Font("맑은 고딕", 10);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 6 };
         foreach (var size in new[] { 112, 150, 75 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, size));
@@ -202,8 +203,21 @@ public sealed partial class CallForm : Form
         FormClosing += async (_, args) =>
         {
             if (closing) return; args.Cancel = true; if (closeRequested) return;
-            closeRequested = true; timer.Stop(); diagnosticsCancellation.Cancel(); join.Enabled = leave.Enabled = false;
-            try { SaveUserSettings(); if (callSession is not null) await callSession.DisposeAsync(); if (localMeasurement is not null) { try { await localMeasurement; } catch { } } if (joinOperation is not null) { try { await joinOperation; } catch { } } if (leaveOperation is not null) { try { await leaveOperation; } catch { } } await engine.DisposeAsync(); }
+            closeRequested = true; timer.Stop(); join.Enabled = leave.Enabled = false;
+            var cleanup = new CallCleanup();
+            try
+            {
+                cleanup.Run("진단 취소", diagnosticsCancellation.Cancel);
+                cleanup.Run("설정 저장", SaveUserSettings);
+                if (callSession is not null) await cleanup.RunAsync("통화 제어 종료", () => callSession.DisposeAsync().AsTask());
+                if (localMeasurement is not null) await cleanup.RunAsync("로컬 측정 종료", async () =>
+                { try { await localMeasurement; } catch (OperationCanceledException) when (diagnosticsCancellation.IsCancellationRequested) { } });
+                if (joinOperation is not null) await cleanup.RunAsync("진행 참가 종료", () => joinOperation);
+                if (leaveOperation is not null) await cleanup.RunAsync("진행 퇴장 종료", () => leaveOperation);
+                await cleanup.RunAsync("통화 엔진 종료", () => engine.DisposeAsync().AsTask());
+                cleanup.Run("진단 취소 해제", diagnosticsCancellation.Dispose);
+                cleanup.ThrowIfFailed();
+            }
             catch (Exception ex) { AppLog.Write("종료 오류: " + ex.Message); }
             finally { timer.Dispose(); closing = true; Close(); }
         };
@@ -240,6 +254,9 @@ public sealed partial class CallForm : Form
             latencyExperiment.Enabled = !snapshot.InCall && join.Enabled;
             if (latencyExperiment.SelectedIndex > 0) opusProfile.Enabled = playbackPolicy.Enabled = adaptiveMode.Enabled = lowLatencyMode.Enabled = rtpMode.Enabled = false;
             var text = new StringBuilder(); text.AppendLine(CultureInfo.CurrentCulture, $"{snapshot.Timestamp:HH:mm:ss} · {(snapshot.InCall ? "방 참가 중" : "대기")} · {(snapshot.Experiment?.Pcm == true ? "L16 PCM" : "Opus")} 48kHz / 모노 / {snapshot.FrameMs}ms 프레임");
+            if (snapshot.CleanupError is { } cleanupFailure) text.AppendLine("정리 경고 · " + cleanupFailure);
+            if (snapshot.SharedOutput is { } shared)
+                text.AppendLine(CultureInfo.CurrentCulture, $"공통 출력 (시험) · 출력 스트림 {shared.OutputStreams}개 · 활성 상대 {shared.ActiveSources}/{shared.Sources} · 믹싱 포화 {shared.ClippedSamples}샘플");
             if (snapshot.Experiment is { } experiment) text.AppendLine(CultureInfo.CurrentCulture, $"극저지연 실험 · 여유 하한 {experiment.ReserveMs}ms · 기본 빈 큐 보간 {experiment.EmptyHoldMs}ms · 전체 연속 PLC 상한 {experiment.PlcLimitMs}ms · 출력 안전 여유 {experiment.OutputHeadroomMs}ms · 최신 송신 {experiment.LatestSend} · 최소 출력 {experiment.MinimalOutput} · PCM 손실은 무음 채움");
             text.AppendLine(snapshot.PlaybackPolicy switch
             {
@@ -272,7 +289,7 @@ public sealed partial class CallForm : Form
                 text.AppendLine(CultureInfo.CurrentCulture, $"송신 {Number(peer.TxPayloadKbps, " kbps")} ({peer.TxFrames} 프레임) · 수신 {Number(peer.RxPayloadKbps, " kbps")} ({peer.RxPackets} 패킷)");
                 text.AppendLine(CultureInfo.CurrentCulture, $"수신 지터 {Number(peer.ReceiveJitterMs, " ms")} · 상대 보고 송신 손실 {Fresh(peer.RemoteLossPercent, peer.RemoteReportAgeSeconds, "%")} · 보고 경과 {Number(peer.RemoteReportAgeSeconds, " 초")}");
                 var precision = peer.Precision;
-                text.AppendLine(CultureInfo.CurrentCulture, $"RTCP RTT {Fresh(precision?.RtcpRttMs, precision?.RttAgeSeconds, " ms")} · RTT 경과 {Number(precision?.RttAgeSeconds, " 초")} · 우리 보고 수신 손실 {Fresh(precision?.ReceiveLossPercent, precision?.ReceiveReportAgeSeconds, "%")} / 누적 {precision?.ReceivePacketsLost?.ToString(CultureInfo.CurrentCulture) ?? "미측정"}패킷");
+                text.AppendLine(CultureInfo.CurrentCulture, $"RTCP RTT {Fresh(precision?.RtcpRttMs, precision?.RttAgeSeconds, " ms")} · RTT 경과 {Number(precision?.RttAgeSeconds, " 초")} · 우리 보고 수신 손실 {Fresh(precision?.ReceiveLossPercent, precision?.ReceiveReportAgeSeconds, "%")} / 보고값 {precision?.ReceivePacketsLost?.ToString(CultureInfo.CurrentCulture) ?? "미측정"}패킷");
                 text.AppendLine(CultureInfo.CurrentCulture, $"수신 보고 경과 {Number(precision?.ReceiveReportAgeSeconds, " 초")} · 상대 수신 지터 {Number(precision?.RemoteJitterMs, " ms")} · 마지막 수신 {Number(precision?.LastPacketAgeSeconds, " 초 전")} · 순서 뒤바뀜 {precision?.ReorderedPackets} / 중복 {precision?.DuplicatePackets}");
                 text.AppendLine(CultureInfo.CurrentCulture, $"최근 패킷 도착 간격 P95/최대 {Number(precision?.ArrivalGapP95Ms)}/{Number(precision?.ArrivalGapMaxMs, " ms")} · 송신 프레임 {snapshot.FrameMs}ms · 수신은 상대 설정에 따름");
                 text.AppendLine(CultureInfo.CurrentCulture, $"재생 큐 {Number(peer.Audio.QueueMs, " ms")} · 초과 큐 정리 {peer.Audio.QueueResets}회 · 버퍼 부족 {peer.Audio.Underruns}회");

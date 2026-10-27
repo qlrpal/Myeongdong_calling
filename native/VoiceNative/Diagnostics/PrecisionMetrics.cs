@@ -75,6 +75,8 @@ internal sealed class RtcpMetrics
         lock (sync)
         {
             if (report.SSRC != incomingSsrc) return;
+            // Preserve the SDK's reported value. The pinned SDK populates
+            // PacketsLost from lost_interval, so this is not a call-lifetime total.
             receiveLoss = report.FractionLost * 100.0 / 256; receiveLost = report.PacketsLost; receiveAt = at ?? Now;
         }
     }

@@ -116,18 +116,23 @@ public sealed partial class CallForm
             engine.SetMicrophoneMuted(muteMicrophone.Checked); SaveUserSettings();
             lastDeviceSignature = null; failedSince.Clear();
             await callSession.ConnectAsync(request);
-            if (!closeRequested) callHint.Text = "참가 완료 · 상대를 기다리거나 대화를 시작하세요.";
+            if (!closeRequested && callSession.WantsCall) callHint.Text = "참가 완료 · 상대를 기다리거나 대화를 시작하세요.";
         }
-        catch (Exception ex) { AppendLog("참가 실패: " + ex.Message); if (!closeRequested) callHint.Text = ex.Message; }
+        catch (Exception ex) { AppendLog("참가 실패: " + ex.Message); if (!closeRequested) callHint.Text = "참가 실패 · " + CallFailureMessage.Describe(ex); }
         finally { if (!closeRequested) { join.Enabled = !callSession.WantsCall; leave.Enabled = callSession.WantsCall; } }
     }
-    private async Task DisconnectFromUiAsync()
+    private async Task<bool> DisconnectFromUiAsync()
     {
-        if (callSession is null) return;
+        if (callSession is null) return true;
         leave.Enabled = false;
-        try { await callSession.DisconnectAsync(); }
-        catch (Exception ex) { AppendLog("종료 오류: " + ex.Message); }
-        finally { if (!closeRequested) { join.Enabled = true; callHint.Text = "통화를 종료했어요."; } }
+        try { await callSession.DisconnectAsync(); if (!closeRequested) callHint.Text = "통화를 종료했어요."; return true; }
+        catch (Exception ex)
+        {
+            AppendLog("종료 오류: " + ex.Message);
+            if (!closeRequested) callHint.Text = "정리 오류 · 진단을 저장하고 앱을 다시 시작하세요.";
+            return false;
+        }
+        finally { if (!closeRequested) join.Enabled = !callSession.IsBusy; }
     }
     private async Task AudioSelectionChangedAsync()
     {
@@ -135,7 +140,7 @@ public sealed partial class CallForm
         SaveUserSettings();
         if (!callSession.WantsCall) return;
         deviceSwitching = true;
-        try { await DisconnectFromUiAsync(); if (!closeRequested) await ConnectFromUiAsync(); }
+        try { if (await DisconnectFromUiAsync() && !closeRequested) await ConnectFromUiAsync(); }
         finally { deviceSwitching = false; }
     }
     private void UpdateProductView(CallDiagnostics snapshot)

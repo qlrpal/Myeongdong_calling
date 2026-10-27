@@ -14,6 +14,8 @@ internal static class ProductChecks
         SrtpProtectionChecks.Run(Path.Combine(directory,"srtp-protection.json"));
         MediaPortHistoryChecks.Run();
         await AudioSendLifetimeChecks.RunAsync();
+        await SharedOutputChecks.RunAsync();
+        await CallLifecycleChecks.RunAsync();
         PacketStorageChecks.Run();
         await DedicatedSenderChecks.RunAsync();
         await AdaptiveFrameChecks.RunAsync();

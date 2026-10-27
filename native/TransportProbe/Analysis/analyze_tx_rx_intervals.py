@@ -1,13 +1,15 @@
-"""Join exact RTP identities across sender QPC Tx and receiver capture intervals.
+"""Join exact RTP identities across sender Tx and receiver capture intervals.
 
 No absolute clock subtraction across hosts or from pcap epoch to QPC.
 Software Tx/Rx observations are not hardware transmission/arrival times.
 """
 import collections
 import csv
+import io
 import json
 import sys
 from decimal import Decimal
+from contextlib import nullcontext
 from pathlib import Path
 
 from analyze_nic_rtp import parse_rtp
@@ -49,21 +51,38 @@ def load_tx(path):
     return packets
 
 
-def load_rx(path, receiver):
+def load_pcap(path, document, direction):
     ports = {int(p["LocalEndpoint"].rsplit(":", 1)[1])
-             for sample in receiver.get("samples", []) for p in sample["Peers"]}
+             for sample in document.get("samples", []) for p in sample["Peers"]}
     if not ports:
-        raise ValueError("Receiver endpoint history required")
+        raise ValueError("Local endpoint history required")
+    if direction not in ("Tx", "Rx"):
+        raise ValueError("Capture direction required")
+    port_field = "udp.srcport" if direction == "Tx" else "udp.dstport"
     packets = []
-    with Path(path).open(encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
-            if int(row["udp.dstport"]) in ports:
-                packets.append(dict(Ssrc=int(row["rtp.ssrc"], 0), Timestamp=int(row["rtp.timestamp"]),
-                                    Sequence=int(row["rtp.seq"]), At=Decimal(row["frame.time_epoch"])))
+    with (nullcontext(path) if hasattr(path, "read")
+          else Path(path).open(encoding="utf-8-sig", newline="")) as handle:
+        reader = csv.DictReader(handle)
+        required = {port_field, "rtp.ssrc", "rtp.timestamp", "rtp.seq", "frame.time_epoch"}
+        if not required <= set(reader.fieldnames or []):
+            raise ValueError("Unsupported tshark RTP CSV fields")
+        for row in reader:
+            if int(row[port_field]) in ports:
+                packet = dict(Ssrc=int(row["rtp.ssrc"], 0), Timestamp=int(row["rtp.timestamp"]),
+                              Sequence=int(row["rtp.seq"]), At=Decimal(row["frame.time_epoch"]))
+                if direction == "Tx":
+                    packet["Component"] = "npcap"
+                packets.append(packet)
     return packets
 
 
-def compare(sender, receiver, tx_packets, rx_packets):
+def load_rx(path, receiver):
+    return load_pcap(path, receiver, "Rx")
+
+
+def compare(sender, receiver, tx_packets, rx_packets, tx_clock="sender-qpc"):
+    if tx_clock not in ("sender-qpc", "capture-epoch"):
+        raise ValueError("Explicit supported Tx clock kind required")
     source, destination = trace(sender), trace(receiver)
     sent = {}
     for packet in source["Sends"]:
@@ -111,20 +130,24 @@ def compare(sender, receiver, tx_packets, rx_packets):
                 if not forward or component not in transmitted[ka] or component not in transmitted[kb]:
                     continue
                 left, right = transmitted[ka][component], transmitted[kb][component]
-                tx_gap = (min(right) - min(left)) * 1000
-                entry = dict(gapMs=tx_gap, firstPacketObservationSpanMs=(max(left) - min(left)) * 1000,
-                             secondPacketObservationSpanMs=(max(right) - min(right)) * 1000,
-                             firstApiStartToTxMs=(min(left) - sa["SendStart"]) * 1000,
-                             secondApiStartToTxMs=(min(right) - sb["SendStart"]) * 1000)
+                tx_gap = float((min(right) - min(left)) * 1000)
+                entry = dict(gapMs=tx_gap, firstPacketObservationSpanMs=float((max(left) - min(left)) * 1000),
+                             secondPacketObservationSpanMs=float((max(right) - min(right)) * 1000))
+                # Npcap's epoch is not the app's QPC origin, even on one host.
+                # Only packet-pair intervals may be compared in that mode.
+                if tx_clock == "sender-qpc":
+                    entry.update(firstApiStartToTxMs=(min(left) - sa["SendStart"]) * 1000,
+                                 secondApiStartToTxMs=(min(right) - sb["SendStart"]) * 1000)
                 if event["receiverCaptureMatched"]:
                     entry["intervalGrowthAfterTxMs"] = event["receiverCaptureGapMs"] - tx_gap
                 event["tx"][component] = entry
             gaps.append(event)
-    return dict(sourceFrames=len(sent), matchedSourceFramesByComponent=coverage,
+    return dict(txClock=tx_clock, sourceFrames=len(sent), matchedSourceFramesByComponent=coverage,
                 receiverFrames=len(destination["Receives"]), uniquelyMatchedReceiverFrames=len(matched), gaps=gaps,
                 limits="Exact positive packet matches only; missing Tx observations are not packet loss. "
                        "Each interval uses its own host/capture clock; comparable clock rates are assumed. "
-                       "Tx-to-Rx interval growth is not absolute one-way latency. Multiple Tx observations retain spans. "
+                       "Tx-to-Rx interval growth is not absolute one-way latency. API-to-Tx absolute deltas require sender QPC; "
+                       "they are omitted for capture epoch input. Multiple Tx observations retain spans. "
                        "ETW loss/circular cap/stop state, pcap drops and collector overhead require separate validation. "
                        "Only callback gaps over 30ms are listed; other PLC/output-underfill events remain unclassified.")
 
@@ -159,12 +182,46 @@ def self_test():
         pass
     else:
         raise AssertionError("Evicted trace accepted")
+    s, r, tx, rx = fixtures()
+    for p in tx:
+        p["At"] = Decimal("1800000000") + Decimal(str(p["At"]))
+    independent = compare(s, r, tx, rx, tx_clock="capture-epoch")["gaps"][0]
+    assert abs(independent["tx"][13]["intervalGrowthAfterTxMs"] - 120) < 1e-6
+    assert "firstApiStartToTxMs" not in independent["tx"][13]
+    for p in tx:
+        p["At"] += Decimal("999999999")
+    shifted_epoch = compare(s, r, tx, rx, tx_clock="capture-epoch")["gaps"][0]
+    assert independent["tx"] == shifted_epoch["tx"], "Capture epoch affected intervals"
+    document = {"samples": [{"Peers": [{"LocalEndpoint": "[::]:12345"}]}]}
+    csv_text = ("frame.time_epoch,udp.srcport,udp.dstport,rtp.ssrc,rtp.timestamp,rtp.seq\n"
+                "1800000000.0000001,12345,54321,0x07,120,1\n"
+                "1800000000.0100002,54321,12345,0x08,240,2\n")
+    transmitted = load_pcap(io.StringIO(csv_text), document, "Tx")
+    received = load_rx(io.StringIO(csv_text), document)
+    assert len(transmitted) == len(received) == 1
+    assert transmitted[0]["Ssrc"] == 7 and received[0]["Ssrc"] == 8
+    assert transmitted[0]["At"] == Decimal("1800000000.0000001")
+    assert transmitted[0]["Component"] == "npcap" and "Component" not in received[0]
+    try:
+        load_pcap(io.StringIO("unsupported\n"), document, "Tx")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Missing capture columns accepted")
     print("PASS: exact identities, independent clock origins, missing/duplicate/reordered/evicted data")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         self_test()
+    elif len(sys.argv) == 7 and sys.argv[1] == "--npcap-tx":
+        source, receiver, tx_csv, rx_csv, output = map(Path, sys.argv[2:])
+        if output.resolve() in {p.resolve() for p in (source, receiver, tx_csv, rx_csv)}:
+            raise ValueError("Preserve input data")
+        left, right = [json.loads(p.read_text(encoding="utf-8-sig")) for p in (source, receiver)]
+        result = compare(left, right, load_pcap(tx_csv, left, "Tx"), load_rx(rx_csv, right), tx_clock="capture-epoch")
+        output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print("COMPARED Npcap Tx/Rx:", len(result["gaps"]), "large callback gaps;", result["matchedSourceFramesByComponent"])
     elif len(sys.argv) == 6:
         source, receiver, tx_csv, rx_csv, output = map(Path, sys.argv[1:])
         if output.resolve() in {p.resolve() for p in (source, receiver, tx_csv, rx_csv)}:
@@ -174,4 +231,4 @@ if __name__ == "__main__":
         output.write_text(json.dumps(result, indent=2), encoding="utf-8")
         print("COMPARED", len(result["gaps"]), "large callback gaps;", result["matchedSourceFramesByComponent"])
     else:
-        raise SystemExit("Usage: analyze_tx_rx_intervals.py SENDER.json RECEIVER.json TX-RAW.csv RX-RTP.csv OUTPUT.json | --self-test")
+        raise SystemExit("Usage: analyze_tx_rx_intervals.py [--npcap-tx] SENDER.json RECEIVER.json TX.csv RX.csv OUTPUT.json | --self-test")

@@ -2,12 +2,36 @@ using VoiceNative;
 
 try
 {
+    if (args is ["--audio-devices"])
+    {
+        string? Default(bool capture)
+        { try { return AudioDeviceChoice.DefaultId(capture); } catch (Exception) { return null; } }
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            sessionId = System.Diagnostics.Process.GetCurrentProcess().SessionId,
+            capture = AudioDeviceChoice.List(true).Skip(1), render = AudioDeviceChoice.List(false).Skip(1),
+            defaultCapture = Default(true), defaultRender = Default(false)
+        }, DiagnosticJson.Readable));
+        return;
+    }
     if (args is ["--wasapi-ll-check"])
     {
         Environment.ExitCode = await WasapiLowLatencyCheck.RunAsync();
         return;
     }
     _ = OpusBackend.Snapshot();
+    if (args is ["--call-lifecycle-checks"])
+    { await CallLifecycleChecks.RunAsync(); return; }
+    if (args is ["--call-lifecycle-integration", var lifeServer, var lifeReport, var lifeWave, var lifeShared])
+    { await CallLifecycleProbe.RunAsync(lifeServer, lifeReport, lifeWave, bool.Parse(lifeShared)); return; }
+    if (args is ["--shared-output-checks"])
+    { await SharedOutputChecks.RunAsync(); return; }
+    if (args is ["--local-group-output", var outputServer, var outputReport, var outputWave, var outputShared, var outputMode])
+    { await LocalGroupOutputProbe.RunAsync(outputServer, outputReport, outputWave, bool.Parse(outputShared), outputMode); return; }
+    if (args is ["--local-group-output", var synthServer, var synthReport, var synthWave, var synthShared, var synthMode, var synthEnabled])
+    { await LocalGroupOutputProbe.RunAsync(synthServer, synthReport, synthWave, bool.Parse(synthShared), synthMode, bool.Parse(synthEnabled)); return; }
+    if (args is ["--local-output-soak", var soakOutputServer, var soakOutputReport, var soakOutputWave, var soakOutputShared, var soakOutputMode, var soakOutputSeconds])
+    { await LocalGroupOutputProbe.RunAsync(soakOutputServer, soakOutputReport, soakOutputWave, bool.Parse(soakOutputShared), soakOutputMode, soakSeconds: int.Parse(soakOutputSeconds, System.Globalization.CultureInfo.InvariantCulture)); return; }
     if (args is ["--srtp-protection-checks",var srtpReuseReport])
     { SrtpProtectionChecks.Run(srtpReuseReport); return; }
     if (args is ["--sdk-build-check"])

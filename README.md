@@ -10,6 +10,7 @@
 
 ```powershell
 ./native/run.ps1
+./native/run.ps1 -SharedOutput # 통화당 공통 출력 비교 후보
 ./native/build.ps1 -Package
 ./native/verify.ps1
 ```
@@ -17,6 +18,7 @@
 - [두 호스트 3명·6명 시험](native/docs/TWO-HOST-GROUP-TEST.md)
 - [최신 기준선·송신 대조·미해결 항목](native/docs/reports/EXTREME-100.md)
 - [실행·빌드·소스 구조](native/README.md)
+- [공통 출력 후보·기존 경로 복귀](native/docs/SHARED-OUTPUT.md)
 - [통화 앱 사용법](native/docs/USER-GUIDE.md)
 - [0.6.0 구현·검증](native/docs/reports/PRODUCT-060.md)
 - [Git 배포 범위·명령](native/docs/GIT-RELEASE.md)
