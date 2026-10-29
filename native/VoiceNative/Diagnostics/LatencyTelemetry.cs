@@ -5,7 +5,7 @@ namespace VoiceNative;
 public sealed record LatencyTelemetry(int Version, double? InputApiMs, double? EncodeMs, double? SendWaitMs,
     double? PlaybackQueueMs, double? OutputApiMs, double? DecodeMs, string? OutputState,
     double? InputFrameAgeMs = null, double? OutputFrameAgeMs = null, double FrameMs = 20,
-    ReceiverFrameFeedback? FrameFeedback = null);
+    ReceiverFrameFeedback? FrameFeedback = null, bool? MicrophoneMuted = null);
 public sealed record LatencyView(double? OutboundModelMs, double? InboundModelMs, double? RemoteAgeSeconds,
     LatencyTelemetry? Remote, string Explanation);
 

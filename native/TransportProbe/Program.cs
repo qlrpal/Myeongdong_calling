@@ -1,5 +1,6 @@
 using VoiceNative;
 
+Console.OutputEncoding = new System.Text.UTF8Encoding(false);
 try
 {
     if (args is ["--audio-devices"])
@@ -20,6 +21,20 @@ try
         return;
     }
     _ = OpusBackend.Snapshot();
+    if (args is ["--microphone-hotkey-checks"])
+    { MicrophoneHotkeyChecks.Run(); MicrophoneHotkeyChecks.RunNative(); return; }
+    if (args is ["--pair-functional", var trServer, var trRun, var trRole, var trRoute, var trReport, var trWave, var trShared, var trAddress, var trSeconds, var trReserve, var trEnabled])
+    { await PairFunctionalProbe.RunAsync(trServer, trRun, trRole, trRoute, trReport, trWave, bool.Parse(trShared), trAddress == "auto" ? null : trAddress, int.Parse(trSeconds, System.Globalization.CultureInfo.InvariantCulture), int.Parse(trReserve, System.Globalization.CultureInfo.InvariantCulture), bool.Parse(trEnabled)); return; }
+    if (args is ["--pair-functional", var rsvServer, var rsvRun, var rsvRole, var rsvRoute, var rsvReport, var rsvWave, var rsvShared, var rsvAddress, var rsvSeconds, var rsvMs])
+    { await PairFunctionalProbe.RunAsync(rsvServer, rsvRun, rsvRole, rsvRoute, rsvReport, rsvWave, bool.Parse(rsvShared), rsvAddress == "auto" ? null : rsvAddress, int.Parse(rsvSeconds, System.Globalization.CultureInfo.InvariantCulture), int.Parse(rsvMs, System.Globalization.CultureInfo.InvariantCulture)); return; }
+    if (args is ["--pair-functional", var obsServer, var obsRun, var obsRole, var obsRoute, var obsReport, var obsWave, var obsShared, var obsAddress, var obsSeconds])
+    { await PairFunctionalProbe.RunAsync(obsServer, obsRun, obsRole, obsRoute, obsReport, obsWave, bool.Parse(obsShared), obsAddress == "auto" ? null : obsAddress, int.Parse(obsSeconds, System.Globalization.CultureInfo.InvariantCulture)); return; }
+    if (args is ["--pair-functional", var pinServer, var pinRun, var pinRole, var pinRoute, var pinReport, var pinWave, var pinShared, var pinAddress])
+    { await PairFunctionalProbe.RunAsync(pinServer, pinRun, pinRole, pinRoute, pinReport, pinWave, bool.Parse(pinShared), pinAddress == "auto" ? null : pinAddress); return; }
+    if (args is ["--pair-functional", var pairServer, var pairRun, var pairRole, var pairRoute, var pairReport, var pairWave, var pairShared])
+    { await PairFunctionalProbe.RunAsync(pairServer, pairRun, pairRole, pairRoute, pairReport, pairWave, bool.Parse(pairShared)); return; }
+    if (args is ["--ui-reading-checks", var readingOutput])
+    { UiReadingChecks.Run(readingOutput); return; }
     if (args is ["--call-lifecycle-checks"])
     { await CallLifecycleChecks.RunAsync(); return; }
     if (args is ["--call-lifecycle-integration", var lifeServer, var lifeReport, var lifeWave, var lifeShared])
@@ -196,6 +211,7 @@ try
         Environment.ExitCode = await PipelineProbe.RunAsync(captureServer, captureRoom, captureReport, captureRole,
             measure: false, fixedReserveClockTarget: true, transientEmptyQueueHold: true, freshRestart: true, intermediateCapture: captureMode == "five");
     }
+    else if (args is ["--recovery-device-period-test", var recoveryDeviceOutput]) RecoveryGapChecks.Run(recoveryDeviceOutput, devicePeriods: true);
     else if (args is ["--recovery-gap-test", var recoveryGapOutput]) RecoveryGapChecks.Run(recoveryGapOutput);
     else if (args is ["--external-speech-soak", var externalServer, var externalRoom, var externalReport, var externalRole, var externalMode, var externalWave])
     {

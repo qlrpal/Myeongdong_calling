@@ -16,6 +16,10 @@ internal static class ProductChecks
         await AudioSendLifetimeChecks.RunAsync();
         await SharedOutputChecks.RunAsync();
         await CallLifecycleChecks.RunAsync();
+        PairBarrierChecks.Run();
+        ParticipantStatusChecks.Run();
+        MicrophoneHotkeyChecks.Run();
+        SetupFeedbackChecks.Run();
         PacketStorageChecks.Run();
         await DedicatedSenderChecks.RunAsync();
         await AdaptiveFrameChecks.RunAsync();
@@ -41,8 +45,12 @@ internal static class ProductChecks
         }
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "settings-test.json");
-        var settings = new UserSettings("https://example.com/", "한글방", "사용자", "capture", "render", true);
+        var settings = new UserSettings("https://example.com/", "한글방", "사용자", "capture", "render", true, "ctrl-alt-m");
         settings.Save(path); Require(UserSettings.Load(path) == settings, "Settings round trip");
+        File.WriteAllText(path, "{\"Server\":\"https://example.com/\",\"Room\":\"legacy\",\"Nickname\":\"user\"}");
+        Require(UserSettings.Load(path) is { Room: "legacy", MicrophoneHotkey: "none" }, "Legacy settings registered shortcut");
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(settings with { MicrophoneHotkey = "unknown" }));
+        Require(UserSettings.Load(path) is { Room: "한글방", Muted: true, MicrophoneHotkey: "none" }, "Invalid shortcut discarded other user settings");
         File.WriteAllText(path, "{broken"); Require(UserSettings.Load(path) == UserSettings.Default, "Corrupt settings fallback");
         Require(!Directory.EnumerateFiles(directory, "*.tmp").Any(), "Temporary settings leak");
         var fake = new FakeEngine();

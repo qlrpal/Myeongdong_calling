@@ -1,0 +1,82 @@
+[
+  {
+    "name": "NAudio",
+    "requestedRef": "23922d2a87cf9508883a939af8b1495a0d35cb5a",
+    "resolvedRef": "23922d2a87cf9508883a939af8b1495a0d35cb5a",
+    "source": "https://github.com/naudio/NAudio/blob/23922d2a87cf9508883a939af8b1495a0d35cb5a/LICENSE",
+    "blob": "034ae805fbf6887e4b415771dd8548e4ac4f179a",
+    "spdx": "MIT"
+  },
+  {
+    "name": "DnsClient",
+    "requestedRef": "f1e7ca33d713dc3bc70e7b3664aa3a2b6c090d5d",
+    "resolvedRef": "f1e7ca33d713dc3bc70e7b3664aa3a2b6c090d5d",
+    "source": "https://github.com/MichaCo/DnsClient.NET/blob/f1e7ca33d713dc3bc70e7b3664aa3a2b6c090d5d/LICENSE",
+    "blob": "8dada3edaf50dbc082c9a125058f25def75e625a",
+    "spdx": "Apache-2.0"
+  },
+  {
+    "name": "Makaretu.Dns",
+    "requestedRef": "701463d2091e6d98d4cc4490abb0e0ead8ae2985",
+    "resolvedRef": "701463d2091e6d98d4cc4490abb0e0ead8ae2985",
+    "source": "https://github.com/richardschneider/net-dns/blob/701463d2091e6d98d4cc4490abb0e0ead8ae2985/LICENSE",
+    "blob": "61d5419047d083bc1b1233241dfc4d097b76176b",
+    "spdx": "MIT"
+  },
+  {
+    "name": "Makaretu.Dns.Multicast",
+    "requestedRef": "v0.27.0",
+    "resolvedRef": "v0.27.0",
+    "source": "https://github.com/richardschneider/net-mdns/blob/v0.27.0/LICENSE",
+    "blob": "61d5419047d083bc1b1233241dfc4d097b76176b",
+    "spdx": "MIT"
+  },
+  {
+    "name": "Common.Logging",
+    "requestedRef": "3.4.1",
+    "resolvedRef": null,
+    "source": "https://github.com/net-commons/common-logging/blob/master/license.txt",
+    "blob": "29f81d812f3e768fa89638d1f72920dbfd1413a8",
+    "spdx": "Apache-2.0"
+  },
+  {
+    "name": "IPNetwork2",
+    "requestedRef": "2.1.2",
+    "resolvedRef": "2.1.2",
+    "source": "https://github.com/lduchosal/ipnetwork/blob/2.1.2/LICENSE",
+    "blob": "45d7392ac4eec4f42894d1c212525529415631b0",
+    "spdx": "BSD-2-Clause"
+  },
+  {
+    "name": "SimpleBase",
+    "requestedRef": "v1.3.1",
+    "resolvedRef": null,
+    "source": "https://github.com/ssg/SimpleBase/blob/main/LICENSE.txt",
+    "blob": "dc24dac82b0aed33ce9f6b3400da5feb34d97e18",
+    "spdx": "Apache-2.0"
+  },
+  {
+    "name": "SIPSorcery.WebSocketSharp",
+    "requestedRef": null,
+    "resolvedRef": null,
+    "source": "https://github.com/sipsorcery/websocket-sharp/blob/master/LICENSE.txt",
+    "blob": "c978848b346d2e29c39254e9170eca6de639d1b1",
+    "spdx": "MIT"
+  },
+  {
+    "name": "Tmds.LibC",
+    "requestedRef": "0.2.0",
+    "resolvedRef": null,
+    "source": "https://github.com/tmds/Tmds.LibC/blob/master/LICENSE",
+    "blob": "da6125439e48ee47a49b63cce5259a6075a20edc",
+    "spdx": "MIT"
+  },
+  {
+    "name": "Microsoft",
+    "requestedRef": "v10.0.10",
+    "resolvedRef": "v10.0.10",
+    "source": "https://github.com/dotnet/runtime/blob/v10.0.10/LICENSE.TXT",
+    "blob": "984713a49622a96da110443c15477613bc12656b",
+    "spdx": "NOASSERTION"
+  }
+]

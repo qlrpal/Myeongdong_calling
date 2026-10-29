@@ -56,21 +56,6 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11"
         }
       },
-      "NAudio": {
-        "type": "Direct",
-        "requested": "[3.0.0, )",
-        "resolved": "3.0.0",
-        "contentHash": "ZPB4QJyVpMXOBpzwASEjiqVKbtTM+81eex7VMNOP31P0f3kqNhJL3v/C7DooVcta5PkSxtx4NH8l/UGUKawW1g==",
-        "dependencies": {
-          "NAudio.Asio": "3.0.0",
-          "NAudio.Core": "3.0.0",
-          "NAudio.Dmo": "3.0.0",
-          "NAudio.Midi": "3.0.0",
-          "NAudio.Wasapi": "3.0.0",
-          "NAudio.WinForms": "3.0.0",
-          "NAudio.WinMM": "3.0.0"
-        }
-      },
       "NAudio.Wasapi": {
         "type": "Direct",
         "requested": "[3.0.0, )",
@@ -144,14 +129,6 @@
         "resolved": "1.1.0",
         "contentHash": "kz0PEW2lhqygehI/d6XsPCQzD7ff7gUJaVGPVETX611eadGsA3A877GdSlU0LRVMCTH/+P3o2iDTak+S08V2+A=="
       },
-      "NAudio.Asio": {
-        "type": "Transitive",
-        "resolved": "3.0.0",
-        "contentHash": "JUdHfdJk7+xIuzBfcvE7gnAEBNbXDui0Ay7Zy4vt29UPP3319bkLYRoIR5W+bRFDn8aVdHnPMYDJANRAHx2AMg==",
-        "dependencies": {
-          "NAudio.Core": "3.0.0"
-        }
-      },
       "NAudio.Core": {
         "type": "Transitive",
         "resolved": "3.0.0",
@@ -160,28 +137,12 @@
           "System.Numerics.Tensors": "9.0.0"
         }
       },
-      "NAudio.Dmo": {
-        "type": "Transitive",
-        "resolved": "3.0.0",
-        "contentHash": "4HfNHTcxe/2wIqFsgfUAHUQk3Gm7jIUap47nwP3Ro1dFh2QRWhroxDV3O4+oeHpqOuK5eFszbrxjo5yayS8W5w==",
-        "dependencies": {
-          "NAudio.Core": "3.0.0"
-        }
-      },
       "NAudio.Midi": {
         "type": "Transitive",
         "resolved": "3.0.0",
         "contentHash": "h3VjMTBoBAOw63W7mMrv1kHdRQZkuayTpYrUsusUolORkmgfFiMg8eM4VHwgMBcOgm14997B/r7EojavMBu6CQ==",
         "dependencies": {
           "NAudio.Core": "3.0.0"
-        }
-      },
-      "NAudio.WinForms": {
-        "type": "Transitive",
-        "resolved": "3.0.0",
-        "contentHash": "JhDTk3vW2LZY0qE7eF779rmMp2sWcsAoQCo712MorNRroRfafG6xtU/BBDSaThE31XIaQxfTB7FA3lWwd+AyDQ==",
-        "dependencies": {
-          "NAudio.WinMM": "3.0.0"
         }
       },
       "NETStandard.Library": {

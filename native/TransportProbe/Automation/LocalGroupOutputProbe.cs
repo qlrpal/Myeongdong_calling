@@ -24,6 +24,28 @@ internal static class LocalGroupOutputProbe
         { await engines[i].JoinAsync(new Uri(server), room, "local-" + i); joined.Add(i); }
         async Task Leave(int i)
         { await engines[i].LeaveAsync(); joined.Remove(i); }
+        var mutedSlots = new HashSet<int>();
+        async Task VerifyRemoteMute()
+        {
+            var deadline = Stopwatch.StartNew();
+            while (true)
+            {
+                var correct = true;
+                foreach (var i in joined)
+                {
+                    var snapshot = engines[i].GetDiagnostics();
+                    correct &= snapshot.Peers.Length == joined.Count - 1;
+                    foreach (var peer in snapshot.Peers)
+                    {
+                        var slot = joined.SingleOrDefault(other => other != i && peer.Name == "local-" + other, -1);
+                        correct &= slot >= 0 && ParticipantAudioStatus.RemoteMuted(peer.State, peer.Latency) == mutedSlots.Contains(slot);
+                    }
+                }
+                if (correct) { Console.WriteLine("PASS local remote microphone states members=" + joined.Count); return; }
+                if (deadline.Elapsed.TotalSeconds > 8) throw new TimeoutException("Remote microphone state propagation failed");
+                await Task.Delay(200);
+            }
+        }
         async Task Ready()
         {
             var timeout = Stopwatch.StartNew();
@@ -128,16 +150,22 @@ internal static class LocalGroupOutputProbe
             }
             else
             {
-            await Join(0); await Join(1); await Ready(); await Window("pair", 5);
+            await Join(0); await Join(1); await Ready(); await VerifyRemoteMute(); await Window("pair", 5);
             await Join(2); await Ready(); await Window("three", 8);
             await Join(3); await Join(4); await Join(5); await Ready(); await Window("six", 15);
+            engines[0].SetMicrophoneMuted(true); mutedSlots.Add(0); await VerifyRemoteMute();
+            engines[2].SetMicrophoneMuted(true); mutedSlots.Add(2); await VerifyRemoteMute();
+            engines[0].SetMicrophoneMuted(false); mutedSlots.Remove(0); await VerifyRemoteMute();
+            engines[2].SetMicrophoneMuted(false); mutedSlots.Remove(2); await VerifyRemoteMute();
             var oldRestarts = engines[0].GetDiagnostics().Peers.ToDictionary(p => p.Id, p => p.Audio.DeviceRestarts);
             await engines[0].RestartOutputAsync(); await Ready(); await Window("output-restart", 5);
             Require(engines[0].GetDiagnostics().Peers.All(p => p.Audio.DeviceRestarts == oldRestarts[p.Id] + 1), "Output restart count mismatch");
             var muted = engines[0].GetDiagnostics().Peers[0]; engines[0].SetPeerVolume(muted.Id, 0);
-            await Window("peer-muted", 3); engines[0].SetPeerVolume(muted.Id, .01f);
+            await Window("peer-muted", 3); await VerifyRemoteMute(); engines[0].SetPeerVolume(muted.Id, .01f);
+            engines[5].SetMicrophoneMuted(true); mutedSlots.Add(5); await VerifyRemoteMute();
             await Leave(5); await Ready(); await Window("departure", 3);
-            await Join(5); await Ready(); await Window("rejoin", 5);
+            await Join(5); await Ready(); await VerifyRemoteMute(); await Window("rejoin", 5);
+            engines[5].SetMicrophoneMuted(false); mutedSlots.Remove(5); await VerifyRemoteMute();
             for (var i = 5; i >= 1; i--) await Leave(i);
             await Ready(); await Window("alone", 3);
             await Task.WhenAll(engines.Select(e => e.LeaveAsync())); joined.Clear();

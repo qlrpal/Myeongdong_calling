@@ -8,11 +8,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>0.6.0</Version>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(BetaRelease)' == 'true'">
+    <DefineConstants>$(DefineConstants);BETA_RELEASE</DefineConstants>
+    <Version>0.6.1-beta.1</Version>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
 
   <Import Project="../sdk/RuntimeDependencies.props" />
   <Import Project="../NativeOpus.props" />
   <ItemGroup>
-    <PackageReference Include="NAudio" Version="3.0.0" />
     <PackageReference Include="NAudio.WinMM" Version="3.0.0" />
     <PackageReference Include="NAudio.Wasapi" Version="3.0.0" />
   </ItemGroup>

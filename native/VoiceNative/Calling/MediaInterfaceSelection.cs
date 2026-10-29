@@ -48,6 +48,11 @@ internal static class MediaInterfaceSelection
         socket.SetSocketOption(ipv6 ? SocketOptionLevel.IPv6 : SocketOptionLevel.IP, (SocketOptionName)31,
             ipv6 ? choice.Index : IPAddress.HostToNetworkOrder(choice.Index));
     }
+    // Windows GET returns host byte order for both families, unlike IPv4 SET.
+    // https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options
+    internal static int ReadIndex(Socket socket) => (int)socket.GetSocketOption(
+        socket.AddressFamily == AddressFamily.InterNetworkV6 ? SocketOptionLevel.IPv6 : SocketOptionLevel.IP,
+        (SocketOptionName)31)!;
     internal static bool IsSelectable(IPAddress address) => !IPAddress.IsLoopback(address)
         && (address.AddressFamily == AddressFamily.InterNetwork
             ? !address.Equals(IPAddress.Any) && !address.Equals(IPAddress.Broadcast)

@@ -61,6 +61,12 @@ dotnet run --project native/TransportProbe -- --turn-integration https://qlrpal.
 
 자격 증명 형식과 coturn 설정은 [coturn 공식 설명](https://github.com/coturn/coturn/wiki/turnserver)을 참고합니다.
 
+## 공개 도메인 운영 확인 · 2026-10-28
+
+공개 도메인의 A 레코드는 OCI 공인 주소를 가리켜야 합니다. 집 공유기/PC 주소를 자동 등록하는 DDNS 클라이언트와 같은 호스트를 공유하지 마세요. No-IP에서 기존 A 레코드를 OCI 주소로 바로잡았으며 Enable Dynamic DNS는 기존 해제 상태를 유지했습니다. [115 보고서](../docs/reports/EXTREME-115.md). 이전 값으로 갱신된 경위는 미확정이며 별도 자동 갱신기를 설치하지 않았습니다.
+
+문제 발생 시 PC와 서버의 DNS 결과, 일반 HTTPS `/health`, 실제 `voice-native`·`nginx`·`coturn` 서비스 상태를 구분해 확인합니다. 인증서를 무시하거나 기본 앱에 OCI IP를 하드코딩하지 않습니다. DNS를 수정한 것만으로 TURN 미디어 성공을 판정하지 않고 강제 중계 검사를 수행합니다. 이 DNS 변경만을 위해 클라이언트를 다시 배포할 필요는 없습니다.
+
 ## TURN 읽기 전용 부하 확인
 
 서버의 소스 디렉터리에서 `bash deploy/inspect-turn.sh 10`으로 coturn 서비스 전체의 CPU 코어 사용량과 메모리를 관측할 수 있습니다(1~60초). 설정·방화벽·서비스를 변경하지 않습니다. null은 계측 불가 또는 카운터 초기화를 의미합니다. 결과는 서비스 전체 합계이며 개별 사용자 부하나 400pps 수용량을 검증하지 않습니다.

@@ -114,6 +114,29 @@ public sealed class WebRtcCallEngine : ICallEngine
     public event Action<string>? Status;
     private void NotifyStatus(string message) => CallNotifications.Publish(Status, message);
     internal Action<string>? DiagnosticAfterCleanup { get; init; }
+    // Opt-in test control over the authenticated WebRTC channel. Never enabled
+    // by product UI; no audio/packet-path work or new network listener.
+    internal Action<string>? DiagnosticControlReceived { get; init; }
+    internal sealed record MediaSocketObservation(string Peer, string? LocalEndpoint, int? InterfaceIndex, string? Error);
+    internal MediaSocketObservation[] DiagnosticMediaBindings() => Volatile.Read(ref sendPeers).Select(peer =>
+    {
+        try
+        {
+            var socket = peer.Connection.GetRtpChannel().RtpSocket;
+            return new MediaSocketObservation(peer.Name, socket.LocalEndPoint?.ToString(), MediaInterfaceSelection.ReadIndex(socket), null);
+        }
+        catch (Exception error) { return new MediaSocketObservation(peer.Name, null, null, error.GetType().Name); }
+    }).ToArray();
+    internal void SendDiagnosticControl(string message)
+    {
+        if (DiagnosticControlReceived is null || message.Length > 512) throw new InvalidOperationException("Diagnostic control disabled or oversized.");
+        foreach (var peer in Volatile.Read(ref sendPeers))
+        {
+            var channel = peer.DiagnosticsChannel;
+            if (channel?.readyState == RTCDataChannelState.open && channel.bufferedAmount < 4096)
+                channel.send("app-check-v1:" + message);
+        }
+    }
     private sealed record Session(string Id, string Token, RemotePeer[] Peers);
     private sealed record RemotePeer(string Id, string Name);
     private sealed record Peer(RTCPeerConnection Connection, WindowsAudioDevice Sink, AudioEncoder Decoder, string Name, PeerMetrics Metrics, RtcpMetrics Precision,
@@ -762,7 +785,7 @@ public sealed class WebRtcCallEngine : ICallEngine
                     ? new ReceiverFrameFeedback(experiment?.AdaptiveShortReserve == true && experiment.Pcm == false,
                         sample.Rx, decodedMs, playout.ConcealedMs, playout.LatePackets, playout.SourceChanges,
                         audio.DeviceError is null && audio.PlaybackState == "재생" && audio.LastFrameAgeMs is <= 250, audio.UnderfillMs, playout.RecoveryDiscardedMs) : null;
-                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs, feedback))); }
+                try { channel.send(JsonSerializer.Serialize(new LatencyTelemetry(1, mic?.DeviceAverageLatencyMs, mic?.ProcessingMs, sender?.LastWaitMs, audio.QueueMs, audio.DeviceLatencyMs, audio.ProcessingMs, audio.PlaybackState, mic?.LastFrameAgeMs, audio.LastFrameAgeMs, FrameDurationMs, feedback, Volatile.Read(ref microphoneMuted)))); }
                 catch (Exception) { } // Diagnostics must not interrupt audio if the channel closes.
             }
             var nominated = peer.Connection.GetRtpChannel().NominatedEntry;
@@ -810,6 +833,15 @@ public sealed class WebRtcCallEngine : ICallEngine
         peer.DiagnosticsChannel = channel;
         channel.onmessage += (_, _, bytes) =>
         {
+            if (DiagnosticControlReceived is { } control && bytes.Length <= 1024)
+            {
+                var text = System.Text.Encoding.UTF8.GetString(bytes);
+                if (text.StartsWith("app-check-v1:", StringComparison.Ordinal))
+                {
+                    try { control(text[13..]); } catch (Exception) { /* Test observer cannot break media. */ }
+                    return;
+                }
+            }
             var receivedAt = ProbeClock.Now;
             if (!peer.Telemetry.Receive(bytes)) HandleProbe(peer, bytes, receivedAt);
         };

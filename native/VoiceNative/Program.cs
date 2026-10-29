@@ -17,6 +17,13 @@ internal static class Program
         }
         _ = OpusBackend.Snapshot();
         ApplicationConfiguration.Initialize();
+#if !BETA_RELEASE
+        if (args is ["--ui-preview-call", var callPreview])
+        { using var preview = new CallForm(); preview.SavePreview(callPreview, members: 6); return; }
+        if (args is ["--ui-preview-call-small", var smallCallPreview])
+        { using var preview = new CallForm(); preview.SavePreview(smallCallPreview, minimum: true, members: 6); return; }
+        if (args is ["--ui-preview-settings", var settingsPreview])
+        { using var preview = new CallForm(); preview.SavePreview(settingsPreview, settings: true); return; }
         if (args is ["--ui-preview-small", var smallPath])
         {
             using var preview = new CallForm(); preview.SavePreview(smallPath, minimum: true); return;
@@ -31,6 +38,7 @@ internal static class Program
             preview.SavePreview(path);
             return;
         }
+#endif
         try
         {
             string? mediaAddress = null, experiment = null;
@@ -41,8 +49,10 @@ internal static class Program
                 switch (args[i])
                 {
                     case "--media-address": mediaAddress = args[i + 1]; break;
+#if !BETA_RELEASE
                     case "--experiment": experiment = args[i + 1]; break;
                     case "--shared-output": sharedOutput = bool.TryParse(args[i + 1], out var enabled) ? enabled : throw new ArgumentException("공통 출력 옵션에는 true 또는 false가 필요합니다."); break;
+#endif
                     default: throw new ArgumentException("알 수 없는 실행 옵션: " + args[i]);
                 }
             }

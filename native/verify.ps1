@@ -23,6 +23,8 @@ foreach ($check in $checks) {
 }
 & $probe --product-checks (Join-Path $PSScriptRoot '.local/reports/product-checks')
 if ($LASTEXITCODE -ne 0) { throw 'Product controls/settings/reconnection checks failed.' }
+& $probe --ui-reading-checks (Join-Path $PSScriptRoot '.local/reports/ui-reading')
+if ($LASTEXITCODE -ne 0) { throw 'UI reading-position checks failed.' }
 if ($Stress) {
     & $probe --fractional-network-checks (Join-Path $PSScriptRoot '.local/reports/adaptive-network-verify.json')
     if ($LASTEXITCODE -ne 0) { throw 'Adaptive frame/network recovery checks failed.' }
@@ -35,6 +37,8 @@ if ($Stress) {
 if ($LASTEXITCODE -ne 0) { throw 'Opus comparison failed.' }
 & $probe --recovery-gap-test (Join-Path $PSScriptRoot '.local/reports/recovery-gap-verify.json')
 if ($LASTEXITCODE -ne 0) { throw 'Recovery gap comparison failed.' }
+& $probe --recovery-device-period-test (Join-Path $PSScriptRoot '.local/reports/recovery-device-periods-verify.json')
+if ($LASTEXITCODE -ne 0) { throw 'Recovery device-period checks failed.' }
 & $probe --recovery-policy-test (Join-Path $PSScriptRoot '.local/reports/recovery-policy-verify.json')
 if ($LASTEXITCODE -ne 0) { throw 'Responsive recovery policy checks failed.' }
 $server = Join-Path $PSScriptRoot 'server'
@@ -48,6 +52,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Server regression tests failed.' }
 }
 finally { Pop-Location }
+& node --test (Join-Path $PSScriptRoot 'TransportProbe/Runner/check-runner.test.mjs') (Join-Path $PSScriptRoot 'TransportProbe/Runner/pair-summary.test.mjs') (Join-Path $PSScriptRoot 'TransportProbe/Runner/pair-observation.test.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'App check runner regression tests failed.' }
+& node --test (Join-Path $PSScriptRoot 'release/package.test.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'Beta package policy regression tests failed.' }
 if ($Integration) {
     foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration', '--rtp-playout-integration', '--variable-frame-integration', '--ipv6-loopback-integration')) {
         & $probe $check

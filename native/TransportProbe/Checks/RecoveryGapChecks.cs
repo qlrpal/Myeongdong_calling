@@ -6,11 +6,12 @@ namespace VoiceNative;
 internal static class RecoveryGapChecks
 {
     private sealed record Event(double At, uint Stamp, bool Read);
-    private sealed record Result(string Scenario, int FrameMs, int PullMs, string Mode,
+    private sealed record Result(string Scenario, int FrameMs, double PullMs, string Mode,
         double UnderfillMs, double PlcMs, long Rebuffers, double DiscardMs,
-        double? RecoveryToFreshMs, double? SteadySourceAgeMedianMs, double? PostSourceAgeP95Ms);
+        double? RecoveryToFreshMs, double? SteadySourceAgeMedianMs, double? PostSourceAgeP95Ms,
+        double ReadPhaseMs, double? FirstPlaybackAfterReturnMs);
 
-    public static void Run(string output, bool comparePolicies = false)
+    public static void Run(string output, bool comparePolicies = false, bool devicePeriods = false)
     {
         if (comparePolicies)
         {
@@ -39,13 +40,14 @@ internal static class RecoveryGapChecks
         }
         var results = new List<Result>();
         foreach (var frameMs in new[] {10,20})
-        foreach (var pullMs in new[] {10,22})
-        foreach (var scenario in comparePolicies ? new[] {"steady","reorder","burst60","burst80","burst160","burst220","burst400","holes160","holes400","loss400"} : new[] {"steady","reorder","burst160","burst220","burst400","holes160","holes400","loss400"})
+        foreach (var pullSamples in devicePeriods ? new[] {128,256,480} : new[] {480,1056})
+        foreach (var phaseSamples in devicePeriods ? new[] {0,pullSamples/2} : new[] {0})
+        foreach (var scenario in devicePeriods ? new[] {"steady","reorder","burst80","burst160","loss400"} : comparePolicies ? new[] {"steady","reorder","burst60","burst80","burst160","burst220","burst400","holes160","holes400","loss400"} : new[] {"steady","reorder","burst160","burst220","burst400","holes160","holes400","loss400"})
         {
             var pair = new List<Result>();
-            foreach (var mode in comparePolicies ? new[] {"current","responsive"} : new[] {"current","continuous-tail","bounded-tail"})
+            foreach (var mode in devicePeriods ? new[] {"current","bounded-tail"} : comparePolicies ? new[] {"current","responsive"} : new[] {"current","continuous-tail","bounded-tail"})
             {
-                var result = Simulate(scenario, frameMs, pullMs, mode);
+                var result = Simulate(scenario, frameMs, pullSamples, mode, phaseSamples);
                 results.Add(result); pair.Add(result);
             }
             if (scenario is "steady" or "reorder" && pair.Where(x => !x.Mode.StartsWith("responsive", StringComparison.Ordinal)).Skip(1).Any(x=>pair[0] != x with {Mode="current"}))
@@ -53,16 +55,19 @@ internal static class RecoveryGapChecks
         }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         File.WriteAllText(output,JsonSerializer.Serialize(new {
-            notes=comparePolicies
+            caseCount=results.Count, qualityQualified=false, physicalLatencyMeasured=false,
+            notes=devicePeriods
+                ? "Synthetic recovery measurement at 128/256/480 sample pulls (2.667/5.333/10ms), two read phases, 10/20ms Opus, fixed20 current and existing bounded-tail candidate. No new product recovery policy. FirstPlaybackAfterReturnMs and RecoveryToFreshMs use virtual arrival/render ordering, not physical latency or exact TURN replay. Null means no qualifying played frame in the one-second window. Capture batching, real scheduling and network are not modeled."
+                : comparePolicies
                 ? "Synthetic LowDelay64 with virtual 20ms transit. Identical events compare fixed20 and responsive15-30 (20ms startup/restart). 60ms PLC bound and fresh restart retained; no new audio discard. Source age is synthetic RTP generation to render request, not physical output. No devices/network; not exact hotspot replay."
                 : "Synthetic LowDelay64 PCM/Opus with virtual 20ms transit and one 160/220/400ms arrival disruption. All three modes share identical events. Fixed 20ms reserve, 60ms PLC, fresh restart and transient hold; continuous-tail waits for a contiguous tail on restart, bounded-tail permits only one extra render pull before baseline fallback. Source age is generated PCM timestamp to render request, not physical output. RecoveryToFreshMs=null means no qualifying frame in the one-second observation window. No audio devices/network used. Not exact hotspot replay.", results
         },DiagnosticJson.Readable));
         foreach(var group in results.GroupBy(x=>(x.Scenario,x.Mode)))
             Console.WriteLine($"{group.Key}: underfill={group.Sum(x=>x.UnderfillMs):F1}ms rebuffer={group.Sum(x=>x.Rebuffers)}");
-        Console.WriteLine("PASS: normal/reordered playback unchanged; recovery comparisons exported.");
+        Console.WriteLine("PASS: normal playback/safety checks; recovery measurements exported, not quality qualification.");
     }
 
-    private static Result Simulate(string scenario, int frameMs, int pullMs, string mode)
+    private static Result Simulate(string scenario, int frameMs, int pullSamples, string mode, int phaseSamples = 0)
     {
         const int start=4000;
         var gap=scenario.EndsWith("60",StringComparison.Ordinal) && !scenario.EndsWith("160",StringComparison.Ordinal)?60:scenario.EndsWith("80",StringComparison.Ordinal)?80:scenario.EndsWith("160",StringComparison.Ordinal)?160:scenario.EndsWith("220",StringComparison.Ordinal)?220:400;
@@ -83,13 +88,13 @@ internal static class RecoveryGapChecks
             }
             events.Add(new(arrival,(uint)(sent*48),false));
         }
-        for(var at=0;at<12000;at+=pullMs)events.Add(new(at,0,true));
+        for(var at=phaseSamples;at<12000*48;at+=pullSamples)events.Add(new(at/48.0,0,true));
         var trace=new PipelineTrace(); trace.Start(180);
         using var buffer=new RtpOpusPlayoutBuffer(new(),adaptiveReserve:false,pipeline:trace,tracePeer:"gap",
             fixedReserveClockTarget:true,transientEmptyQueueHold:true,freshRestart:true,contiguousRestart:mode is "continuous-tail" or "bounded-tail",boundedRestartWait:mode=="bounded-tail",
             targetReserveMs:mode.StartsWith("responsive",StringComparison.Ordinal)?15:20,
             responsiveReserve:mode.StartsWith("responsive",StringComparison.Ordinal));
-        var readTimes=new List<double>(); var destination=new byte[pullMs*96];
+        var readTimes=new List<double>(); var destination=new byte[pullSamples*2];
         foreach(var e in events.OrderBy(x=>x.At).ThenBy(x=>x.Read))
         {
             if(e.Read){buffer.Read(destination);readTimes.Add(e.At);}
@@ -113,7 +118,7 @@ internal static class RecoveryGapChecks
         var state=buffer.Snapshot();var detail=buffer.Details();
         if(detail.MaxConsecutivePlcMs>60 || state.QueueMs>120)throw new InvalidOperationException("Recovery bounds failed.");
         if(scenario=="steady" && (state.UnderfillMs!=0 || detail.Rebuffers!=0 || detail.ConcealedMs!=0))throw new InvalidOperationException("Steady simulation failed.");
-        return new(scenario,frameMs,pullMs,mode,state.UnderfillMs,detail.ConcealedMs,detail.Rebuffers,detail.RecoveryDiscardedMs,fresh,steadyMedian,Percentile(post.Select(x=>x.Age).Order().ToArray(),.95));
+        return new(scenario,frameMs,pullSamples/48.0,mode,state.UnderfillMs,detail.ConcealedMs,detail.Rebuffers,detail.RecoveryDiscardedMs,fresh,steadyMedian,Percentile(post.Select(x=>x.Age).Order().ToArray(),.95),phaseSamples/48.0,post.Select(x=>(double?)(x.At-end)).FirstOrDefault());
     }
     private static double? Percentile(double[] sorted,double p)=>sorted.Length==0?null:sorted[(int)Math.Ceiling(sorted.Length*p)-1];
 }

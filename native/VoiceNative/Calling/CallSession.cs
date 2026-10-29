@@ -1,19 +1,26 @@
 namespace VoiceNative;
 
+internal enum CallInputField { Server, Room, Nickname, Capture, Render }
+internal sealed class CallInputException(string message, CallInputField field) : ArgumentException(message)
+{
+    internal CallInputField Field { get; } = field;
+}
+
 public sealed record CallRequest(Uri Server, string Room, string Nickname, string? CaptureId, string? RenderId)
 {
     public static CallRequest Create(string server, string room, string nickname, string? captureId, string? renderId)
     {
-        if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(room) || string.IsNullOrWhiteSpace(nickname))
-            throw new ArgumentException("서버·방 이름·닉네임을 입력하세요.");
+        if (string.IsNullOrWhiteSpace(server)) throw new CallInputException("서버 주소를 입력하세요.", CallInputField.Server);
+        if (string.IsNullOrWhiteSpace(room)) throw new CallInputException("방 이름을 입력하세요.", CallInputField.Room);
+        if (string.IsNullOrWhiteSpace(nickname)) throw new CallInputException("닉네임을 입력하세요.", CallInputField.Nickname);
         if (!Uri.TryCreate(server.Trim().TrimEnd('/') + "/", UriKind.Absolute, out var address)
             || address.Scheme is not ("https" or "http") || address.UserInfo.Length != 0
             || address.Query.Length != 0 || address.Fragment.Length != 0)
-            throw new ArgumentException("올바른 HTTP 또는 HTTPS 서버 주소를 입력하세요.");
+            throw new CallInputException("올바른 HTTP 또는 HTTPS 서버 주소를 입력하세요.", CallInputField.Server);
         room = room.Trim(); nickname = nickname.Trim();
         if (!System.Text.RegularExpressions.Regex.IsMatch(room, @"^[\p{L}\p{N}_-]{1,40}$"))
-            throw new ArgumentException("방 이름은 문자·숫자·밑줄·하이픈으로 1~40자 입력하세요.");
-        if (nickname.Length is < 1 or > 24 || nickname.Any(char.IsControl)) throw new ArgumentException("닉네임은 줄바꿈 없이 1~24자 입력하세요.");
+            throw new CallInputException("방 이름은 문자·숫자·밑줄·하이픈으로 1~40자 입력하세요.", CallInputField.Room);
+        if (nickname.Length is < 1 or > 24 || nickname.Any(char.IsControl)) throw new CallInputException("닉네임은 줄바꿈 없이 1~24자 입력하세요.", CallInputField.Nickname);
         return new(address, room, nickname, captureId, renderId);
     }
 }

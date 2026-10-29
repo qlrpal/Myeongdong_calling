@@ -78,6 +78,7 @@ internal static class WebRtcProbe
         left.addTrack(new MediaStreamTrack([format], MediaStreamStatusEnum.SendRecv));
         right.addTrack(new MediaStreamTrack([format], MediaStreamStatusEnum.SendRecv));
         var telemetryReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var remoteTelemetry = new VoiceNative.TelemetryState();
         var telemetryEchoed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var telemetryChannel = await left.createDataChannel("voice-latency-v1");
         telemetryChannel.onmessage += (_, _, bytes) => { if (new VoiceNative.TelemetryState().Receive(bytes)) telemetryEchoed.TrySetResult(); };
@@ -85,7 +86,7 @@ internal static class WebRtcProbe
         {
             channel.onmessage += (_, _, bytes) =>
             {
-                if (new VoiceNative.TelemetryState().Receive(bytes)) { telemetryReceived.TrySetResult(); channel.send(System.Text.Encoding.UTF8.GetString(bytes)); }
+                if (remoteTelemetry.Receive(bytes)) { telemetryReceived.TrySetResult(); channel.send(System.Text.Encoding.UTF8.GetString(bytes)); }
             };
         };
         var pendingLeft = new List<RTCIceCandidateInit>();
@@ -157,8 +158,13 @@ internal static class WebRtcProbe
             using (var telemetryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
             {
                 while (telemetryChannel.readyState != RTCDataChannelState.open) await Task.Delay(20, telemetryTimeout.Token);
-                telemetryChannel.send(JsonSerializer.Serialize(new VoiceNative.LatencyTelemetry(1, 20, 1, 2, 40, 30, 1, "재생")));
+                var muteReport = new VoiceNative.LatencyTelemetry(1, 20, 1, 2, 40, 30, 1, "재생", MicrophoneMuted: true);
+                telemetryChannel.send(JsonSerializer.Serialize(muteReport));
                 await Task.WhenAll(telemetryReceived.Task, telemetryEchoed.Task).WaitAsync(telemetryTimeout.Token);
+                if (remoteTelemetry.Snapshot().Remote?.MicrophoneMuted != true) throw new InvalidOperationException("Remote microphone mute declaration lost.");
+                telemetryChannel.send(JsonSerializer.Serialize(muteReport with { MicrophoneMuted = false }));
+                while (remoteTelemetry.Snapshot().Remote?.MicrophoneMuted != false) await Task.Delay(10, telemetryTimeout.Token);
+                Console.WriteLine("PASS: remote microphone mute/unmute travels over the authenticated WebRTC data channel.");
                 Console.WriteLine("PASS: latency telemetry exchanged bidirectionally over the native WebRTC data channel alongside Opus.");
             }
             var timestampBase = previousRtpTimestamp!.Value;

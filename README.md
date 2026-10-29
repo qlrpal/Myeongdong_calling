@@ -1,6 +1,6 @@
 # 명동 콜링 Native
 
-지연을 우선하는 Windows 음성 통화 앱과 OCI Ubuntu 연결 관리/TURN 서버입니다. 현재 작업 버전은0.6.0입니다.
+지연을 우선하는 Windows 음성 통화 앱과 OCI Ubuntu 연결 관리/TURN 서버입니다. 소스의 제품 기반은0.6.0이며 **0.6.1-beta.1 Windows x64 배포**를 준비했습니다. [베타 빌드·배포 안내](native/docs/BETA-RELEASE.md).
 
 현재 브랜치 `codex/extreme-latency`는 극저지연 실험과 앱 최적화를 포함합니다. 기본 실행과 실험 구성은 구분하며 안정판 전체 대체 판정은 보류합니다. [현재 상태·검증·다음 작업](native/docs/CURRENT-STATUS.md), [극저지연 실행 안내](native/docs/EXTREME-LATENCY.md).
 
@@ -12,10 +12,14 @@
 ./native/run.ps1
 ./native/run.ps1 -SharedOutput # 통화당 공통 출력 비교 후보
 ./native/build.ps1 -Package
+./native/build.ps1 -Beta -Package # .NET 실행 환경 포함 베타 ZIP
 ./native/verify.ps1
 ```
 
 - [두 호스트 3명·6명 시험](native/docs/TWO-HOST-GROUP-TEST.md)
+- [베타 정리·패키지 검증 결과](native/docs/reports/EXTREME-124.md)
+- [앱 정상 동작 자동 검사](native/docs/APP-CHECKS.md)
+- [두 PC 자동 기능 검사](native/docs/PAIR-CHECKS.md)
 - [최신 기준선·송신 대조·미해결 항목](native/docs/reports/EXTREME-100.md)
 - [실행·빌드·소스 구조](native/README.md)
 - [공통 출력 후보·기존 경로 복귀](native/docs/SHARED-OUTPUT.md)

@@ -13,19 +13,19 @@ public sealed partial class CallForm : Form
     private readonly TextBox server = new() { Text = "https://qlrpal.ddns.net/", Dock = DockStyle.Fill };
     private readonly TextBox room = new() { Text = "test", Dock = DockStyle.Fill };
     private readonly TextBox nickname = new() { Text = Environment.UserName, Dock = DockStyle.Fill };
-    private readonly CheckBox lowLatencyMode = new() { Text = "공유 저지연 우선 (검증)", AutoSize = true, Checked = true };
-    private readonly ComboBox opusProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 255 };
-    private readonly CheckBox rtpMode = new() { Text = "RTP 순서 재생·손실 보정 (검증)", AutoSize = true, Checked = true };
-    private readonly CheckBox adaptiveMode = new() { Text = "지터 적응 20~40ms", AutoSize = true };
-    private readonly ComboBox playbackPolicy = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
-    private readonly ComboBox latencyExperiment = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
-    private readonly CheckBox shortCapture = new() { Text = "짧은 공유 입력 주기 우선", AutoSize = true, Checked = true };
-    private readonly ComboBox mediaInterface = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 270 };
-    private readonly CheckBox rawOutput = new() { Text = "통화 출력 효과 우회 우선", Checked = true, AutoSize = true };
+    private readonly CheckBox lowLatencyMode = new CallToggle() { Text = "공유 저지연 우선 (검증)", AutoSize = true, Checked = true };
+    private readonly ComboBox opusProfile = new CallComboBox() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 255 };
+    private readonly CheckBox rtpMode = new CallToggle() { Text = "RTP 순서 재생·손실 보정 (검증)", AutoSize = true, Checked = true };
+    private readonly CheckBox adaptiveMode = new CallToggle() { Text = "지터 적응 20~40ms", AutoSize = true };
+    private readonly ComboBox playbackPolicy = new CallComboBox() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
+    private readonly ComboBox latencyExperiment = new CallComboBox() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
+    private readonly CheckBox shortCapture = new CallToggle() { Text = "짧은 공유 입력 주기 우선", AutoSize = true, Checked = true };
+    private readonly ComboBox mediaInterface = new CallComboBox() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 270 };
+    private readonly CheckBox rawOutput = new CallToggle() { Text = "통화 출력 효과 우회 우선", Checked = true, AutoSize = true };
     private readonly Button join = new() { Text = "통화 참가", AutoSize = true };
     private readonly Button leave = new() { Text = "나가기", AutoSize = true, Enabled = false };
-    private readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill };
-    private readonly TextBox stats = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
+    private readonly ReadingTextView log = new("이벤트 로그") { Dock = DockStyle.Fill };
+    private readonly ReadingTextView stats = new("상세 진단") { Dock = DockStyle.Fill };
     private readonly Queue<string> logLines = new();
     private readonly Queue<CallDiagnostics> history = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
@@ -39,6 +39,9 @@ public sealed partial class CallForm : Form
     {
         engine = new WebRtcCallEngine { UseSharedOutput = sharedOutput };
         Text = "명동 콜링"; ClientSize = new Size(900, 780); MinimumSize = new Size(740, 680); Font = new Font("맑은 고딕", 10);
+#if BETA_RELEASE
+        Text += " · " + typeof(CallForm).Assembly.GetName().Version?.ToString(3) + " 베타";
+#endif
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 6 };
         foreach (var size in new[] { 112, 150, 75 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, size));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
@@ -117,7 +120,7 @@ public sealed partial class CallForm : Form
         adaptiveMode.CheckedChanged += (_, _) => { try { engine.SetAdaptivePlayoutPreference(adaptiveMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
         rtpMode.CheckedChanged += (_, _) => { try { engine.SetRtpPlayoutPreference(rtpMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
         lowLatencyMode.CheckedChanged += (_, _) => { try { engine.SetLowLatencyPreference(lowLatencyMode.Checked); } catch (Exception ex) { AppendLog(ex.Message); } };
-        var outputLatency = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 165 };
+        var outputLatency = new CallComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 165 };
         outputLatency.Items.AddRange(["일반·복귀 출력 40ms", "일반·복귀 출력 20ms"]);
         outputLatency.SelectedIndex = 0;
         controls.Controls.Add(outputLatency);
@@ -179,10 +182,24 @@ public sealed partial class CallForm : Form
             AppendLog("패킷 경로 30초 기록 시작 · 음성/페이로드 없이 RTP 식별자·길이·앱 시각만 기록합니다. 양쪽에서 시작한 뒤 진단을 저장하세요. 다시 누르면 이전 기록을 초기화합니다.");
         };
         var diagnostics = new FlowLayoutPanel { Dock = DockStyle.Fill };
+#if BETA_RELEASE
+        // Keep report export, output restart and interface selection for beta support.
+        // Experimental controls and audible measurement tools stay in developer builds.
+        foreach (Control control in controls.Controls.Cast<Control>().ToArray())
+            if (control != join && control != leave && control != copy && control != save
+                && control != restartOutput && control != packetTrace && control != mediaInterface)
+                controls.Controls.Remove(control);
+#endif
         var peerAddress = new TextBox { PlaceholderText = "상대 PC 내부 IP", Width = 220 };
         var udpCheck = new Button { Text = "LAN UDP 검사", AutoSize = true }; var routeCheck = new Button { Text = "경로·ping 검사", AutoSize = true };
         diagnostics.Controls.AddRange([peerAddress, udpCheck, routeCheck, new Label { Text = "수치는 전체 음성 지연이 아닙니다. 송수신량은 음성 페이로드만 집계합니다.", AutoSize = true }]);
         layout.Controls.Add(diagnostics, 0, 2); layout.Controls.Add(stats, 0, 3); layout.Controls.Add(new Label { Text = "이벤트 로그 (최근 2,000줄)", AutoSize = true }, 0, 4); layout.Controls.Add(log, 0, 5); Controls.Add(layout);
+#if BETA_RELEASE
+        diagnostics.Controls.Clear();
+        diagnostics.Controls.Add(new Label { Text = "수치는 전체 음성 지연이 아닙니다. 문제가 생기면 진단을 저장해 주세요.", AutoSize = true });
+        layout.RowStyles[1].Height = 100; // At most two rows at the minimum window width.
+        layout.RowStyles[2].Height = 40;
+#endif
         engine.Status += AppendLog;
         udpCheck.Click += async (_, _) => { udpCheck.Enabled = false; try { await LanUdpProbe.RunAsync(peerAddress.Text.Trim(), AppendLog, diagnosticsCancellation.Token); } catch (Exception ex) { if (!closeRequested) AppendLog("UDP 검사 오류: " + ex.Message); } finally { if (!IsDisposed && !closeRequested) udpCheck.Enabled = true; } };
         routeCheck.Click += async (_, _) => { routeCheck.Enabled = false; try { await NetworkProbe.RunAsync(peerAddress.Text.Trim(), AppendLog, diagnosticsCancellation.Token); } catch (Exception ex) { if (!closeRequested) AppendLog("경로 검사 오류: " + ex.Message); } finally { if (!IsDisposed && !closeRequested) routeCheck.Enabled = true; } };
@@ -204,6 +221,7 @@ public sealed partial class CallForm : Form
         {
             if (closing) return; args.Cancel = true; if (closeRequested) return;
             closeRequested = true; timer.Stop(); join.Enabled = leave.Enabled = false;
+            microphoneHotkey.Release();
             var cleanup = new CallCleanup();
             try
             {
@@ -221,7 +239,7 @@ public sealed partial class CallForm : Form
             catch (Exception ex) { AppLog.Write("종료 오류: " + ex.Message); }
             finally { timer.Dispose(); closing = true; Close(); }
         };
-        BuildProductView(layout, fields);
+        BuildProductView(layout);
         if (initialExperiment is not null)
         {
             _ = LatencyExperiment.FromName(initialExperiment);
@@ -234,7 +252,12 @@ public sealed partial class CallForm : Form
         if (InvokeRequired) { try { BeginInvoke(() => AppendLog(message)); } catch (InvalidOperationException) { } return; }
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}"; logLines.Enqueue(line);
         AppLog.Write(message);
-        if (logLines.Count > 2000) { logLines.Dequeue(); log.Lines = logLines.ToArray(); } else log.AppendText(line + Environment.NewLine);
+        if (logLines.Count > 2000)
+        {
+            var removed = (logLines.Dequeue() + Environment.NewLine).ReplaceLineEndings("\n");
+            log.ReplaceReadingText(string.Join(Environment.NewLine, logLines) + Environment.NewLine, followTail: true, removedLines: removed.Count(c => c == '\n'), removedCharacters: removed.Length);
+        }
+        else log.AppendReadingText(line + Environment.NewLine);
         if (message.StartsWith("통화 종료", StringComparison.Ordinal)) { join.Enabled = true; leave.Enabled = false; }
     }
     private static string Number(double? value, string unit = "") => value is { } n ? $"{n:F2}{unit}" : "미측정";
@@ -335,7 +358,7 @@ public sealed partial class CallForm : Form
                 previousDiagnostics[peer.Id] = (snapshot.MonotonicSeconds, peer);
             }
             foreach (var id in previousDiagnostics.Keys.Except(snapshot.Peers.Select(p => p.Id)).ToArray()) previousDiagnostics.Remove(id);
-            text.AppendLine(); text.Append("전체 마이크→상대 출력 지연: 미측정 · 손실은 마지막 RTCP 보고 구간 값"); stats.Text = text.ToString();
+            text.AppendLine(); text.Append("전체 마이크→상대 출력 지연: 미측정 · 손실은 마지막 RTCP 보고 구간 값"); stats.ReplaceReadingText(text.ToString());
         }
         catch (Exception ex) { AppendLog("통계 읽기 오류: " + ex.Message); }
     }
@@ -355,19 +378,5 @@ public sealed partial class CallForm : Form
         pipeline = (engine as WebRtcCallEngine)?.SnapshotPipelineTrace(),
         events = logLines.ToArray()
     }, VoiceNative.DiagnosticJson.Readable);
-    internal void SavePreview(string path, int tab = 0, bool minimum = false)
-    {
-        Controls.OfType<TabControl>().Single().SelectedIndex = tab;
-        if (minimum) Size = MinimumSize;
-        ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; Location = new Point(-32000, -32000);
-        Show(); Application.DoEvents(); RefreshStats(); PerformLayout();
-        using var bitmap = new Bitmap(Width, Height);
-        DrawToBitmap(bitmap, new Rectangle(0, 0, Width, Height));
-        bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-        File.WriteAllText(Path.ChangeExtension(path, ".json"), ReportJson(), Encoding.UTF8);
-        Hide();
-        timer.Stop(); timer.Dispose(); diagnosticsCancellation.Cancel();
-        callSession?.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        engine.DisposeAsync().AsTask().GetAwaiter().GetResult();
-    }
+
 }

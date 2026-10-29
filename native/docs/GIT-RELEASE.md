@@ -1,10 +1,20 @@
-# Git 소스 배포 · 극저지연 실험 브랜치
+# Git 소스 배포 · 베타 준비 브랜치
+
+2026-10-29 베타 준비: `release/`의 패키징 코드·회귀·사용자 문서·제3자 라이선스와 `CallForm.Preview.cs`를 포함해야 한다. NAudio 메타 참조 제거에 따른 양쪽 잠금 파일, Windows Runtime 투영 제외 설정, 베타 빌드 조건을 함께 반영한다. [베타 배포 절차](BETA-RELEASE.md). 베타 ZIP은 `dist-beta.zip`이며 `.NET` 실행 환경 포함 여부를 manifest로 구분한다. 기존 일반 ZIP과는 별도다.
 
 현재 브랜치는 `codex/extreme-latency`입니다. 제품 기반 버전0.6.0에 극저지연 실험·송신 수명·할당 감소·수신 피드백 기반 프레임 전환 변경이 누적된 상태입니다. 새 안정판 태그를 확정하지 않았습니다. [현재 상태](CURRENT-STATUS.md)를 먼저 참고하세요. 소스와 재현 가능한 검사·문서를 함께 커밋하며, 실행 파일 ZIP 배포와는 별도입니다.
 
 ## 소스를 내려받은 사용자의 실행
 
-아래 명령은 이번 소스 변경이 커밋·푸시된 이후에 최신 변경을 받는다. 로컬 정리만으로 원격 저장소가 갱신되지는 않는다. 다른 작업이 있는 체크아웃에서는 해당 변경을 먼저 보존한다.
+처음 받는 경우:
+
+```powershell
+git clone --branch codex/extreme-latency https://github.com/qlrpal/Myeongdong_calling.git
+cd Myeongdong_calling
+./native/run.ps1
+```
+
+이미 받은 체크아웃은 다음 명령으로 갱신한다. 다른 로컬 작업은 먼저 보존한다.
 
 ```powershell
 git fetch origin
@@ -15,7 +25,13 @@ git pull --ff-only origin codex/extreme-latency
 ./native/run.ps1 -Experiment opus-adaptive
 ```
 
-.NET10 SDK·Node.js22 이상이 필요하다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다. 이 문서 정리는 커밋·푸시를 실행하는 작업과 별도다.
+.NET10 SDK·Node.js22 이상이 필요하다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다.
+
+베타 ZIP은 다음 명령으로 별도 생성한다. 결과 `dist-beta.zip`은 실행 환경을 포함하며 대상 사용자는 전체 압축을 풀고 `VoiceNative.exe`를 실행한다. Git에는 이 ZIP을 넣지 않는다.
+
+```powershell
+./native/build.ps1 -Beta -Package
+```
 
 일반 빌드는 수정 SDK를 자동으로 구성한다. `native/Directory.Build.targets`, `native/sdk/`의 빌드·패치 조각·공유 의존성·잠금 파일을 함께 받아야 한다. 첫 빌드의 상류 소스 다운로드 약142MiB 이후에는 캐시를 재사용한다. [SDK 빌드와 실행 식별](SDK-BUILD.md)을 참고한다.
 
@@ -36,22 +52,22 @@ git pull --ff-only origin codex/extreme-latency
 
 ## 제외·보존
 
-`web/`, `native/.local/`, `native/dist/`, `native/dist.zip`, `bin/`, `obj/`, SDK·NuGet 캐시·node_modules·IDE 사용자 상태, 환경 파일·키, 진단 JSON·로그·ETL·캡처·덤프는 Git 대상이 아닙니다. 생성물과 원본 진단 자료는 로컬에 보존합니다. 개인 인계는 `.local/handoff/`로 분리하고 `docs/HANDOFF*.md`도 제외합니다. 공개 실험 요약은 `docs/reports/`에 포함하며 실제 SSID/BSSID 대신 역할 이름을 사용합니다. `.env.example`과 의존성 잠금 파일은 소스에 포함합니다.
+`web/`, `native/.local/`, `native/dist*/`, `native/dist*.zip`, `bin/`, `obj/`, SDK·NuGet 캐시·node_modules·IDE 사용자 상태, 환경 파일·키, 진단 JSON·로그·ETL·캡처·덤프는 Git 대상이 아닙니다. 생성물과 원본 진단 자료는 로컬에 보존합니다. 개인 인계는 `.local/handoff/`로 분리하고 `docs/HANDOFF*.md`도 제외합니다. 공개 실험 요약은 `docs/reports/`에 포함하며 실제 SSID/BSSID 대신 역할 이름을 사용합니다. `.env.example`과 의존성 잠금 파일은 소스에 포함합니다.
 
 ## 반영 명령
 
-저장소 루트에서 실행합니다. 아래 커밋·푸시는 사용자가 배포를 결정할 때 수행하는 명령이며 이번 정리 작업에서 실행하지 않았습니다.
+저장소 루트에서 실행합니다. 커밋 전에 포함 목록과 diff를 확인하고 제외 파일은 강제 추가하지 않습니다.
 
 ```powershell
 git status --short
 git add .gitignore .gitattributes .editorconfig README.md native/
 git diff --cached --stat
 git diff --cached --check
-git commit -m "test: qualify group calls and organize latency experiments - gpt가 함"
+git commit -m "베타 배포 정리와 통화 UI·설정·자동 검사 보완이라고 gpt가 함"
 git push -u origin HEAD
 ```
 
-`git add -f`로 제외 파일을 강제 추가하지 않습니다. GitHub Release 등에 실행 파일을 올릴 경우에는 별도로 만든 `native/dist.zip`을 자산으로 사용합니다. 이 ZIP은 .NET 10 Desktop Runtime이 필요합니다.
+`git add -f`로 제외 파일을 강제 추가하지 않습니다. GitHub Release 등 실행 파일 배포는 Git 소스 푸시와 별도입니다. 베타 자산은 `native/dist-beta.zip`을 사용합니다. 기존 일반 `native/dist.zip`은 .NET 10 Desktop Runtime이 필요한 별도 패키지입니다.
 
 ## 새 체크아웃 검증
 
