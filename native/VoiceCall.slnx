@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="BuildTools/BuildTools.csproj" />
   <Project Path="VoiceNative/VoiceNative.csproj" />
   <Project Path="TransportProbe/TransportProbe.csproj" />
 </Solution>

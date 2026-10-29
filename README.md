@@ -16,6 +16,8 @@
 ./native/verify.ps1
 ```
 
+클라이언트 실행·베타 빌드는 .NET10 SDK와 Windows PowerShell을 사용합니다. 패키징·검증은 별도 C# [BuildTools](native/docs/BUILD-TOOLS.md)가 담당하며 Node는 서버와 자동 검사 실행기에만 필요합니다.
+
 - [두 호스트 3명·6명 시험](native/docs/TWO-HOST-GROUP-TEST.md)
 - [베타 정리·패키지 검증 결과](native/docs/reports/EXTREME-124.md)
 - [앱 정상 동작 자동 검사](native/docs/APP-CHECKS.md)

@@ -24,7 +24,7 @@ Figma Make 시안을 반영한 입장·통화·설정·진단 UI를 소스 실�
 
 ## 실행과 빌드
 
-Windows10 2004 이상, .NET10 SDK, Node.js22 이상을 사용합니다. 저장소 루트에서 실행합니다.
+클라이언트 소스 실행·베타 빌드는 .NET10 SDK와 Windows PowerShell을 사용하며 Node가 필요하지 않습니다. 서버와 자동 검사 실행기는 Node.js22 이상을 사용합니다. 저장소 루트에서 실행합니다. [C# 빌드 도구 구조](docs/BUILD-TOOLS.md).
 
 일반 실행·빌드·배포에는 수신 시작 보호와 UDP TURN 종료 삭제를 적용한 SDK가 자동 포함됩니다. 첫 빌드만 고정 상류 소스 약142MiB를 내려받고 이후 해시 검증 캐시를 사용합니다. Python이나 수동 DLL 교체는 필요 없습니다. [수정 SDK 빌드·식별 방법](docs/SDK-BUILD.md).
 
@@ -79,6 +79,8 @@ RTT·API 추정값·루프백 값은 실제 입→귀 지연과 다릅니다. 0.
 | `VoiceNative/Calling/` | 통화 인터페이스, WebRTC 엔진, 송신 큐 |
 | `VoiceNative/Diagnostics/` | 계측·지연 추적·로컬 검사·진단 JSON |
 | `VoiceNative/UI/` | 통화 화면 |
+| `BuildTools/` | C# publish·패키징·라이선스·해시·ZIP 검증과 회귀 검사 |
+| `release/` | 배포 문서·제3자 라이선스 데이터 |
 | `TransportProbe/Checks/` | 독립 검사와 코덱 비교 |
 | `TransportProbe/Integration/` | 실제 WebRTC 전송 검사 |
 | `TransportProbe/Automation/` | 두 PC 자동 통화/A-B-A 실험 |

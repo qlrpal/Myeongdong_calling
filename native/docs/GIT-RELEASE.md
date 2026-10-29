@@ -1,6 +1,6 @@
 # Git 소스 배포 · 베타 준비 브랜치
 
-2026-10-29 베타 준비: `release/`의 패키징 코드·회귀·사용자 문서·제3자 라이선스와 `CallForm.Preview.cs`를 포함해야 한다. NAudio 메타 참조 제거에 따른 양쪽 잠금 파일, Windows Runtime 투영 제외 설정, 베타 빌드 조건을 함께 반영한다. [베타 배포 절차](BETA-RELEASE.md). 베타 ZIP은 `dist-beta.zip`이며 `.NET` 실행 환경 포함 여부를 manifest로 구분한다. 기존 일반 ZIP과는 별도다.
+2026-10-29 베타 준비: C# `BuildTools/` 프로젝트·잠금·검사와 솔루션, `release/`의 사용자 문서·제3자 라이선스, `CallForm.Preview.cs`를 포함해야 한다. 기존 JS 패키징은 C#으로 대체했다. NAudio 참조 제거에 따른 앱/프로브 잠금, Windows Runtime 투영 제외 설정, 베타 빌드 조건을 함께 반영한다. [베타 배포 절차](BETA-RELEASE.md). 베타 ZIP은 `dist-beta.zip`이며 `.NET` 실행 환경 포함 여부를 manifest로 구분한다. 기존 일반 ZIP과는 별도다.
 
 현재 브랜치는 `codex/extreme-latency`입니다. 제품 기반 버전0.6.0에 극저지연 실험·송신 수명·할당 감소·수신 피드백 기반 프레임 전환 변경이 누적된 상태입니다. 새 안정판 태그를 확정하지 않았습니다. [현재 상태](CURRENT-STATUS.md)를 먼저 참고하세요. 소스와 재현 가능한 검사·문서를 함께 커밋하며, 실행 파일 ZIP 배포와는 별도입니다.
 
@@ -25,7 +25,7 @@ git pull --ff-only origin codex/extreme-latency
 ./native/run.ps1 -Experiment opus-adaptive
 ```
 
-.NET10 SDK·Node.js22 이상이 필요하다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다.
+.NET10 SDK와 Windows PowerShell로 소스 실행·베타 빌드가 가능하다. Node.js22 이상은 서버/자동 검사에 사용한다. 기본 실행/실험의 구분은 [모드 선택 기준](EXTREME-LATENCY.md)을 따른다. `opus-learned`와 자동 프레임 시험을 안정판으로 일괄 권장하지 않는다. 같은 소스의 최신 빌드를 양쪽에서 사용한다.
 
 베타 ZIP은 다음 명령으로 별도 생성한다. 결과 `dist-beta.zip`은 실행 환경을 포함하며 대상 사용자는 전체 압축을 풀고 `VoiceNative.exe`를 실행한다. Git에는 이 ZIP을 넣지 않는다.
 
@@ -44,6 +44,7 @@ git pull --ff-only origin codex/extreme-latency
 | 루트 README·Git/편집기 설정 | 진입 안내·생성 자료 제외·줄바꿈 규칙 |
 | `native/VoiceNative/` | Windows 앱·오디오·통화·진단·UI 및 패키지 잠금 파일 |
 | `native/TransportProbe/` | 제품 기능 검사·실제 통신 검사·자동 시험·분석 도구 및 잠금 파일 |
+| `native/BuildTools/`, `native/release/` | C# 빌드/패키징/검증 도구·회귀·잠금, 사용자 배포 문서·라이선스 |
 | `native/server/` | 연결 관리 서버·TURN 설치 스크립트·서버 회귀 검사 |
 | `native/docs/` | 사용자 가이드·구현 및 검증 요약·과거 기록 |
 | `native/*.ps1`, `native/*.cmd`, 솔루션·빌드 설정 | 실행·빌드·검증·외부 시험 진입점 |

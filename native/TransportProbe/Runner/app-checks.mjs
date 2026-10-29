@@ -82,7 +82,7 @@ try {
   for (const name of ['VoiceNative.dll', 'TransportProbe.dll', 'SIPSorcery.dll'])
     report.hashes[name] = createHash('sha256').update(await readFile(path.join(binary, name))).digest('hex');
   await step('runner-tests', process.execPath, ['--test', path.join(root, 'native/TransportProbe/Runner/check-runner.test.mjs'), path.join(root, 'native/TransportProbe/Runner/pair-summary.test.mjs'), path.join(root, 'native/TransportProbe/Runner/pair-observation.test.mjs')]);
-  await step('package-tests', process.execPath, ['--test', path.join(root, 'native/release/package.test.mjs')]);
+  await step('package-tests', path.join(root, 'native/BuildTools/bin/Release/net10.0/BuildTools.exe'), ['self-test']);
   const plans = [
     ['sdk', ['--sdk-build-check']], ['product', ['--product-checks', path.join(directory, 'product')]],
     ['rtp-buffer', ['--rtp-playout-test']],

@@ -10,6 +10,9 @@ if (-not $NoRestore) {
 }
 & dotnet build $solution -c Release --no-restore -warnaserror -m:1
 if ($LASTEXITCODE -ne 0) { throw 'Static analysis/build failed.' }
+$buildTools = Join-Path $PSScriptRoot 'BuildTools/bin/Release/net10.0/BuildTools.exe'
+& $buildTools self-test
+if ($LASTEXITCODE -ne 0) { throw 'BuildTools regression checks failed.' }
 $probe = Join-Path $PSScriptRoot 'TransportProbe/bin/Release/net10.0-windows10.0.19041.0/TransportProbe.exe'
 & $probe --sdk-build-check
 if ($LASTEXITCODE -ne 0) { throw 'Default runtime did not load the production patched SDK.' }
@@ -54,8 +57,6 @@ try {
 finally { Pop-Location }
 & node --test (Join-Path $PSScriptRoot 'TransportProbe/Runner/check-runner.test.mjs') (Join-Path $PSScriptRoot 'TransportProbe/Runner/pair-summary.test.mjs') (Join-Path $PSScriptRoot 'TransportProbe/Runner/pair-observation.test.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'App check runner regression tests failed.' }
-& node --test (Join-Path $PSScriptRoot 'release/package.test.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'Beta package policy regression tests failed.' }
 if ($Integration) {
     foreach ($check in @('--lan-self-test', '--ten-ms-rtcp-integration', '--rtp-playout-integration', '--variable-frame-integration', '--ipv6-loopback-integration')) {
         & $probe $check

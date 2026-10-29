@@ -2,7 +2,7 @@
 
 ## 만들기
 
-Windows x64, .NET10 SDK·Node.js22 이상에서 저장소 루트를 기준으로 실행한다.
+Windows x64, .NET10 SDK와 Windows PowerShell에서 저장소 루트를 기준으로 실행한다. 클라이언트 빌드·패키징은 Node 없이 가능하며 C# [BuildTools](BUILD-TOOLS.md)가 처리한다. 전체 `verify.ps1`의 서버/자동 검사에는 Node.js22 이상이 필요하다.
 
 ```powershell
 ./native/verify.ps1 -Integration
@@ -29,8 +29,8 @@ Windows x64, .NET10 SDK·Node.js22 이상에서 저장소 루트를 기준으로
 빌드는 새 staging에 publish하고 필요한 문서/라이선스를 복사한 후 그 폴더의 실행 파일로 SDK·Opus 로드를 확인한다. ZIP을 다시 풀어 파일 목록과 해시를 확인한 다음에만 기존 베타 출력을 `.local/archive/`에 보존하고 교체한다. 기존 일반 `dist`는 이 베타 명령으로 변경하지 않는다.
 
 ```powershell
-node native/release/package.mjs verify native/dist-beta
-node --test native/release/package.test.mjs
+dotnet run --project native/BuildTools -c Release -- verify native/dist-beta
+dotnet run --project native/BuildTools -c Release -- self-test
 Get-FileHash native/dist-beta.zip -Algorithm SHA256
 ```
 
