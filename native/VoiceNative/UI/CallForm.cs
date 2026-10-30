@@ -297,6 +297,10 @@ public sealed partial class CallForm : Form
             if (snapshot.Microphone?.CaptureExecution is { } inputRun)
                 text.AppendLine(CultureInfo.CurrentCulture, $"입력 실행 · 버퍼 조기 반환 {inputRun.StagedBuffers} · 최대 장치 버퍼 보유 {Number(inputRun.MaxLeaseMs, " ms")} / 콜백 처리 {Number(inputRun.MaxCallbackMs, " ms")} · 최대 기상 간격 {Number(inputRun.MaxWakeGapMs, " ms")} · 대기 시간 초과 {inputRun.TimeoutWakes}회 · 오디오 우선순위 {inputRun.MmcssActive}");
             text.AppendLine(CultureInfo.CurrentCulture, $"송신 대기 {snapshot.Sender?.PendingFrames ?? 0}프레임 · 초과 프레임 버림 {snapshot.Sender?.DroppedFrames ?? 0} · 최대 송신 대기 {Number(snapshot.Sender?.MaxWaitMs, " ms")}");
+            if (snapshot.Sender is { } sender)
+                text.AppendLine(CultureInfo.CurrentCulture, $"송신 큐 초과 폐기 음성 {Number(sender.OverflowDroppedMs, " ms")} · 폐기 시 최대 대기 {Number(sender.OverflowMaxAgeMs, " ms")} · 나이 제한 폐기 {sender.ExpiredFrames}프레임");
+            if (engine is WebRtcCallEngine nativeEngine)
+                text.AppendLine(CultureInfo.CurrentCulture, $"자동 문제 기록: {nativeEngine.IncidentStatus} · 통화당 첫 사건 · 진단 저장에 포함");
             if (snapshot.FrameAdaptation is { } frames)
                 text.AppendLine(CultureInfo.CurrentCulture, $"프레임 자동 조절 · 현재/요청 {frames.CurrentMs}/{frames.RequestedMs}ms · 피드백 준비 {frames.AllPeersReady} · 전환 {frames.Changes}회 · {frames.Reason}");
             text.AppendLine(CultureInfo.CurrentCulture, $"입력 공유 저지연: {snapshot.Microphone?.LowLatencyActive} · 주기 {Number(snapshot.Microphone?.EnginePeriodMs, " ms")} · 복귀 사유 {snapshot.Microphone?.LowLatencyUnavailableReason ?? "없음"}");
@@ -376,6 +380,7 @@ public sealed partial class CallForm : Form
         measurementLimits = "로컬: 출력 제출→스피커→마이크 캡처. 통화: 송신 캡처 프레임 시각→상대 마이크 재캡처. 서로 출발점이 달라 단순 차감 불가. ADC/DAC·드라이버·DSP·공기 경로는 합산값이며 장치 단독으로 분리되지 않음. 발화·음악은 오검출 가능. 동일 장치·볼륨·노이즈 제거 조건으로 반복 비교 필요.",
         samples = history.ToArray(),
         pipeline = (engine as WebRtcCallEngine)?.SnapshotPipelineTrace(),
+        incident = (engine as WebRtcCallEngine)?.SnapshotIncident(),
         events = logLines.ToArray()
     }, VoiceNative.DiagnosticJson.Readable);
 

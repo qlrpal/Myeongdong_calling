@@ -7,6 +7,7 @@ internal static class PipelineTraceChecks
 {
     public static void Run()
     {
+        IncidentRecorderChecks.Run();
         var capture = new PipelineTrace(2);
         capture.Captured(new(1,2,3,480,4));
         if (capture.Snapshot().CaptureCallbacks is not null) throw new InvalidOperationException("Disabled capture tracing allocated storage");
@@ -49,6 +50,7 @@ internal static class PipelineTraceChecks
         var payloads = Enumerable.Range(0, 3).Select(frame => encoder.EncodeAudio(
             Enumerable.Range(0, 480).Select(i => (short)(3000 * Math.Sin((frame * 480 + i) * 2 * Math.PI * 440 / 48000))).ToArray(), format)).ToArray();
         var trace = new PipelineTrace(); trace.Start(10);
+        trace.Incidents.Reset(ProbeClock.Now - 3);
         using var recorded = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false, pipeline: trace, tracePeer: "test");
         using var plain = new RtpOpusPlayoutBuffer(new(), adaptiveReserve: false);
         for (var i = 0; i < 3; i++) { recorded.Add(7, 1000 + (uint)i * 480, payloads[i]); plain.Add(7, 1000 + (uint)i * 480, payloads[i]); }
@@ -66,6 +68,10 @@ internal static class PipelineTraceChecks
         if (snapshot.Reads.Length != 3 || snapshot.Reads.Any(r => r.ProvidedSamples != 480 || r.ReturnedAt < r.LockAt || r.LockAt < r.CalledAt)
             || snapshot.Playout.Any(p => p.DecodeStart > p.DecodeEnd || p.DecodeEnd > p.SubmittedAt))
             throw new InvalidOperationException("Trace stage chronology or render sample count failed.");
+        var incident = trace.Incidents.Snapshot(ProbeClock.Now);
+        if (incident.Records.Count(r => r.Stage == "buffer-admission") != 5
+            || incident.Records.Count(r => r.Stage == "playout-read") != 3)
+            throw new InvalidOperationException("Automatic metadata missed admission/read boundaries.");
         Console.WriteLine("PASS: bounded opt-in metadata, stop/reset, packet identity/outcome, timing order and unchanged PCM output.");
     }
 }

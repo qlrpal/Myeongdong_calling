@@ -19,6 +19,10 @@ internal static class DedicatedSenderChecks
             for(var i=0;i<3;i++)queue.Enqueue([1],samples:120);
         }
         Require(original.Snapshot().DroppedFrames==2 && candidate.Snapshot().DroppedFrames==0,"Fresh overlap burst not preserved");
+        Require(original.Snapshot().OverflowDroppedMs==5 && original.Snapshot().OverflowMaxAgeMs>0,
+            "Overflow audio duration/age not recorded");
+        Require(candidate.Snapshot().OverflowDroppedMs==0 && candidate.Snapshot().OverflowMaxAgeMs==0,
+            "Healthy queue reported overflow");
         var frames=new List<OutgoingAudio>();
         while(candidate.TryRead(out var frame))frames.Add(frame);
         Require(frames.Select(f=>f.Sequence).SequenceEqual(new long[]{2,3,4,5,6}),"Fresh burst reordered");
@@ -31,6 +35,7 @@ internal static class DedicatedSenderChecks
         Require(timed.TryRead(out var retained) && retained.Sequence==2 && retained.SampleOffset==120,"Expired audio transmitted or time collapsed");
         Require(AudioSendQueue.Timestamp(1000,0,retained)==1120,"Expiry changed RTP offset");
         Require(timed.Snapshot() is {DroppedFrames:1,ExpiredFrames:1,PendingFrames:0},"Expiry accounting incorrect");
+        Require(timed.Snapshot().OverflowDroppedMs==0,"Expiry counted as capacity overflow");
         now=0;var asyncQueue=new AudioSendQueue(2,5,()=>now);
         asyncQueue.Enqueue([1],samples:120);
         now=(long)System.Math.Ceiling(6*System.Diagnostics.Stopwatch.Frequency/1000.0);

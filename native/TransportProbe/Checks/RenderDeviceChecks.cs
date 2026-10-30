@@ -66,6 +66,27 @@ internal static class RenderDeviceChecks
     }
     public static void Targets()
     {
+        // Actual pull conversion, not just accepting a WaveFormat: exercise rate,
+        // quantization and channel mapping in both ordinary/extensible PCM16.
+        foreach (var mix in new WaveFormat[] { new(44100, 16, 1), new(44100, 16, 2),
+            new WaveFormatExtensible(44100, 16, 2), WaveFormat.CreateIeeeFloatWaveFormat(48000, 2) })
+        {
+            var tone = new SignalGenerator(48000, 1) { Gain = .25, Frequency = 1000, Type = SignalGeneratorType.Sin };
+            var adapted = SharedRenderPlayer.AdaptSource(tone.ToWaveProvider(), mix);
+            if (adapted.WaveFormat.SampleRate != mix.SampleRate || adapted.WaveFormat.Channels != mix.Channels
+                || adapted.WaveFormat.BitsPerSample != mix.BitsPerSample) throw new InvalidOperationException("Shared render format mismatch.");
+            var bytes = new byte[mix.SampleRate / 10 * mix.BlockAlign];
+            if (adapted.Read(bytes) != bytes.Length) throw new InvalidOperationException("Shared render short conversion.");
+            var samples = adapted.ToSampleProvider();
+            var data = new float[mix.SampleRate / 10 * mix.Channels];
+            if (samples.Read(data) != data.Length) throw new InvalidOperationException("Shared render short sample read.");
+            var rms = Math.Sqrt(data.Select(value => (double)value * value).Average());
+            if (rms is < .17 or > .18) throw new InvalidOperationException("Shared render conversion changed tone amplitude.");
+            if (mix.Channels == 2 && Enumerable.Range(0, data.Length / 2).Any(i => data[i * 2] != data[i * 2 + 1]))
+                throw new InvalidOperationException("Shared render stereo mapping mismatch.");
+        }
+        Expect<NotSupportedException>(() => SharedRenderPlayer.AdaptSource(new Silence(false), new WaveFormat(48000, 24, 2)));
+        Expect<NotSupportedException>(() => SharedRenderPlayer.AdaptSource(new Silence(false), WaveFormat.CreateIeeeFloatWaveFormat(48000, 6)));
         if (SharedRenderPlayer.ChooseTarget(984,448,44100) != 669
             || SharedRenderPlayer.ChooseTarget(240,240,48000) != 240)
             throw new InvalidOperationException("Render target bounds failed.");

@@ -100,7 +100,7 @@ internal sealed class WindowsAudioDevice
                 inputFallbackReason = input.LowLatencyUnavailableReason;
                 input.DataAvailable += (data, flags, devicePosition, qpcPosition) =>
                 {
-                    var callbackAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
+                    var callbackAt = pipeline?.Enabled == true || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
                     var callbackSamples = data.Length / input.WaveFormat.BlockAlign;
                     if ((flags & AudioClientBufferFlags.DataDiscontinuity) != 0)
                     {
@@ -162,7 +162,7 @@ internal sealed class WindowsAudioDevice
         Func<int, bool>? canPrime = priming is not null ? priming.CanPrimeOutput : mixPriming is not null ? mixPriming.CanPrimeOutput : null;
         var player = new SharedRenderPlayer(requestedOutputMs, preferLowLatency, boundedRender, rawRender, renderCategory, renderDeviceId, experiment?.MinimalOutput == true, experiment?.OutputHeadroomMs ?? 0,
             experiment?.StagedDeviceBuffers == true, experiment?.RenderPeriodWatchdog == true, experiment?.TraceRenderWork == true,
-            canPrime, priming?.PrimingSignal ?? mixPriming?.PrimingSignal, experiment?.CriticalAudioPriority == true);
+            canPrime, priming?.PrimingSignal ?? mixPriming?.PrimingSignal, experiment?.CriticalAudioPriority == true, pipeline?.Incidents);
         try
         {
             using var enumerator = new MMDeviceEnumerator();
@@ -224,10 +224,11 @@ internal sealed class WindowsAudioDevice
         var callbackFrames = 0;
         lock (audioLock)
         {
-            var lockAt = pipeline?.Enabled == true ? ProbeClock.Now : 0;
+            var lockAt = pipeline?.Enabled == true || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
             if (closed) return;
             var captureAt = Stopwatch.GetTimestamp();
-            if (lastCaptureAt is { } previousCapture) captureGaps.Add(Stopwatch.GetElapsedTime(previousCapture, captureAt).TotalMilliseconds);
+            var gapMs = lastCaptureAt is { } previousCapture ? Stopwatch.GetElapsedTime(previousCapture, captureAt).TotalMilliseconds : 0;
+            if (lastCaptureAt is not null) captureGaps.Add(gapMs);
             lastCaptureAt = captureAt;
             try
             {
@@ -258,7 +259,7 @@ internal sealed class WindowsAudioDevice
                     var started = Stopwatch.GetTimestamp();
                     var encoded = encoder.EncodeAudio(pcm, pcmFormat);
                     var duration = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                    LastCaptureOrigin = pipeline?.Enabled == true && frameFirstCallbackAt > 0 ? new(capturedAt, frameFirstCallbackAt,
+                    LastCaptureOrigin = (pipeline?.Enabled == true || pipeline?.Incidents.Active == true) && frameFirstCallbackAt > 0 ? new(capturedAt, frameFirstCallbackAt,
                         callbackAt, callbackStarted / (double)Stopwatch.Frequency, lockAt, frameReadyAt,
                         started / (double)Stopwatch.Frequency, ProbeClock.Now, callbackSamples, flags) : null;
                     var hash = firstProbeFrame ? AudioFrameTimeline.Hash(encoded) : null;
@@ -274,6 +275,11 @@ internal sealed class WindowsAudioDevice
             finally
             {
                 captureWork.Add(Stopwatch.GetElapsedTime(callbackStarted).TotalMilliseconds);
+                pipeline?.Incidents.Write(new(ProbeClock.Now, "capture-callback", Samples: captured.Length / 2,
+                    DurationMs: Stopwatch.GetElapsedTime(callbackStarted).TotalMilliseconds, QueueMs: gapMs,
+                    Outcome: flags == 0 ? null : "capture-flags", SourceAt: callbackStarted / (double)Stopwatch.Frequency,
+                    LockWaitMs: lockAt > 0 ? (lockAt - callbackStarted / (double)Stopwatch.Frequency) * 1000 : 0, Flags: flags),
+                    gapMs > 30 ? "capture-gap" : null);
                 if (tracing) pipeline!.Captured(new(callbackStarted / (double)Stopwatch.Frequency,
                     lockAt, ProbeClock.Now, captured.Length / 2, callbackFrames));
             }
@@ -373,7 +379,8 @@ internal sealed class WindowsAudioDevice
         // the capture/decoder callback lock across these diagnostic-only queries.
         snapshot = snapshot with
         {
-            Render = currentOutput is null ? null : new RenderDiagnostics(currentOutput.BoundedActive, currentOutput.TargetPaddingMs, currentOutput.CapacityMs, currentOutput.EmptyEvents, currentOutput.SafetyFallbacks, currentOutput.RawActive, currentOutput.Execution),
+            Render = currentOutput is null ? null : new RenderDiagnostics(currentOutput.BoundedActive, currentOutput.TargetPaddingMs, currentOutput.CapacityMs, currentOutput.EmptyEvents, currentOutput.SafetyFallbacks, currentOutput.RawActive, currentOutput.Execution,
+                currentOutput.MixFormatDescription, currentOutput.RequestedEnginePeriodMs),
             CaptureExecution = input?.Execution,
             RequestedOutputMs = buffer is null ? null : requestedOutputMs,
             LowLatencyRequested = preferLowLatency,

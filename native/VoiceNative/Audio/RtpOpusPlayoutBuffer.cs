@@ -167,10 +167,10 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     public void Add(uint ssrc, uint timestamp, byte[] payload, double? arrivalMs = null)
     {
         var tracing = pipeline?.Enabled == true;
-        var calledAt = tracing ? ProbeClock.Now : 0;
+        var calledAt = tracing || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
         lock (sync)
         {
-            var lockAt = tracing ? ProbeClock.Now : 0;
+            var lockAt = tracing || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
             var outcome = "ignored";
             int? traceSamples = null;
             try
@@ -276,6 +276,10 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
             }
             finally
             {
+                pipeline?.Incidents.Write(new(ProbeClock.Now, "buffer-admission", tracePeer, ssrc, timestamp,
+                    Samples: traceSamples ?? 0, QueueMs: (queuedSamples + pcmCount - pcmOffset) / 48.0, Outcome: outcome,
+                    SourceAt: calledAt, WorkMs: calledAt > 0 ? (ProbeClock.Now - calledAt) * 1000 : 0,
+                    LockWaitMs: calledAt > 0 && lockAt > 0 ? (lockAt - calledAt) * 1000 : 0));
                 if (tracing) pipeline!.Admitted(new(tracePeer, ssrc, timestamp, calledAt, lockAt, ProbeClock.Now,
                     outcome, (queuedSamples + pcmCount - pcmOffset) / 48.0, traceSamples));
             }
@@ -286,12 +290,14 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
     {
         if (destination.Length % 2 != 0) throw new ArgumentException("Complete PCM samples required.");
         var tracing = pipeline?.Enabled == true;
-        var calledAt = tracing ? ProbeClock.Now : 0;
+        var calledAt = tracing || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
         lock (sync)
         {
-            var lockAt = tracing ? ProbeClock.Now : 0;
+            var lockAt = tracing || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
             var queueBefore = (queuedSamples + pcmCount - pcmOffset) / 48.0;
             var plcAtEntry = plcFrames;
+            var concealedAtEntry = concealedSamples;
+            var rebuffersAtEntry = rebuffers;
             var provided = 0;
             try
             {
@@ -457,6 +463,14 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
             }
             finally
             {
+                pipeline?.Incidents.Write(new(ProbeClock.Now, "playout-read", tracePeer, source ?? 0,
+                    unchecked((uint)expectedTimestamp), Samples: destination.Length / 2,
+                    DurationMs: (concealedSamples - concealedAtEntry) / 48.0,
+                    QueueMs: (queuedSamples + pcmCount - pcmOffset) / 48.0,
+                    Outcome: rebuffers > rebuffersAtEntry ? "rebuffer" : plcFrames > plcAtEntry ? "plc" : "read",
+                    SourceAt: calledAt, WorkMs: calledAt > 0 ? (ProbeClock.Now - calledAt) * 1000 : 0,
+                    LockWaitMs: calledAt > 0 && lockAt > 0 ? (lockAt - calledAt) * 1000 : 0),
+                    rebuffers > rebuffersAtEntry ? "rebuffer" : null);
                 if (tracing) pipeline!.Read(new(tracePeer, calledAt, lockAt, ProbeClock.Now,
                     destination.Length / 2, provided, plcFrames - plcAtEntry, queueBefore,
                     (queuedSamples + pcmCount - pcmOffset) / 48.0, started));

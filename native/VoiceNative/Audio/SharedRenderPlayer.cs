@@ -13,6 +13,8 @@ internal sealed class SharedRenderPlayer : IDisposable
     private readonly bool preferLow, bounded, preferRaw;
     private readonly AudioStreamCategory category;
     public bool RawActive { get; private set; }
+    public string? MixFormatDescription { get; private set; }
+    public double? RequestedEnginePeriodMs { get; private set; }
     private WasapiPlayer? fallback;
     private MMDevice? device;
     private AudioClient? client;
@@ -63,6 +65,7 @@ internal sealed class SharedRenderPlayer : IDisposable
         .OfType<RenderWorkObservation>().OrderBy(entry => entry.At).ToArray();
     private void RecordWork(RenderWorkObservation entry) => Volatile.Write(ref recentWork[workIndex++ % recentWork.Length], entry);
     private readonly Func<int, bool>? canPrimeSource48k;
+    private readonly IncidentRecorder? incidents;
     private readonly WaitHandle? primingSignal;
     private double primingWaitMs;
     private int primingResult = -1;
@@ -84,8 +87,9 @@ internal sealed class SharedRenderPlayer : IDisposable
     private static void Maximum(ref long target, long ticks) => Volatile.Write(ref target, Math.Max(Volatile.Read(ref target), ticks));
     private MMDevice GetEndpoint(MMDeviceEnumerator enumerator) => endpointId is null
         ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia) : enumerator.GetDevice(endpointId);
-    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null, bool minimal = false, int minimalHeadroomMs = 0, bool stagedBuffers = false, bool periodWatchdog = false, bool traceWork = false, Func<int, bool>? canPrimeSource48k = null, WaitHandle? primingSignal = null, bool criticalPriority = false)
+    public SharedRenderPlayer(int requestedMs, bool preferLow, bool bounded, bool preferRaw = false, AudioStreamCategory category = AudioStreamCategory.Other, string? endpointId = null, bool minimal = false, int minimalHeadroomMs = 0, bool stagedBuffers = false, bool periodWatchdog = false, bool traceWork = false, Func<int, bool>? canPrimeSource48k = null, WaitHandle? primingSignal = null, bool criticalPriority = false, IncidentRecorder? incidents = null)
     {
+        this.incidents = incidents;
         this.criticalPriority = criticalPriority;
         if (minimalHeadroomMs is < 0 or > 5) throw new ArgumentOutOfRangeException(nameof(minimalHeadroomMs));
         this.minimalHeadroomMs = minimalHeadroomMs; this.minimal = minimal; this.endpointId = endpointId; this.category = category;
@@ -96,6 +100,23 @@ internal sealed class SharedRenderPlayer : IDisposable
 
     internal static int ChooseTarget(int capacity, uint period, int rate) =>
         Math.Min(capacity, checked((int)period + (int)Math.Ceiling(rate * .005)));
+
+    internal static IWaveProvider AdaptSource(IWaveProvider source, WaveFormat mix)
+    {
+        var subFormat = mix is WaveFormatExtensible ext ? ext.SubFormat : Guid.Empty;
+        var floating = mix.BitsPerSample == 32 && (mix.Encoding == WaveFormatEncoding.IeeeFloat
+            || subFormat == new Guid("00000003-0000-0010-8000-00aa00389b71"));
+        var pcm16 = mix.BitsPerSample == 16 && (mix.Encoding == WaveFormatEncoding.Pcm
+            || subFormat == new Guid("00000001-0000-0010-8000-00aa00389b71"));
+        if (mix.Channels is not (1 or 2) || (!floating && !pcm16))
+            throw new NotSupportedException($"Shared render mix format requires compatibility output: {mix}.");
+        ISampleProvider samples = source.ToSampleProvider();
+        if (samples.WaveFormat.SampleRate != mix.SampleRate) samples = new WdlResamplingSampleProvider(samples, mix.SampleRate);
+        if (samples.WaveFormat.Channels == 1 && mix.Channels == 2) samples = new MonoToStereoSampleProvider(samples);
+        else if (samples.WaveFormat.Channels != mix.Channels) throw new NotSupportedException("Unsupported shared render channel mapping.");
+        // Convert on pull; no additional PCM FIFO or change to the engine format/period.
+        return pcm16 ? new SampleToWaveProvider16(samples) : samples.ToWaveProvider();
+    }
 
     public void Init(IWaveProvider source)
     {
@@ -115,12 +136,10 @@ internal sealed class SharedRenderPlayer : IDisposable
                     client.SetClientProperties(category, preferRaw ? AudioClientStreamOptions.Raw : AudioClientStreamOptions.None);
                 }
                 var mix = client.MixFormat;
-                // Limit the custom path to formats we can adapt without opaque conversion.
-                if (mix.BitsPerSample != 32 || mix.Channels is not (1 or 2)
-                    || !(mix.Encoding == WaveFormatEncoding.IeeeFloat
-                    || mix is WaveFormatExtensible ext && ext.SubFormat == new Guid("00000003-0000-0010-8000-00aa00389b71")))
-                    throw new NotSupportedException("Shared render mix format requires compatibility output.");
+                MixFormatDescription = mix.ToString();
+                var adapted = AdaptSource(source, mix);
                 var period = client.GetSharedModeEnginePeriod(mix).ChooseLowestLatencyPeriod();
+                RequestedEnginePeriodMs = period * 1000.0 / mix.SampleRate;
                 client.InitializeSharedAudioStream(AudioClientStreamFlags.EventCallback, period, mix, Guid.Empty);
                 client.SetEventHandle(ready.SafeWaitHandle.DangerousGetHandle());
                 capacity = client.BufferSize;
@@ -128,11 +147,7 @@ internal sealed class SharedRenderPlayer : IDisposable
                 desiredFrames = minimal ? Math.Min(capacity, checked((int)period + (int)Math.Ceiling(mix.SampleRate * minimalHeadroomMs / 1000.0))) : ChooseTarget(capacity, period, mix.SampleRate);
                 targetFrames = minimal ? desiredFrames : capacity;
                 periodMs = period * 1000.0 / mix.SampleRate; OutputWaveFormat = mix;
-                ISampleProvider samples = source.ToSampleProvider();
-                if (samples.WaveFormat.SampleRate != mix.SampleRate) samples = new WdlResamplingSampleProvider(samples, mix.SampleRate);
-                if (samples.WaveFormat.Channels == 1 && mix.Channels == 2) samples = new MonoToStereoSampleProvider(samples);
-                else if (samples.WaveFormat.Channels != mix.Channels) throw new NotSupportedException("Unsupported shared render channel mapping.");
-                provider = samples.ToWaveProvider(); RawActive = preferRaw; return;
+                provider = adapted; RawActive = preferRaw; return;
             }
             catch (Exception error) when (error is COMException or NotSupportedException or ArgumentException)
             { reason = "공유 출력 호환 경로: " + error.Message; ReleaseClient(); }
@@ -248,6 +263,7 @@ internal sealed class SharedRenderPlayer : IDisposable
     }
     private void ObserveEmpty(string phase)
     {
+        incidents?.Write(new(ProbeClock.Now, "render-empty", Outcome: phase, SampleRate: OutputWaveFormat.SampleRate), "render-empty");
         if (phase == "wake") Interlocked.Increment(ref emptyOnWake);
         else Interlocked.Increment(ref emptyDuringSupply);
         Volatile.Write(ref lastEmpty, new(ProbeClock.Now, phase));
@@ -291,6 +307,9 @@ internal sealed class SharedRenderPlayer : IDisposable
             lease.Release(frames);
         }
         var end = Stopwatch.GetTimestamp();
+        incidents?.Write(new(end / (double)Stopwatch.Frequency, "render-submit", Samples: frames,
+            QueueMs: queuedBefore.GetValueOrDefault() * 1000.0 / OutputWaveFormat.SampleRate,
+            SourceAt: began / (double)Stopwatch.Frequency, WorkMs: Milliseconds(end - began), SampleRate: OutputWaveFormat.SampleRate));
         Maximum(ref maxLeaseTicks, end - leaseAt);
         if (traceWork && (Stopwatch.GetElapsedTime(began, end).TotalMilliseconds >= 2 || beforeCommit == 0))
         {

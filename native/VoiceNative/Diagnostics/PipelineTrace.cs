@@ -27,6 +27,7 @@ internal sealed record PipelineTraceSnapshot(PipelineSend[] Sends, PipelineRecei
 // Opt-in, bounded timestamp metadata only. No payload bytes, audio, tokens or raw datagrams.
 internal sealed class PipelineTrace
 {
+    internal IncidentRecorder Incidents { get; } = new();
     private readonly int capacity;
     public PipelineTrace(int capacity = 24000)
     {
@@ -78,8 +79,12 @@ internal sealed class PipelineTrace
     // Only clear fixed RTP header identity/length is retained; never payload bytes.
     public void ObserveRtpChannel(string peer, ReadOnlySpan<byte> packet, int payloadType, int receiveBufferBytes)
     {
-        if (!Enabled || packet.Length < 12 || packet[0] >> 6 != 2 || (packet[1] & 127) != payloadType
+        if ((!Enabled && !Incidents.Active) || packet.Length < 12 || packet[0] >> 6 != 2 || (packet[1] & 127) != payloadType
             || packet.Length < 12 + 4 * (packet[0] & 15)) return;
+        Incidents.Write(new(ProbeClock.Now, "rtp-channel-observer", peer,
+            BinaryPrimitives.ReadUInt32BigEndian(packet[8..]), BinaryPrimitives.ReadUInt32BigEndian(packet[4..]),
+            BinaryPrimitives.ReadUInt16BigEndian(packet[2..])));
+        if (!Enabled) return;
         Add(rtpChannel, new(peer, BinaryPrimitives.ReadUInt32BigEndian(packet[8..]),
             BinaryPrimitives.ReadUInt32BigEndian(packet[4..]), BinaryPrimitives.ReadUInt16BigEndian(packet[2..]),
             packet.Length, receiveBufferBytes, ProbeClock.Now));

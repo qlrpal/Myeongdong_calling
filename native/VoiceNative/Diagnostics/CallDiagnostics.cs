@@ -24,7 +24,8 @@ public sealed record RenderExecutionDiagnostics(bool StagedBuffers, bool PeriodW
 public sealed record RenderWorkObservation(double At, string Phase, double ElapsedMs, double ProviderMs,
     double LeaseMs, double? ThreadCpuMs, double? PaddingBeforeMs, double? PaddingBeforeCommitMs,
     int Gen0Collections, int Gen1Collections, int Gen2Collections);
-public sealed record RenderDiagnostics(bool BoundedActive, double? TargetPaddingMs, double? CapacityMs, long EmptyEvents, long SafetyFallbacks = 0, bool RawActive = false, RenderExecutionDiagnostics? Execution = null);
+public sealed record RenderDiagnostics(bool BoundedActive, double? TargetPaddingMs, double? CapacityMs, long EmptyEvents, long SafetyFallbacks = 0, bool RawActive = false, RenderExecutionDiagnostics? Execution = null,
+    string? AttemptedMixFormat = null, double? RequestedEnginePeriodMs = null);
 public sealed record PeerDiagnostics(string Id, string Name, string State, string IceState, string Route,
     string? LocalEndpoint, string? RemoteEndpoint, long TxFrames, long RxPackets,
     double? TxPayloadKbps, double? RxPayloadKbps, double? ReceiveJitterMs,

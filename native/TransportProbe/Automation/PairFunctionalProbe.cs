@@ -28,6 +28,7 @@ internal static class PairFunctionalProbe
         var checks = new List<object>(); var windows = new List<object>();
         var bindings = new List<object>();
         PipelineTraceSnapshot? baselineTrace = null;
+        IncidentSnapshot? baselineIncident = null;
         string? error = null;
         var stage = "prepare";
         MediaInterfaceChoice? selectedInterface = null;
@@ -140,6 +141,7 @@ internal static class PairFunctionalProbe
             await Task.Delay(2000); // Fixed device/media warmup, excluded from observation resources.
             if (traceBaseline) engine.StartPipelineTrace(observeSeconds + 3);
             await Window("baseline", false);
+            baselineIncident = engine.SnapshotIncident();
             if (traceBaseline)
             {
                 baselineTrace = engine.StopPipelineTrace();
@@ -158,6 +160,7 @@ internal static class PairFunctionalProbe
         catch (Exception failure) { error = failure.ToString(); failureDiagnostics = engine.GetDiagnostics(); bindings.Add(new { stage, observed = engine.DiagnosticMediaBindings() }); }
         finally
         {
+            baselineIncident ??= engine.SnapshotIncident();
             if (traceBaseline && baselineTrace is null) baselineTrace = engine.StopPipelineTrace();
             var cleanup = new CallCleanup();
             await cleanup.RunAsync("session", () => session.DisposeAsync().AsTask());
@@ -166,7 +169,9 @@ internal static class PairFunctionalProbe
             string[] recorded; lock (sync) recorded = events.ToArray();
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { schemaVersion = 1, run, role, route, shared,
-                completed = true, error, stage, observeSeconds, reserveMs, traceBaseline, baselineTrace, traceIncludesStartup = false, mediaAddress, selectedInterface, bindings, failureDiagnostics, buildHash, probeHash, fixtureHash, sdk = SdkBuildIdentity.Read(),
+                completed = true, error, stage, observeSeconds, reserveMs, traceBaseline, baselineTrace, baselineIncident,
+                finalIncident = engine.SnapshotIncident(), traceIncludesStartup = false, incidentIncludesStartup = true,
+                mediaAddress, selectedInterface, bindings, failureDiagnostics, buildHash, probeHash, fixtureHash, sdk = SdkBuildIdentity.Read(),
                 hostFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName))),
                 checks, windows, events = recorded,
                 notes = "Actual shared capture/render with synthetic PCM replacement. Phases use authenticated data-channel acknowledgements and local monotonic deadlines, not cross-host clock subtraction. Functional test, not physical mouth-to-ear latency, game load or PLC quality qualification." }, DiagnosticJson.Readable));
