@@ -6,7 +6,6 @@ using VoiceNative;
 // Media time is deterministic; network arrival is awaited before each simulated pull.
 internal static class CaptureFrameIntegration
 {
-    private delegate void CaptureBlock(ReadOnlySpan<byte> data, double? at, double callbackAt, int samples, int flags);
     private static readonly double[] Durations = [2.5, 5, 10, 5, 2.5, 10, 2.5, 5, 10];
     public static async Task RunAsync(RTCPeerConnection left, RTCPeerConnection right, int payloadType)
     {
@@ -14,8 +13,6 @@ internal static class CaptureFrameIntegration
         using var encoder = new OpusAudioEncoder(OpusProfile.LowDelay64, options);
         var source = new WindowsAudioDevice(encoder, disableSource: true, disableSink: true, experiment: options);
         using var playout = new RtpOpusPlayoutBuffer(new(), correctClock: false, experiment: options);
-        var capture = typeof(WindowsAudioDevice).GetMethod("Capture", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .CreateDelegate<CaptureBlock>(source);
         var queue = new AudioSendQueue(1);
         var sync = new object();
         var expected = new Queue<(uint Stamp, int Samples)>();
@@ -50,7 +47,7 @@ internal static class CaptureFrameIntegration
         var output = new byte[960];
         async Task FeedAsync()
         {
-            capture(input, null, 0, 480, 0);
+            source.InjectSyntheticCapture(input);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
             while (Volatile.Read(ref arrived) != Volatile.Read(ref sent)) await Task.Delay(1, timeout.Token);
             if (error is not null) throw new InvalidOperationException(error);

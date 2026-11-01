@@ -18,10 +18,15 @@ internal static class PairFunctionalProbe
         var buildHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(typeof(WebRtcCallEngine).Assembly.Location)));
         var probeHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(typeof(PairFunctionalProbe).Assembly.Location)));
         var fixtureHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(wave)));
-        var protocol = new PairBarrier(run, role, route + ":" + shared + ":" + observeSeconds + ":" + reserveMs + ":" + traceBaseline + ":" + buildHash + ":" + probeHash + ":" + fixtureHash);
+        var incidentMode = Environment.GetEnvironmentVariable("MYEONGDONG_TEST_INCIDENT_MODE") ?? "auto";
+        if (incidentMode is not ("auto" or "off" or "exercise")) throw new ArgumentException("Unknown diagnostic incident mode");
+        var sdkBoundaryEnabled = Environment.GetEnvironmentVariable("MYEONGDONG_TEST_SDK_BOUNDARY") == "1";
+        var sdkFullBaseline = Environment.GetEnvironmentVariable("MYEONGDONG_TEST_SDK_BOUNDARY_FULL_BASELINE") == "1";
+        var protocol = new PairBarrier(run, role, route + ":" + shared + ":" + observeSeconds + ":" + reserveMs + ":" + traceBaseline + ":" + buildHash + ":" + probeHash + ":" + fixtureHash + ":" + incidentMode + ":" + sdkBoundaryEnabled + ":" + sdkFullBaseline);
         var fixture = SpeechFixture.Load(wave);
         var engine = new WebRtcCallEngine { DirectOnly = route == "direct", ForceRelay = route == "relay",
-            UseSharedOutput = shared, DiagnosticReserveMs = reserveMs, DiagnosticCaptureTransform = fixture.Fill, DiagnosticControlReceived = protocol.Receive };
+            UseSharedOutput = shared, DiagnosticReserveMs = reserveMs, DiagnosticCaptureTransform = fixture.Fill, DiagnosticControlReceived = protocol.Receive,
+            AutomaticIncidentRecording = incidentMode != "off" };
         engine.SetPlayoutPolicy(PlayoutPolicy.LowLatency); // Same policy selected by the normal UI.
         var session = new CallSession(engine);
         var clock = Stopwatch.StartNew(); var events = new List<string>(); var sync = new object();
@@ -29,10 +34,13 @@ internal static class PairFunctionalProbe
         var bindings = new List<object>();
         PipelineTraceSnapshot? baselineTrace = null;
         IncidentSnapshot? baselineIncident = null;
+        IncidentDetails? baselineIncidentDetails = null;
+        object? incidentExercise = null;
         string? error = null;
         var stage = "prepare";
         MediaInterfaceChoice? selectedInterface = null;
         CallDiagnostics? failureDiagnostics = null;
+        SdkBoundarySession? sdkBoundary = null;
         engine.Status += message => { lock (sync) events.Add($"{clock.Elapsed.TotalSeconds:F3}s {message}"); };
         static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
         async Task Wait(Func<bool> condition, string stage, int seconds = 45)
@@ -93,6 +101,7 @@ internal static class PairFunctionalProbe
             using var process = Process.GetCurrentProcess();
             var cpu = process.TotalProcessorTime; var allocated = GC.GetTotalAllocatedBytes(); var pause = GC.GetTotalPauseDuration();
             var watch = Stopwatch.StartNew();
+            var recordingSamples = 0;
             while (watch.Elapsed.TotalSeconds < seconds)
             {
                 _ = Peer(); var d = engine.GetDiagnostics();
@@ -102,6 +111,8 @@ internal static class PairFunctionalProbe
                 if (watch.Elapsed.TotalSeconds > 2)
                     Require(d.Peers.All(p => ParticipantAudioStatus.RemoteMuted(p.State, p.Latency) == muted), "상대 마이크 상태 공유 불일치");
                 samples.Add(d); await Task.Delay(250);
+                if (engine.IncidentRecordingActive) recordingSamples++;
+                if (!sdkFullBaseline && phase == "baseline" && engine.IncidentEventId is not null && !engine.IncidentRecordingActive) sdkBoundary?.Stop();
             }
             var last = Peer();
             Require(first.Id == last.Id && last.TxFrames - first.TxFrames > 50 && last.RxPackets - first.RxPackets > 50
@@ -111,7 +122,7 @@ internal static class PairFunctionalProbe
             windows.Add(new { phase, requestedSeconds = seconds, elapsedSeconds = elapsed,
                 cpuCores = (process.TotalProcessorTime - cpu).TotalSeconds / elapsed,
                 allocatedBytes = GC.GetTotalAllocatedBytes() - allocated,
-                gcPauseMs = (GC.GetTotalPauseDuration() - pause).TotalMilliseconds, samples });
+                gcPauseMs = (GC.GetTotalPauseDuration() - pause).TotalMilliseconds, recordingSamples, totalSamples = samples.Count, samples });
             checks.Add(new { name = phase, ok = true });
         }
         async Task Rejoin(string leavingRole)
@@ -137,17 +148,37 @@ internal static class PairFunctionalProbe
             selectedInterface = MediaInterfaceSelection.Resolve(mediaAddress);
             engine.SetMediaInterface(mediaAddress);
             stage = "join";
+            sdkBoundary = new SdkBoundarySession(sdkBoundaryEnabled);
             await session.ConnectAsync(request); await Connected(); await Barrier("ready");
             await Task.Delay(2000); // Fixed device/media warmup, excluded from observation resources.
             if (traceBaseline) engine.StartPipelineTrace(observeSeconds + 3);
             await Window("baseline", false);
+            sdkBoundary.Stop();
             baselineIncident = engine.SnapshotIncident();
+            baselineIncidentDetails = engine.SnapshotIncidentDetails(baselineIncident);
             if (traceBaseline)
             {
                 baselineTrace = engine.StopPipelineTrace();
                 Require(baselineTrace.EvictedRecords == 0 && baselineTrace.Reads.Length > 0 && baselineTrace.Admissions.Length > 0 && baselineTrace.Receives.Length > 0, "상세 기준선 기록 누락/축출");
             }
             await Barrier("baseline");
+            if (incidentMode == "exercise")
+            {
+                var peerBefore = Peer().Id;
+                await engine.RearmIncidentRecordingAsync();
+                await Barrier("incident-rearmed"); await Task.Delay(2300);
+                if (role == "a") engine.DiagnosticTriggerIncident();
+                await Wait(() => { _ = engine.GetDiagnostics(); return engine.IncidentEventId is not null; }, "paired incident");
+                await Task.Delay(2500);
+                var capture = engine.SnapshotIncident(); var details = engine.SnapshotIncidentDetails(capture);
+                Require(capture.State == "Frozen" && capture.EventId is not null && details.Review.PeerConfirmations == 1,
+                    "상대 사건 수락/동결 누락");
+                Require(details.History.Length is >= 1 and <= 2 && details.History[^1].Capture.State == "Archived",
+                    "재준비 전 기록 보존 실패");
+                Require(Peer().Id == peerBefore, "기록 재준비가 통화를 재접속했습니다.");
+                incidentExercise = new { passed = true, capture, details, samePeer = true };
+                await Barrier("incident-confirmed");
+            }
             engine.SetMicrophoneMuted(true); await Window("muted", true); await Barrier("muted");
             engine.SetMicrophoneMuted(false); await Window("active", false); await Barrier("active");
             await Rejoin("a"); await Rejoin("b");
@@ -160,6 +191,7 @@ internal static class PairFunctionalProbe
         catch (Exception failure) { error = failure.ToString(); failureDiagnostics = engine.GetDiagnostics(); bindings.Add(new { stage, observed = engine.DiagnosticMediaBindings() }); }
         finally
         {
+            sdkBoundary?.Stop();
             baselineIncident ??= engine.SnapshotIncident();
             if (traceBaseline && baselineTrace is null) baselineTrace = engine.StopPipelineTrace();
             var cleanup = new CallCleanup();
@@ -169,7 +201,8 @@ internal static class PairFunctionalProbe
             string[] recorded; lock (sync) recorded = events.ToArray();
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { schemaVersion = 1, run, role, route, shared,
-                completed = true, error, stage, observeSeconds, reserveMs, traceBaseline, baselineTrace, baselineIncident,
+                completed = true, error, stage, observeSeconds, reserveMs, traceBaseline, baselineTrace, baselineIncident, baselineIncidentDetails,
+                incidentMode, incidentExercise, sdkFullBaseline, sdkBoundary = sdkBoundary?.Snapshot(),
                 finalIncident = engine.SnapshotIncident(), traceIncludesStartup = false, incidentIncludesStartup = true,
                 mediaAddress, selectedInterface, bindings, failureDiagnostics, buildHash, probeHash, fixtureHash, sdk = SdkBuildIdentity.Read(),
                 hostFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName))),

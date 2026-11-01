@@ -172,6 +172,20 @@ public sealed partial class CallForm : Form
             finally { if (!IsDisposed && !closeRequested) local.Enabled = join.Enabled = true; }
         };
         var packetTrace = new Button { Text = "패킷 경로 기록 (30초)", AutoSize = true };
+        var rearmIncident = new Button { Text = "기록 다시 준비 (이 PC)", AutoSize = true };
+        controls.Controls.Add(rearmIncident);
+        rearmIncident.Click += async (_, _) =>
+        {
+            if (engine is not WebRtcCallEngine recorder) return;
+            rearmIncident.Enabled = false;
+            try
+            {
+                await recorder.RearmIncidentRecordingAsync();
+                AppendLog("이 PC의 기록을 다시 준비했습니다. 이전 기록은 최근 2개까지 진단에 포함됩니다. 상대도 다시 준비해 주세요.");
+            }
+            catch (Exception ex) { AppendLog("기록 준비 실패: " + ex.Message); }
+            finally { if (!IsDisposed) rearmIncident.Enabled = true; }
+        };
         controls.Controls.Add(packetTrace);
         controls.Controls.SetChildIndex(packetTrace, 2);
         packetTrace.Click += (_, _) =>
@@ -187,7 +201,7 @@ public sealed partial class CallForm : Form
         // Experimental controls and audible measurement tools stay in developer builds.
         foreach (Control control in controls.Controls.Cast<Control>().ToArray())
             if (control != join && control != leave && control != copy && control != save
-                && control != restartOutput && control != packetTrace && control != mediaInterface)
+                && control != restartOutput && control != packetTrace && control != rearmIncident && control != mediaInterface)
                 controls.Controls.Remove(control);
 #endif
         var peerAddress = new TextBox { PlaceholderText = "상대 PC 내부 IP", Width = 220 };
@@ -296,6 +310,8 @@ public sealed partial class CallForm : Form
             text.AppendLine(CultureInfo.CurrentCulture, $"입력 콜백 전체 처리 P95/최대 {Number(snapshot.Microphone?.CaptureWorkP95Ms)}/{Number(snapshot.Microphone?.CaptureWorkMaxMs, " ms")} · 입력 불연속 {snapshot.Microphone?.CaptureDiscontinuities} / 타임스탬프 오류 {snapshot.Microphone?.CaptureTimestampErrors}");
             if (snapshot.Microphone?.CaptureExecution is { } inputRun)
                 text.AppendLine(CultureInfo.CurrentCulture, $"입력 실행 · 버퍼 조기 반환 {inputRun.StagedBuffers} · 최대 장치 버퍼 보유 {Number(inputRun.MaxLeaseMs, " ms")} / 콜백 처리 {Number(inputRun.MaxCallbackMs, " ms")} · 최대 기상 간격 {Number(inputRun.MaxWakeGapMs, " ms")} · 대기 시간 초과 {inputRun.TimeoutWakes}회 · 오디오 우선순위 {inputRun.MmcssActive}");
+            if (snapshot.Microphone?.CaptureContinuity is { } continuity)
+                text.AppendLine(CultureInfo.CurrentCulture, $"입력 불연속 초기화로 버린 부분 PCM {continuity.AppDiscardedSamples}샘플 / {Number(continuity.AppDiscardedMs, " ms")} · 비교 가능한 장치 위치 변화 {continuity.ComparablePositionBreaks}회 · 장치/네트워크 누락량은 아님");
             text.AppendLine(CultureInfo.CurrentCulture, $"송신 대기 {snapshot.Sender?.PendingFrames ?? 0}프레임 · 초과 프레임 버림 {snapshot.Sender?.DroppedFrames ?? 0} · 최대 송신 대기 {Number(snapshot.Sender?.MaxWaitMs, " ms")}");
             if (snapshot.Sender is { } sender)
                 text.AppendLine(CultureInfo.CurrentCulture, $"송신 큐 초과 폐기 음성 {Number(sender.OverflowDroppedMs, " ms")} · 폐기 시 최대 대기 {Number(sender.OverflowMaxAgeMs, " ms")} · 나이 제한 폐기 {sender.ExpiredFrames}프레임");
@@ -366,7 +382,17 @@ public sealed partial class CallForm : Form
         }
         catch (Exception ex) { AppendLog("통계 읽기 오류: " + ex.Message); }
     }
-    private string ReportJson() => JsonSerializer.Serialize(new
+    private string ReportJson()
+    {
+        var recorder = engine as WebRtcCallEngine;
+        var incident = recorder?.SnapshotIncident();
+        var details = incident is null ? null : recorder?.SnapshotIncidentDetails(incident);
+        if (details is not null)
+        {
+            var review = details.Review;
+            AppendLog(FormattableString.Invariant($"기록 점검 · 송신 {(review.HasSend ? "있음" : "없음")} / 수신 {(review.HasReceive ? "있음" : "없음")} / 재생 {(review.HasPlayout ? "있음" : "없음")} · 사건 전후 {review.HasPrehistory}/{review.HasAftermath} · 충돌 누락 {review.Skipped} · 상대 확인 {review.PeerConfirmations}/{review.PeerCount}. 상대 진단 파일은 별도로 필요합니다."));
+        }
+        return JsonSerializer.Serialize(new
     {
         schemaVersion = 2,
         generatedAt = DateTimeOffset.Now,
@@ -380,8 +406,10 @@ public sealed partial class CallForm : Form
         measurementLimits = "로컬: 출력 제출→스피커→마이크 캡처. 통화: 송신 캡처 프레임 시각→상대 마이크 재캡처. 서로 출발점이 달라 단순 차감 불가. ADC/DAC·드라이버·DSP·공기 경로는 합산값이며 장치 단독으로 분리되지 않음. 발화·음악은 오검출 가능. 동일 장치·볼륨·노이즈 제거 조건으로 반복 비교 필요.",
         samples = history.ToArray(),
         pipeline = (engine as WebRtcCallEngine)?.SnapshotPipelineTrace(),
-        incident = (engine as WebRtcCallEngine)?.SnapshotIncident(),
+        incident,
+        incidentDetails = details,
         events = logLines.ToArray()
     }, VoiceNative.DiagnosticJson.Readable);
+    }
 
 }

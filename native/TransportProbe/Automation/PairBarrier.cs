@@ -8,7 +8,7 @@ internal sealed class PairBarrier(string run, string role, string configuration)
     private readonly ConcurrentDictionary<string, byte> seen = new(), acknowledged = new();
     private string remotePhase = "none";
     private string? error;
-    internal static readonly string[] Phases = ["ready", "baseline", "muted", "active", "a-leave", "a-rejoined", "b-leave", "b-rejoined", "finish"];
+    internal static readonly string[] Phases = ["ready", "baseline", "incident-rearmed", "incident-confirmed", "muted", "active", "a-leave", "a-rejoined", "b-leave", "b-rejoined", "finish"];
     internal string? Error => Volatile.Read(ref error);
     internal void Receive(string message)
     {

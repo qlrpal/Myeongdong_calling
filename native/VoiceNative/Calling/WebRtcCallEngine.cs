@@ -8,7 +8,7 @@ using System.Collections.Concurrent;
 
 namespace VoiceNative;
 
-public sealed class WebRtcCallEngine : ICallEngine
+public sealed partial class WebRtcCallEngine : ICallEngine
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     { Converters = { new JsonStringEnumConverter() } };
@@ -108,7 +108,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     private readonly PipelineTrace pipeline = new();
     internal PipelineTraceSnapshot SnapshotPipelineTrace() => pipeline.Snapshot();
     internal IncidentSnapshot SnapshotIncident() => pipeline.Incidents.Snapshot(ProbeClock.Now);
-    internal string IncidentStatus => pipeline.Incidents.Status;
+    internal string IncidentStatus => IncidentOverview();
     internal bool AutomaticIncidentRecording { get; init; } = true;
     internal void StartPipelineTrace(int seconds) => pipeline.Start(seconds);
     internal PipelineTraceSnapshot StopPipelineTrace() { pipeline.Stop(); return pipeline.Snapshot(); }
@@ -147,6 +147,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     {
         public string Id { get; init; } = "";
         public AudioSendLifetime SendLifetime { get; } = new();
+        public IncidentPeerLink IncidentLink { get; } = new();
         public MediaPortHistory.Lease PortLease { get; init; }
         public AdaptiveFramePolicy FramePolicy { get; } = new();
         public long LastSentSequence { get; set; }
@@ -229,8 +230,9 @@ public sealed class WebRtcCallEngine : ICallEngine
             var dedicatedLimits = experiment?.DedicatedSend == true
                 ? AudioSendQueue.DedicatedLimits(microphone.Snapshot().EnginePeriodMs ?? 10, FrameDurationMs) : default;
             var sendCapacity = experiment?.DedicatedSend == true ? dedicatedLimits.Capacity : experiment?.LatestSend == true ? 1 : 3;
-            if (AutomaticIncidentRecording) pipeline.Incidents.Reset(ProbeClock.Now);
+            if (AutomaticIncidentRecording) pipeline.Incidents.Reset(ProbeClock.Now, armTriggers: false);
             else pipeline.Incidents.Stop();
+            lock (incidentArchiveSync) retiredIncidentPeers.Clear();
             sendQueue = new AudioSendQueue(sendCapacity, experiment?.DedicatedSend == true ? dedicatedLimits.MaximumAgeMs : null, incidents: pipeline.Incidents); sendCancellation = new CancellationTokenSource();
             var activeQueue = sendQueue;
             dedicatedSender = experiment?.DedicatedSend == true ? new(activeQueue,
@@ -367,10 +369,16 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (media == SDPMediaTypesEnum.audio)
             {
                 var receivedAt = ProbeClock.Now;
-                var previousAt = Interlocked.Exchange(ref previousAudioAt, receivedAt);
-                var gapMs = previousAt > 0 ? (receivedAt - previousAt) * 1000 : 0;
-                pipeline.Incidents.Write(new(receivedAt, "authenticated-rtp-callback", id, packet.Header.SyncSource,
-                    packet.Header.Timestamp, packet.Header.SequenceNumber, DurationMs: gapMs), gapMs > 50 ? "receive-gap" : null);
+                if (packet.Header.PayloadType == Volatile.Read(ref receivedPayloadType))
+                {
+                    // Connecting alone must not freeze the first incident before a
+                    // remote media path exists. Unauthenticated/raw headers cannot arm it.
+                    pipeline.Incidents.ArmTriggers(receivedAt);
+                    var previousAt = Interlocked.Exchange(ref previousAudioAt, receivedAt);
+                    var gapMs = previousAt > 0 ? (receivedAt - previousAt) * 1000 : 0;
+                    pipeline.Incidents.Write(new(receivedAt, "authenticated-rtp-callback", id, packet.Header.SyncSource,
+                        packet.Header.Timestamp, packet.Header.SequenceNumber, DurationMs: gapMs), gapMs > 50 ? "receive-gap" : null);
+                }
                 if (sink.Timeline.Enabled) sink.Timeline.Update(AudioFrameTimeline.Hash(packet.Payload), old => old with { ReceivedAt = old.ReceivedAt ?? receivedAt, RtpNotificationAt = receivedAt, Receipts = old.Receipts + 1 });
                 metrics.Received(packet.Header.SyncSource, packet.Header.Timestamp, packet.Payload.Length);
                 precision.Packet(packet.Header.SyncSource, packet.Header.SequenceNumber);
@@ -773,6 +781,7 @@ public sealed class WebRtcCallEngine : ICallEngine
     {
         KeyValuePair<string, Peer>[] current;
         lock (peers) current = peers.ToArray();
+        PumpIncidentLinks(current.Select(p => p.Value));
         UpdateFramePolicy(current.Select(p => p.Value));
         var mic = microphone?.Snapshot();
         var sender = sendQueue?.Snapshot();
@@ -845,6 +854,7 @@ public sealed class WebRtcCallEngine : ICallEngine
         peer.DiagnosticsChannel = channel;
         channel.onmessage += (_, _, bytes) =>
         {
+            if (IncidentProtocol.IsMessage(bytes)) { HandleIncidentMessage(peer, bytes); return; }
             if (DiagnosticControlReceived is { } control && bytes.Length <= 1024)
             {
                 var text = System.Text.Encoding.UTF8.GetString(bytes);
@@ -1025,8 +1035,9 @@ public sealed class WebRtcCallEngine : ICallEngine
             if (error is not null) NotifyStatus(error);
         }
     }
-    private static async Task ClosePeerAsync(Peer peer, string reason)
+    private async Task ClosePeerAsync(Peer peer, string reason)
     {
+        RetireIncidentPeer(peer);
         await peer.SendLifetime.StopAsync();
         var cleanup = new CallCleanup();
         cleanup.Run("미디어 연결", () => peer.Connection.Close(reason));

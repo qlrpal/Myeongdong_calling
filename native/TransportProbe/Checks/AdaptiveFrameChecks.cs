@@ -163,15 +163,12 @@ internal static class AdaptiveFrameChecks
         p.Observe(40, F(0, true)); Require(p.TargetMs == 2.5, "Counter reset caused transition");
         p.Suspend(); p.Observe(50, F(100, true)); Require(p.TargetMs == 2.5, "Stale interval caused transition");
     }
-    private delegate void CaptureBlock(ReadOnlySpan<byte> data, double? at, double callbackAt, int samples, int flags);
     private static async Task CheckCaptureBoundaryAsync()
     {
         var options = LatencyExperiment.FromName("opus-auto-frames")!;
         using var encoder = new OpusAudioEncoder(OpusProfile.LowDelay64, options);
         // Exercise the actual capture assembler without opening physical devices.
         var source = new WindowsAudioDevice(encoder, disableSource: true, disableSink: true, experiment: options);
-        var feed = typeof(WindowsAudioDevice).GetMethod("Capture", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .CreateDelegate<CaptureBlock>(source);
         var sizes = new List<int>();
         source.OnAudioSourceEncodedSample += (samples, payload) =>
         {
@@ -180,13 +177,13 @@ internal static class AdaptiveFrameChecks
         };
         try
         {
-            feed(new byte[120], null, 0, 60, 0);
+            source.InjectSyntheticCapture(new byte[120]);
             source.RequestFrameDuration(10);
-            feed(new byte[120], null, 0, 60, 0);
+            source.InjectSyntheticCapture(new byte[120]);
             Require(sizes.Count == 1 && sizes[0] == 120, "Partial capture was resized or lost");
-            feed(new byte[960], null, 0, 480, 0);
-            source.RequestFrameDuration(5); feed(new byte[480], null, 0, 240, 0);
-            source.RequestFrameDuration(2.5); feed(new byte[240], null, 0, 120, 0);
+            source.InjectSyntheticCapture(new byte[960]);
+            source.RequestFrameDuration(5); source.InjectSyntheticCapture(new byte[480]);
+            source.RequestFrameDuration(2.5); source.InjectSyntheticCapture(new byte[240]);
             Require(sizes.SequenceEqual(CaptureTransitions), "Runtime capture transitions");
         }
         finally { await source.Close(); }

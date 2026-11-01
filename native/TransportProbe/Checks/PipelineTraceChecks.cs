@@ -8,6 +8,7 @@ internal static class PipelineTraceChecks
     public static void Run()
     {
         IncidentRecorderChecks.Run();
+        IncidentProtocolChecks.Run();
         var capture = new PipelineTrace(2);
         capture.Captured(new(1,2,3,480,4));
         if (capture.Snapshot().CaptureCallbacks is not null) throw new InvalidOperationException("Disabled capture tracing allocated storage");

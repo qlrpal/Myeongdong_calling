@@ -9,6 +9,8 @@ internal sealed class PlayoutClockController(int reserveSamples, bool enabled, b
     private int targetReserveSamples = reserveSamples;
     public double Rate { get; private set; } = 1;
     public bool Enabled { get; } = enabled;
+    public int DeadbandSamples => subBurstFeedback ? 24 : responsive ? 120 : 240;
+    public int LowerDeadbandSamples => DeadbandSamples;
     public double TargetSamples => learnedTarget > 0 ? learnedTarget : targetReserveSamples;
     public double? FilteredQueueSamples => initialized ? filteredQueue : null;
     public void Observe(double queueSamples, int outputSamples)
@@ -26,7 +28,7 @@ internal sealed class PlayoutClockController(int reserveSamples, bool enabled, b
             return;
         }
         var error = filteredQueue - learnedTarget;
-        var outsideBand = Math.Sign(error) * Math.Max(0, Math.Abs(error) - (subBurstFeedback ? 24 : responsive ? 120 : 240));
+        var outsideBand = Math.Sign(error) * Math.Max(0, Math.Abs(error) - DeadbandSamples);
         // Candidate follows a falling reserve without leaving tens of seconds
         // of residual queue. Keep the existing -0.2%/+1% rate safety limits.
         var correction = Math.Clamp(outsideBand / 48000 * (responsive ? 0.25 : 0.1) + rateBias, -0.002, 0.01);

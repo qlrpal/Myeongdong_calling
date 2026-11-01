@@ -10,6 +10,16 @@ internal static class IncidentRecorderChecks
         var recorder = new IncidentRecorder(8);
         recorder.Write(new(0, "ignored"), "ignored");
         Require(recorder.Snapshot(0).Records.Length == 0, "Stopped recorder accepted data");
+        recorder.Reset(0, armTriggers: false);
+        recorder.Write(new(100, "capture-startup"), "capture-gap");
+        Require(recorder.Snapshot(100) is { Trigger: null, TriggerArmedAt: null, Records.Length: 1 },
+            "Pre-media capture startup froze the incident");
+        recorder.ArmTriggers(101); recorder.ArmTriggers(500);
+        recorder.Write(new(102, "media-warmup"), "capture-gap");
+        Require(recorder.Snapshot(102).Trigger is null, "Media warmup did not suppress startup");
+        recorder.Write(new(103, "media-fault"), "receive-gap");
+        Require(recorder.Snapshot(103) is { Trigger: "receive-gap", TriggerArmedAt: 101 },
+            "First media arm was postponed by later packets or failed to trigger");
         recorder.Reset(0);
         recorder.Write(new(1, "warmup"), "startup");
         Require(recorder.Snapshot(1).Trigger is null, "Warmup triggered an incident");
@@ -70,6 +80,53 @@ internal static class IncidentRecorderChecks
             && capped.Records.Any(x => x.Stage == "trigger") && capped.Records[0].Stage == "before",
             "High event volume erased trigger/prehistory");
         ComparePlayout();
+        CheckShortPlcCapture();
+    }
+
+    private static void CheckShortPlcCapture()
+    {
+        using var encoder = new SIPSorcery.Media.AudioEncoder(includeOpus: true);
+        var format = encoder.SupportedFormats.Single(f => f.Codec == SIPSorceryMedia.Abstractions.AudioCodecsEnum.OPUS);
+        var payload = encoder.EncodeAudio(Enumerable.Range(0, 480).Select(i => (short)(6000 * Math.Sin(i * .05))).ToArray(), format);
+        byte[]? reference = null;
+        foreach (var enabled in new[] { false, true, false })
+        {
+            var trace = new PipelineTrace(); var now = ProbeClock.Now;
+            if (enabled) trace.Incidents.Reset(now - 3);
+            using var buffer = new RtpOpusPlayoutBuffer(new(), correctClock: false, adaptiveReserve: false,
+                transientEmptyQueueHold: true, pipeline: trace, tracePeer: "fixture");
+            const uint basis = uint.MaxValue - 959;
+            for (var i = 0; i < 3; i++) buffer.Add(7, unchecked(basis + (uint)i * 480), payload);
+            var output = new byte[8 * 480];
+            for (var i = 0; i < 6; i++) buffer.Read(output.AsSpan(i * 480, 480));
+            if (buffer.Details().ConcealedMs != 0) throw new InvalidOperationException("PLC fixture starved early.");
+            trace.Incidents.Write(new(ProbeClock.Now, "before-conceal"));
+            buffer.Read(output.AsSpan(6 * 480, 480)); // 240 samples/5ms held timestamp.
+            if (buffer.Details().ConcealedMs != 5) throw new InvalidOperationException("Short PLC duration changed.");
+            if (enabled)
+            {
+                var snapshot = trace.Incidents.Snapshot(ProbeClock.Now);
+                if (snapshot.Trigger != "playout-plc" || snapshot.State != "AfterTrigger"
+                    || !snapshot.Records.Any(x => x.Stage == "before-conceal")
+                    || !snapshot.Records.Any(x => x.Stage == "playout-conceal" && x.Ssrc == 7
+                        && x.RtpTimestamp == unchecked(basis + 1440) && x.Samples == 240
+                        && x.DurationMs == 5 && x.Outcome == "hold-timestamp"))
+                    throw new InvalidOperationException("Short PLC capsule lost cause/prehistory/original RTP position.");
+            }
+            buffer.Add(7, unchecked(basis + 1920), payload); // A queued future packet exposes an RTP hole.
+            buffer.Read(output.AsSpan(7 * 480, 480));
+            if (reference is null) reference = output;
+            else if (!reference.AsSpan().SequenceEqual(output)) throw new InvalidOperationException("PLC recording changed output PCM.");
+            if (enabled)
+            {
+                var frozen = trace.Incidents.Snapshot(ProbeClock.Now + 3);
+                if (frozen.State != "Frozen" || frozen.Trigger != "playout-plc"
+                    || !frozen.Records.Any(x => x.Stage == "playout-conceal" && x.Outcome == "advance-timestamp"
+                        && x.RtpTimestamp == unchecked(basis + 1440)))
+                    throw new InvalidOperationException("PLC aftermath or bounded freeze was lost.");
+            }
+        }
+        Console.WriteLine("PASS: short 5ms PLC triggers bounded pre/post capture; held/advanced RTP positions including wrap and PCM off/on/off match.");
     }
 
     private static void ComparePlayout()

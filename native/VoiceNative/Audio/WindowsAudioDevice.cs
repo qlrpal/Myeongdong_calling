@@ -52,6 +52,8 @@ internal sealed class WindowsAudioDevice
     public string? EncodedTraceHash { get; private set; }
     private double? frameCaptureAt;
     private long captureDiscontinuities, captureTimestampErrors;
+    private readonly CaptureContinuityTracker captureContinuity = new();
+    private readonly record struct NativePacket(int Samples, long DevicePosition, long QpcPosition);
     private readonly PipelineTrace? pipeline;
     private readonly string? renderDeviceId;
     private readonly LatencyExperiment? experiment;
@@ -100,17 +102,15 @@ internal sealed class WindowsAudioDevice
                 inputFallbackReason = input.LowLatencyUnavailableReason;
                 input.DataAvailable += (data, flags, devicePosition, qpcPosition) =>
                 {
+                    // Some recorder paths notify once more after draining a batch.
+                    // Empty notifications have no valid GetBuffer position/time.
+                    if (data.IsEmpty && flags == 0) return;
                     var callbackAt = pipeline?.Enabled == true || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
                     var callbackSamples = data.Length / input.WaveFormat.BlockAlign;
-                    if ((flags & AudioClientBufferFlags.DataDiscontinuity) != 0)
-                    {
-                        Interlocked.Increment(ref captureDiscontinuities);
-                        lock (audioLock) { captureFrameCount = 0; frameCaptureAt = null; }
-                    }
-                    if ((flags & AudioClientBufferFlags.TimestampError) != 0) Interlocked.Increment(ref captureTimestampErrors);
+                    var packet = new NativePacket(callbackSamples, data.IsEmpty ? -1 : devicePosition, data.IsEmpty ? 0 : qpcPosition);
                     var capturedAt = qpcPosition / 10000000.0;
                     double? stamp = (flags & AudioClientBufferFlags.TimestampError) == 0 && ProbeClock.Now - capturedAt is >= 0 and < 1 ? capturedAt : null;
-                    if (captureConverter is null) Capture(data, stamp, callbackAt, callbackSamples, (int)flags);
+                    if (captureConverter is null || data.IsEmpty) Capture(data, stamp, callbackAt, callbackSamples, (int)flags, packet);
                     else
                     {
                         for (var offset = 0; offset < data.Length;)
@@ -119,7 +119,7 @@ internal sealed class WindowsAudioDevice
                             if (frames == 0) break;
                             var count = frames * captureConverter.BlockAlign;
                             var bytes = captureConverter.Convert(data.Slice(offset, count), convertedCapture);
-                            Capture(convertedCapture.AsSpan(0, bytes), stamp is { } at ? at + offset / (double)captureConverter.BlockAlign / 48000 : null, callbackAt, callbackSamples, (int)flags);
+                            Capture(convertedCapture.AsSpan(0, bytes), stamp is { } at ? at + offset / (double)captureConverter.BlockAlign / 48000 : null, callbackAt, callbackSamples, (int)flags, offset == 0 ? packet : null);
                             offset += count;
                         }
                     }
@@ -217,7 +217,13 @@ internal sealed class WindowsAudioDevice
         if ((pcm.Length & 1) != 0) throw new ArgumentException("PCM16 requires whole samples.", nameof(pcm));
         Capture(pcm, null, ProbeClock.Now, pcm.Length / 2, 0);
     }
-    private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt, double callbackAt, int callbackSamples, int flags)
+    internal void InjectNativePacketForChecks(ReadOnlySpan<byte> pcm, int flags, long position, long qpc)
+    {
+        if (input is not null || buffer is not null || (pcm.Length & 1) != 0)
+            throw new InvalidOperationException("Native packet fixture requires a capture-free PCM16 source.");
+        Capture(pcm, null, ProbeClock.Now, pcm.Length / 2, flags, new(pcm.Length / 2, position, qpc));
+    }
+    private void Capture(ReadOnlySpan<byte> captured, double? packetCaptureAt, double callbackAt, int callbackSamples, int flags, NativePacket? nativePacket = null)
     {
         var callbackStarted = Stopwatch.GetTimestamp();
         var tracing = pipeline?.Enabled == true;
@@ -226,6 +232,19 @@ internal sealed class WindowsAudioDevice
         {
             var lockAt = pipeline?.Enabled == true || pipeline?.Incidents.Active == true ? ProbeClock.Now : 0;
             if (closed) return;
+            if (nativePacket is { } native)
+            {
+                var reset = (flags & (int)AudioClientBufferFlags.DataDiscontinuity) != 0;
+                var discardedSamples = reset ? captureFrameCount / 2 : 0;
+                captureContinuity.Observe(callbackStarted / (double)Stopwatch.Frequency, native.Samples, flags,
+                    native.DevicePosition, native.QpcPosition, discardedSamples);
+                if (reset)
+                {
+                    Interlocked.Increment(ref captureDiscontinuities);
+                    captureFrameCount = 0; frameCaptureAt = null;
+                }
+                if ((flags & (int)AudioClientBufferFlags.TimestampError) != 0) Interlocked.Increment(ref captureTimestampErrors);
+            }
             var captureAt = Stopwatch.GetTimestamp();
             var gapMs = lastCaptureAt is { } previousCapture ? Stopwatch.GetElapsedTime(previousCapture, captureAt).TotalMilliseconds : 0;
             if (lastCaptureAt is not null) captureGaps.Add(gapMs);
@@ -345,7 +364,8 @@ internal sealed class WindowsAudioDevice
                 closed ? "종료" : buffer is null ? "입력" : sinkFailed ? "장치 오류" : sinkStarted ? "재생" : "대기",
                 sinkError, recoveries, captureGaps.Snapshot().P95, captureGaps.Snapshot().Max,
                 work.P95, work.Max, Interlocked.Read(ref captureDiscontinuities), Interlocked.Read(ref captureTimestampErrors),
-                playback?.UnderfillMs, playback?.MaxUnderfillMs);
+                playback?.UnderfillMs, playback?.MaxUnderfillMs,
+                CaptureContinuity: captureContinuity.ObservedPackets > 0 ? captureContinuity.Snapshot() : null);
         }
         if (buffer is RtpOpusPlayoutBuffer rtp)
         {

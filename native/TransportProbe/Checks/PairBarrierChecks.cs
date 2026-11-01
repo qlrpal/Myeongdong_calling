@@ -15,6 +15,12 @@ internal static class PairBarrierChecks
         a.Receive("run|b|same|rogue|baseline|1"); Require(!a.Ready("baseline"));
         a.Receive(new string('x', 513)); Require(a.Error is null);
         a.Receive(new PairBarrier("run", "b", "different").Message("baseline")); Require(a.Error is not null && !a.Ready("ready"));
+        foreach (var phase in PairBarrier.Phases)
+        {
+            var left = new PairBarrier("run", "a", "same"); var right = new PairBarrier("run", "b", "same");
+            left.Receive(right.Message(phase)); right.Receive(left.Message(phase)); left.Receive(right.Message(phase));
+            Require(left.Ready(phase) && right.Ready(phase));
+        }
         var loopback = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
             .First(n => n.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback);
         using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,

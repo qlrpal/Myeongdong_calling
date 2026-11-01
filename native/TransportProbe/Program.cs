@@ -21,6 +21,14 @@ try
         return;
     }
     _ = OpusBackend.Snapshot();
+    if (args is ["--capture-continuity-checks"])
+    { await CaptureContinuityChecks.RunAsync(); return; }
+    if (args is ["--pcm-clock-interpolator-checks"])
+    { PcmClockInterpolatorChecks.Run(); return; }
+    if (args is ["--render-loop-comparison", var renderLoopReport])
+    { await RenderLoopComparison.RunAsync(renderLoopReport); return; }
+    if (args is ["--sdk-boundary-checks", var sdkBoundaryCheckReport])
+    { await SdkBoundarySession.CheckAsync(sdkBoundaryCheckReport); return; }
     if (args is ["--microphone-hotkey-checks"])
     { MicrophoneHotkeyChecks.Run(); MicrophoneHotkeyChecks.RunNative(); return; }
     if (args is ["--pair-functional", var trServer, var trRun, var trRole, var trRoute, var trReport, var trWave, var trShared, var trAddress, var trSeconds, var trReserve, var trEnabled])

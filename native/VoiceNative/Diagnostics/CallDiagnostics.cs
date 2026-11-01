@@ -11,7 +11,7 @@ public sealed record AudioDiagnostics(double? QueueMs, long QueueResets, double?
     double? CaptureGapP95Ms = null, double? CaptureGapMaxMs = null,
     double? CaptureWorkP95Ms = null, double? CaptureWorkMaxMs = null,
     long CaptureDiscontinuities = 0, long CaptureTimestampErrors = 0,
-    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null, RenderDiagnostics? Render = null, CaptureExecutionDiagnostics? CaptureExecution = null);
+    double? UnderfillMs = null, double? MaxUnderfillMs = null, int? RequestedOutputMs = null, bool LowLatencyRequested = false, bool? LowLatencyActive = null, string? LowLatencyUnavailableReason = null, double? EnginePeriodMs = null, RtpPlayoutDiagnostics? RtpPlayout = null, RenderDiagnostics? Render = null, CaptureExecutionDiagnostics? CaptureExecution = null, CaptureContinuityDiagnostics? CaptureContinuity = null);
 public sealed record CaptureExecutionDiagnostics(bool StagedBuffers, bool PeriodWatchdog, bool MmcssActive,
     long TimeoutWakes, double MaxWakeGapMs, double MaxLeaseMs, double MaxCallbackMs,
     string? MmcssTask = null, bool? CriticalPrioritySet = null, int? MmcssError = null);

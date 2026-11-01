@@ -4,6 +4,7 @@ using NAudio.Wave;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Buffers;
+using System.Runtime.InteropServices;
 
 namespace VoiceNative;
 
@@ -19,7 +20,7 @@ public sealed record RtpPlayoutDiagnostics(double TargetReserveMs, int BufferedP
     long RecoveryDiscardedPackets = 0, double RecoveryDiscardedMs = 0,
     long ShortReserveRestarts = 0, int? RecoveryReserveMs = null, string Encoding = "Opus", double PacketQuantumMs = 10,
     double? LastPacketDurationMs = null, double? LastTimestampStepMs = null,
-    double ForwardTimestampGapMs = 0, long PacketDurationChanges = 0, double RecentArrivalBurstMs = 0, double? RtpClockBiasPpm = null, bool? RtpClockFitReady = null, string ReserveLearningState = "Continuous", long ReserveRelearns = 0);
+    double ForwardTimestampGapMs = 0, long PacketDurationChanges = 0, double RecentArrivalBurstMs = 0, double? RtpClockBiasPpm = null, bool? RtpClockFitReady = null, string ReserveLearningState = "Continuous", long ReserveRelearns = 0, double? ClockUpperDeadbandMs = null, double? ClockLowerDeadbandMs = null);
 
 // Render-driven: the compressed packet reserve replaces the old PCM startup reserve.
 // No timer or extra PCM queue is placed in front of this provider.
@@ -411,19 +412,16 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                     {
                         // Causal linear interpolation: at most one sample of delay,
                         // no frame-sized second PCM queue and no speculative PLC read-ahead.
-                        var available = true;
-                        while (phase >= 1)
-                        {
-                            if (pcmOffset == pcmCount && !PreparePcm((destination.Length - filled) / 2)) { available = false; break; }
-                            if (pcmHash is not null || pcmTrace is not null) SubmitFrame();
-                            previousSample = currentSample; currentSample = pcm[pcmOffset++];
-                            consumedSamples++; phase -= 1;
-                        }
-                        if (!available) { phase = 1; previousSample = currentSample = 0; break; }
-                        var sample = (short)(previousSample + (currentSample - previousSample) * phase);
-                        if (fadeRemaining > 0) { sample = (short)(sample * (240 - fadeRemaining) / 240); fadeRemaining--; }
-                        BinaryPrimitives.WriteInt16LittleEndian(destination.Slice(filled, 2), sample); filled += 2;
-                        phase += clock.Rate;
+                        if (phase >= 1 && pcmOffset == pcmCount && !PreparePcm((destination.Length - filled) / 2))
+                        { phase = 1; previousSample = currentSample = 0; break; }
+                        if (phase >= 1 && (pcmHash is not null || pcmTrace is not null)) SubmitFrame();
+                        // Windows PCM16 is little endian. Process the current block
+                        // without revisiting decoder/trace/clock branches per sample.
+                        var progress = PcmClockInterpolator.Render(pcm.AsSpan(pcmOffset, pcmCount - pcmOffset),
+                            MemoryMarshal.Cast<byte, short>(destination[filled..]), clock.Rate,
+                            ref phase, ref previousSample, ref currentSample, ref fadeRemaining);
+                        pcmOffset += progress.Consumed; consumedSamples += progress.Consumed;
+                        filled += progress.Written * 2;
                         continue;
                     }
                     if (pcmOffset == pcmCount && !PreparePcm((destination.Length - filled) / 2)) break;
@@ -470,7 +468,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                     Outcome: rebuffers > rebuffersAtEntry ? "rebuffer" : plcFrames > plcAtEntry ? "plc" : "read",
                     SourceAt: calledAt, WorkMs: calledAt > 0 ? (ProbeClock.Now - calledAt) * 1000 : 0,
                     LockWaitMs: calledAt > 0 && lockAt > 0 ? (lockAt - calledAt) * 1000 : 0),
-                    rebuffers > rebuffersAtEntry ? "rebuffer" : null);
+                    rebuffers > rebuffersAtEntry ? "rebuffer" : plcFrames > plcAtEntry ? "playout-plc" : null);
                 if (tracing) pipeline!.Read(new(tracePeer, calledAt, lockAt, ProbeClock.Now,
                     destination.Length / 2, provided, plcFrames - plcAtEntry, queueBefore,
                     (queuedSamples + pcmCount - pcmOffset) / 48.0, started));
@@ -593,6 +591,13 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
         if (pcmTransport) pcm.AsSpan(0, pcmCount).Clear();
         if (pipeline?.Enabled == true) pipeline.Played(new(tracePeer, source ?? 0, unchecked((uint)expectedTimestamp),
             ProbeClock.Now, null, null, null, advanceTimestamp ? "plc-loss" : "plc-hold", queuedSamples / 48.0));
+        // Preserve the concealed RTP position before advancing it. A hold does
+        // not prove packet loss; the caller triggers the bounded capsule only
+        // after recording the complete read and its aggregate concealed time.
+        pipeline?.Incidents.Write(new(ProbeClock.Now, "playout-conceal", tracePeer, source ?? 0,
+            unchecked((uint)expectedTimestamp), Samples: pcmCount, DurationMs: pcmCount / 48.0,
+            QueueMs: queuedSamples / 48.0,
+            Outcome: advanceTimestamp ? "advance-timestamp" : "hold-timestamp"));
         if (advanceTimestamp) expectedTimestamp += pcmCount;
         else heldSamples += pcmCount;
         missingSamples += pcmCount; maxMissingSamples = Math.Max(maxMissingSamples, missingSamples);
@@ -693,7 +698,7 @@ internal sealed class RtpOpusPlayoutBuffer : IPlayoutBuffer, IDisposable
                 LastTimestampStepMs: lastTimestampStepMs, ForwardTimestampGapMs: forwardTimestampGapSamples / 48.0,
                 PacketDurationChanges: packetDurationChanges, RecentArrivalBurstMs: recentBurstSamples / 48.0,
                 RtpClockBiasPpm: clockEstimator is null ? null : clockEstimator.Bias * 1000000,
-                RtpClockFitReady: clockEstimator?.Ready, ReserveLearningState: adaptive.LearningState, ReserveRelearns: adaptive.Relearns);
+                RtpClockFitReady: clockEstimator?.Ready, ReserveLearningState: adaptive.LearningState, ReserveRelearns: adaptive.Relearns, ClockUpperDeadbandMs: clock.Enabled ? clock.DeadbandSamples / 48.0 : null, ClockLowerDeadbandMs: clock.Enabled ? clock.LowerDeadbandSamples / 48.0 : null);
         }
     }
     public void Dispose()
