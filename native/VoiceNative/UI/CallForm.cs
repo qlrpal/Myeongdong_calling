@@ -35,10 +35,14 @@ public sealed partial class CallForm : Form
     private readonly List<LocalLatencyTrial> localTrials = new();
     private readonly Dictionary<string, (double At, PeerDiagnostics Peer)> previousDiagnostics = new();
     public CallForm() : this(null) { }
-    public CallForm(string? initialMediaAddress, string? initialExperiment = null, bool sharedOutput = false)
+    public CallForm(string? initialMediaAddress, string? initialExperiment = null, bool sharedOutput = false, int? initialReceiveReserveMs = null)
     {
-        engine = new WebRtcCallEngine { UseSharedOutput = sharedOutput };
+        if (initialReceiveReserveMs is < 10 or > 40) throw new ArgumentOutOfRangeException(nameof(initialReceiveReserveMs));
+        if (initialReceiveReserveMs is not null && initialExperiment is not (null or "baseline"))
+            throw new ArgumentException("수신 여유 단독 비교는 기본 모드에서 실행하세요.");
+        engine = new WebRtcCallEngine { UseSharedOutput = sharedOutput, DiagnosticReserveMs = initialReceiveReserveMs ?? 20 };
         Text = "명동 콜링"; ClientSize = new Size(900, 780); MinimumSize = new Size(740, 680); Font = new Font("맑은 고딕", 10);
+        if (initialReceiveReserveMs is { } reserve) Text += $" · 수신 여유 {reserve}ms 비교";
 #if BETA_RELEASE
         Text += " · " + typeof(CallForm).Assembly.GetName().Version?.ToString(3) + " 베타";
 #endif

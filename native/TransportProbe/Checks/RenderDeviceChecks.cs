@@ -87,7 +87,11 @@ internal static class RenderDeviceChecks
         }
         Expect<NotSupportedException>(() => SharedRenderPlayer.AdaptSource(new Silence(false), new WaveFormat(48000, 24, 2)));
         Expect<NotSupportedException>(() => SharedRenderPlayer.AdaptSource(new Silence(false), WaveFormat.CreateIeeeFloatWaveFormat(48000, 6)));
-        if (SharedRenderPlayer.ChooseTarget(984,448,44100) != 669
+        if (SharedRenderPlayer.ChooseTarget(984,448,44100) != 581
+            || SharedRenderPlayer.ChooseTarget(1056,480,48000) != 624
+            || SharedRenderPlayer.ChooseTarget(280,128,48000) != 280
+            || SharedRenderPlayer.ChooseTarget(1000,239,48000) != 479
+            || SharedRenderPlayer.ChooseTarget(1000,240,48000) != 384
             || SharedRenderPlayer.ChooseTarget(240,240,48000) != 240)
             throw new InvalidOperationException("Render target bounds failed.");
         using var player = new SharedRenderPlayer(40, true, true);

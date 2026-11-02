@@ -102,6 +102,9 @@ internal static class PairFunctionalProbe
             var cpu = process.TotalProcessorTime; var allocated = GC.GetTotalAllocatedBytes(); var pause = GC.GetTotalPauseDuration();
             var watch = Stopwatch.StartNew();
             var recordingSamples = 0;
+            var completed = false;
+            try
+            {
             while (watch.Elapsed.TotalSeconds < seconds)
             {
                 _ = Peer(); var d = engine.GetDiagnostics();
@@ -117,13 +120,20 @@ internal static class PairFunctionalProbe
             var last = Peer();
             Require(first.Id == last.Id && last.TxFrames - first.TxFrames > 50 && last.RxPackets - first.RxPackets > 50
                 && last.Audio.DecodedFrames - first.Audio.DecodedFrames > 50, "음성 송수신/디코딩 진행 없음");
+            completed = true;
+            checks.Add(new { name = phase, ok = true });
+            }
+            finally
+            {
+            // A stopped capture/disconnected peer must not erase the preceding
+            // observation window. The enclosing report remains failed.
             var elapsed = watch.Elapsed.TotalSeconds;
             process.Refresh();
-            windows.Add(new { phase, requestedSeconds = seconds, elapsedSeconds = elapsed,
+            windows.Add(new { phase, completed, requestedSeconds = seconds, elapsedSeconds = elapsed,
                 cpuCores = (process.TotalProcessorTime - cpu).TotalSeconds / elapsed,
                 allocatedBytes = GC.GetTotalAllocatedBytes() - allocated,
                 gcPauseMs = (GC.GetTotalPauseDuration() - pause).TotalMilliseconds, recordingSamples, totalSamples = samples.Count, samples });
-            checks.Add(new { name = phase, ok = true });
+            }
         }
         async Task Rejoin(string leavingRole)
         {

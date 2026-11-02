@@ -209,6 +209,8 @@ internal sealed class WindowsAudioDevice
         return player;
     }
     public string OutputDeviceId => sharedOutput?.OutputDeviceId ?? output?.DeviceId ?? throw new InvalidOperationException("출력 장치가 없습니다.");
+    internal void ConfigureRenderProbe(IRenderProbe observer, int headroomMs) =>
+        (output ?? throw new InvalidOperationException("Dedicated output required for render probe.")).ConfigureProbe(observer, headroomMs);
     internal bool OwnsOutputStream => Volatile.Read(ref output) is not null;
     public List<AudioFormat> GetAudioSinkFormats() => experiment is not null ? [OpusAudioEncoder.ExperimentFormat(experiment)] : encoder.SupportedFormats.Where(f => f.Codec == AudioCodecsEnum.OPUS).ToList();
     internal void InjectSyntheticCapture(ReadOnlySpan<byte> pcm)

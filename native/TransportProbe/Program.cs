@@ -21,6 +21,14 @@ try
         return;
     }
     _ = OpusBackend.Snapshot();
+    if (args is ["--recorded-reserve-checks"])
+    { RecordedReserveReplay.Check(); return; }
+    if (args is ["--render-presentation-checks"])
+    { RenderLatencyProbe.PresentationCheck(); return; }
+    if (args is ["--render-presentation-device", var presentationReport])
+    { await RenderLatencyProbe.PresentationAsync(presentationReport); return; }
+    if (args is ["--recorded-reserve-replay", var recordedReserveInput, var recordedReserveOutput])
+    { await RecordedReserveReplay.RunAsync(recordedReserveInput, recordedReserveOutput); return; }
     if (args is ["--capture-continuity-checks"])
     { await CaptureContinuityChecks.RunAsync(); return; }
     if (args is ["--pcm-clock-interpolator-checks"])

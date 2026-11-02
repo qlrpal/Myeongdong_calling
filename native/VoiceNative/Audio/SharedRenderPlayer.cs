@@ -25,6 +25,8 @@ internal sealed class SharedRenderPlayer : IDisposable
     private TaskCompletionSource? started;
     private bool disposed;
     private int targetFrames, capacity, padding, desiredFrames;
+    private IRenderProbe? probe;
+    private long probeWrittenFrames;
     private long warmupStarted;
     private bool boundedFailed;
     private double periodMs;
@@ -99,7 +101,18 @@ internal sealed class SharedRenderPlayer : IDisposable
     }
 
     internal static int ChooseTarget(int capacity, uint period, int rate) =>
-        Math.Min(capacity, checked((int)period + (int)Math.Ceiling(rate * .005)));
+        Math.Min(capacity, checked((int)period + (int)Math.Ceiling(rate * (period * 1000.0 / rate >= 5 ? .003 : .005))));
+
+    internal void ConfigureProbe(IRenderProbe observer, int headroomMs)
+    {
+        ArgumentNullException.ThrowIfNull(observer);
+        if (headroomMs is < 1 or > 5) throw new ArgumentOutOfRangeException(nameof(headroomMs));
+        if (thread is not null || client is null || !bounded || minimal || probe is not null)
+            throw new InvalidOperationException("Render probe requires an unstarted bounded shared stream.");
+        desiredFrames = Math.Min(capacity, checked((int)Math.Round(periodMs * OutputWaveFormat.SampleRate / 1000)
+            + (int)Math.Ceiling(OutputWaveFormat.SampleRate * headroomMs / 1000.0)));
+        probe = observer;
+    }
 
     internal static IWaveProvider AdaptSource(IWaveProvider source, WaveFormat mix)
     {
@@ -298,6 +311,7 @@ internal sealed class SharedRenderPlayer : IDisposable
         {
             if (stagedBuffers) staging.AsSpan(0, bytes).CopyTo(lease.Buffer);
             else ReadProvider(lease.Buffer);
+            probe?.Samples(lease.Buffer, OutputWaveFormat);
             // Observe before release so committing fresh frames cannot hide a miss.
             if (monitorDrain)
             {
@@ -307,6 +321,14 @@ internal sealed class SharedRenderPlayer : IDisposable
             lease.Release(frames);
         }
         var end = Stopwatch.GetTimestamp();
+        if (probe is not null)
+        {
+            probeWrittenFrames += frames;
+            var clock = client!.AudioClockClient;
+            var before = ProbeClock.Now;
+            clock.GetPosition(out var position, out var qpc);
+            probe.Clock(probeWrittenFrames, before, ProbeClock.Now, position, qpc, clock.Frequency);
+        }
         incidents?.Write(new(end / (double)Stopwatch.Frequency, "render-submit", Samples: frames,
             QueueMs: queuedBefore.GetValueOrDefault() * 1000.0 / OutputWaveFormat.SampleRate,
             SourceAt: began / (double)Stopwatch.Frequency, WorkMs: Milliseconds(end - began), SampleRate: OutputWaveFormat.SampleRate));

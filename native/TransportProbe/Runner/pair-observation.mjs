@@ -11,6 +11,7 @@ function distribution(values) {
 export function summarizeObservation(report) {
   if (report?.error || !report?.completed) throw new Error('실패/미완료 원본은 관측 기준선으로 사용할 수 없습니다.');
   const window = report.windows?.find(w => w.phase === 'baseline');
+  if (window?.completed === false) throw new Error('미완료 관측 구간은 기준선으로 사용할 수 없습니다.');
   const samples = window?.samples;
   if (!samples || samples.length < 2) throw new Error('관측 표본 부족');
   const points = samples.map(s => {

@@ -196,7 +196,7 @@ internal static partial class RenderLatencyProbe
                     resampled=new float[(int)Math.Ceiling(reference.Length*(double)capture.SampleRate/Rate)];
                     var count=resampler.Read(resampled); Array.Resize(ref resampled,count);
                 }
-                var measurements=new List<object>(); var valid=0;
+                var measurements=new List<object>(); var valid=0; var trustedTimingMarkers=0;
                 foreach(var marker in markers)
                 {
                     string? error=null; double? total=null,before=null,after=null,matchedAt=null; double? score=null; double? callbackReceiptTotalMs=null; bool? nativeQpcTrusted=null;
@@ -216,16 +216,21 @@ internal static partial class RenderLatencyProbe
                         callbackReceiptTotalMs=(containing.CallbackAt-marker.AdmittedAt)*1000;
                         nativeQpcTrusted=containing.At<=containing.CallbackAt+.001 && containing.CallbackAt-containing.At<1;
                         if(match.Correlation<.7 || matchedAt<played.SubmittedAt-.001 || matchedAt-marker.AdmittedAt>.35) error="Ambiguous or incoherent correlation.";
-                        else { total=(matchedAt-marker.AdmittedAt)*1000; before=(played.SubmittedAt-marker.AdmittedAt)*1000; after=(matchedAt-played.SubmittedAt)*1000; valid++; }
+                        else
+                        {
+                            total=(matchedAt-marker.AdmittedAt)*1000; before=(played.SubmittedAt-marker.AdmittedAt)*1000;
+                            after=(matchedAt-played.SubmittedAt)*1000; valid++;
+                            if (nativeQpcTrusted == true) trustedTimingMarkers++;
+                        }
                     }
                     measurements.Add(new{marker.Frame,marker.AdmittedAt,submittedAt=played?.SubmittedAt,matchedAt,score,callbackReceiptTotalMs,nativeQpcTrusted,nativeQpcTotalMs=total,totalMs=nativeQpcTrusted==true ? total : null,beforeSubmitMs=before,afterSubmitMs=after,error});
                 }
-                complete &= valid >= 10 && capture.Error is null && pipeline.EvictedRecords == 0 && steadySnapshot.DeviceError is null;
-                rounds.Add(new{mode,encoder=plan.Encoder,referenceKind=codecComparison ? "source-pcm" : "decoded-pcm",device=capture.Device,sampleRate=capture.SampleRate,valid,measurements,
+                complete &= valid >= 10 && trustedTimingMarkers >= 10 && capture.Error is null && pipeline.EvictedRecords == 0 && steadySnapshot.DeviceError is null;
+                rounds.Add(new{mode,encoder=plan.Encoder,referenceKind=codecComparison ? "source-pcm" : "decoded-pcm",device=capture.Device,sampleRate=capture.SampleRate,valid,trustedTimingMarkers,measurements,
                     pacingP95Ms=pace.Order().ElementAt((int)(pace.Count*.95)),maxPacingMs=pace.Max(),
                     snapshot=steadySnapshot,loopbackError=capture.Error,evicted=pipeline.EvictedRecords,
                     callbackAgeMinMs=chunks.Where(c=>c.At>0).Min(c=>(c.CallbackAt-c.At)*1000),callbackAgeMaxMs=chunks.Where(c=>c.At>0).Max(c=>(c.CallbackAt-c.At)*1000)});
-                Console.WriteLine($"Render path {mode}: valid markers={valid}/{markers.Count}");
+                Console.WriteLine($"Render path {mode}: correlations={valid}/{markers.Count}, trusted timing markers={trustedTimingMarkers}/{markers.Count}");
             }
             finally
             {
@@ -235,8 +240,8 @@ internal static partial class RenderLatencyProbe
             }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
             File.WriteAllText(output,JsonSerializer.Serialize(new{version=typeof(CallForm).Assembly.GetName().Version?.ToString(),rounds,
-                complete,notes="Same-host synthetic RTP admission to native WASAPI digital loopback QPC, A/B/A. Includes receiver queue and output path. Packets are preencoded; capture, real-time encoding execution, remote clock, network and physical DAC/ear are not measured. referenceKind=source-pcm retains codec waveform displacement; decoded-pcm references decoded synthetic chirps. Mixed samples retained transiently in bounded memory only, never saved. Native QPC totals are invalid when nativeQpcTrusted=false; callbackReceiptTotalMs includes loopback delivery, scheduling and packet quantization, not physical presentation."},DiagnosticJson.Readable));
+                complete,notes="Same-host synthetic RTP admission to native WASAPI digital loopback QPC, A/B/A. Complete requires at least 10 trusted timing markers per round, not only correlation matches. Includes receiver queue and output path. Packets are preencoded; capture, real-time encoding execution, remote clock, network and physical DAC/ear are not measured. referenceKind=source-pcm retains codec waveform displacement; decoded-pcm references decoded synthetic chirps. Mixed samples retained transiently in bounded memory only, never saved. Native QPC totals are invalid when nativeQpcTrusted=false; callbackReceiptTotalMs includes loopback delivery, scheduling and packet quantization, not physical presentation."},DiagnosticJson.Readable));
         }
-        if (!complete) throw new InvalidOperationException("Incomplete render comparison; inspect rejected markers and device errors before interpreting latency.");
+        if (!complete) throw new InvalidOperationException("Incomplete render comparison; inspect untrusted native timestamps, rejected markers and device errors before interpreting latency.");
     }
 }

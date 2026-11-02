@@ -42,6 +42,7 @@ internal static class Program
         try
         {
             string? mediaAddress = null, experiment = null;
+            int? receiveReserveMs = null;
             var sharedOutput = false;
             if (args.Length % 2 != 0) throw new ArgumentException("옵션에는 값이 필요합니다.");
             for (var i = 0; i < args.Length; i += 2)
@@ -50,13 +51,19 @@ internal static class Program
                 {
                     case "--media-address": mediaAddress = args[i + 1]; break;
 #if !BETA_RELEASE
+                    case "--receive-reserve-ms":
+                        receiveReserveMs = int.TryParse(args[i + 1], System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture, out var reserve) && reserve is >= 10 and <= 40
+                            ? reserve : throw new ArgumentException("수신 여유 비교값은 10–40ms 정수여야 합니다."); break;
                     case "--experiment": experiment = args[i + 1]; break;
                     case "--shared-output": sharedOutput = bool.TryParse(args[i + 1], out var enabled) ? enabled : throw new ArgumentException("공통 출력 옵션에는 true 또는 false가 필요합니다."); break;
 #endif
                     default: throw new ArgumentException("알 수 없는 실행 옵션: " + args[i]);
                 }
             }
-            Application.Run(new CallForm(mediaAddress, experiment, sharedOutput));
+            if (receiveReserveMs is not null && experiment is not (null or "baseline"))
+                throw new ArgumentException("수신 여유 단독 비교는 기본 모드에서 실행하세요.");
+            Application.Run(new CallForm(mediaAddress, experiment, sharedOutput, receiveReserveMs));
         }
         catch (ArgumentException error) { MessageBox.Show(error.Message, "실행 설정"); }
     }

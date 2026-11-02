@@ -1,5 +1,17 @@
 # 평상시 소프트웨어 대기 측정
 
+[출력 장치 시계 대조144](reports/EXTREME-144.md)는 `TransportProbe --render-presentation-device NEW-REPORT.json`으로 실행한다. 실제 렌더 PCM의 상관 위치를 IAudioClock 관측 사이에서 보간하고 송출 위상을 장치 시계에 정렬한다. 루프백 캡처 QPC를 쓰지 않으며, 신뢰 검사/PCM 경계 자체 검사는 `--render-presentation-checks`다. timing `complete`와 회차별 `continuityPassed`를 모두 읽어야 한다. 이 도구의 수신 입장→장치 시계는 마이크·코덱 내용상 지연·네트워크·물리 입→귀가 아니며, 명시적으로 설치한 observer 비용이 포함된다. 일반 실행에서는 observer를 설치하지 않는다.
+
+[위상/수신 여유 재현142](reports/EXTREME-142.md)은 성공한45초 상세 pair 보고서의 도착/read 잠금 시각을 합성 Opus로 재생한다. `TransportProbe --recorded-reserve-replay PARTICIPANT.json OUTPUT.json`으로 실행한다. 원래 초기 상태·PCM·실시간 CPU·장치 출력 복원이 아니며, 후보의 큐 감소와 전체 PLC/폐기를 함께 비교하는 도구다. 낮은 하한 후보는 제품 기본값으로 채택되지 않았다.
+
+렌더 소진과 PLC는 [사건 분리141](reports/EXTREME-141.md)처럼 별도로 확인한다. 기존 기록을 읽는 명령은 다음과 같다. 다른 PC 시각을 빼거나 큐를 실제 입→귀로 바꾸지 않는다.
+
+```powershell
+python native/TransportProbe/Analysis/analyze_playout_failures.py PARTICIPANT.json OUTPUT.json
+```
+
+`counterEvents`는250ms 표본 사이의 증가 구간이며 정확한 패킷 시각이 아니다. `renderDrains`는 보존된 소진 앞뒤의 소스 상태이고, `snapshotIntervalInsideCapsule=false`인 나중의 PLC를 첫 캡슐만으로 설명하면 안 된다. 실패/미완료 보고서는 정상 기준선 분석에서 거부한다.
+
 간헐적 공백 조사와 별도로 평상시 앱 내부 대기를 비교하는 오프라인 분석이다. 실제 입→귀 측정 도구는 아니다. [실제 대조와 기각 결과134](reports/EXTREME-134.md).
 
 두 Windows 참가자를 동일 소스/빌드/합성 WAV/수신 여유/출력 구성으로 준비한다. 기존 `TransportProbe/Runner/pair-checks.mjs run`에 양쪽 같은32자리 실행 ID, 각각 `--role a`/`--role b`, `--observe-seconds 45 --trace-baseline --reserve-ms 20`을 전달한다. `--server`, `--route direct` 또는 `relay`, `--shared false`, 필요하면 각 호스트의 `--media-address`를 명시한다. 기존 실행 문서의 방화벽/준비 조건을 따른다. 시스템 라우팅이나 장치 설정을 바꾸지 않는다. 별도 SDK 경계 계측은 끄고, 전체 상세 기록은 최대45초만 사용한다.

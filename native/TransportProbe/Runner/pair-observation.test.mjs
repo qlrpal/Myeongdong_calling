@@ -19,6 +19,7 @@ test('summaries use counter deltas/audio time and distinct fresh RTCP, preserve 
 test('reject failed/short/changing peer/counter reset/missing resources', () => {
   const bad = [];
   let r = report(); r.error = 'failed'; bad.push(r);
+  r = report(); r.windows[0].completed = false; bad.push(r);
   r = report(); r.windows[0].samples.pop(); bad.push(r);
   r = report(); r.windows[0].samples[2].Peers[0].Id = 'other'; bad.push(r);
   r = report(); r.windows[0].samples[3].Peers[0].Audio.RtpPlayout.ConcealedMs = 0; bad.push(r);

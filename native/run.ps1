@@ -1,5 +1,6 @@
 param([string]$MediaAddress, [ValidateSet('baseline','opus-learned','opus-adaptive','opus-auto-frames','opus-adaptive-5','opus-5','opus-2.5','opus-2.5-r10','opus-2.5-r10-h1','opus-2.5-r5-hold','opus-zero','pcm-1','pcm-2.5-r10')][string]$Experiment,
-    [ValidateSet('Release','Debug')][string]$Configuration = 'Release', [switch]$SharedOutput)
+    [ValidateSet('Release','Debug')][string]$Configuration = 'Release', [switch]$SharedOutput,
+    [ValidateRange(10,40)][int]$ReceiveReserveMs)
 $ErrorActionPreference = 'Stop'
 $env:DOTNET_CLI_HOME = Join-Path $PSScriptRoot '.dotnet'
 $env:NUGET_PACKAGES = Join-Path $PSScriptRoot '.nuget'
@@ -8,4 +9,5 @@ $appArguments = @()
 if ($MediaAddress) { $appArguments += @('--media-address', $MediaAddress) }
 if ($Experiment) { $appArguments += @('--experiment', $Experiment) }
 if ($SharedOutput) { $appArguments += @('--shared-output', 'true') }
+if ($PSBoundParameters.ContainsKey('ReceiveReserveMs')) { $appArguments += @('--receive-reserve-ms', [string]$ReceiveReserveMs) }
 dotnet run --project (Join-Path $PSScriptRoot 'VoiceNative') --configuration $Configuration -- @appArguments
