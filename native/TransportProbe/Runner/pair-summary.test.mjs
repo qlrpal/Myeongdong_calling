@@ -19,6 +19,15 @@ test('same host cannot qualify as independent PCs', () => {
   const result = summarizePair(a, b);
   assert.equal(result.functionalPassed, true); assert.equal(result.status, 'incomplete');
 });
+test('optional comparison metadata must be present and equal on both hosts', () => {
+  for (const [key, value] of Object.entries({ warmupSeconds: 60, baselineSampleIntervalMs: 1000,
+    captureMode: 'native', outputSettle: true, integralControl: true, diagnosticFrameMs: 5 })) {
+    const a = { ...report('a'), [key]: value }, b = { ...report('b'), [key]: value };
+    assert.equal(summarizePair(a, b).status, 'pass', key);
+    assert.equal(summarizePair(a, report('b')).status, 'fail', key + ' missing');
+    assert.equal(summarizePair(a, { ...b, [key]: null }).status, 'fail', key + ' unequal');
+  }
+});
 test('each host may select its own interface; keep both choices', () => {
   const a = { ...report('a'), mediaAddress: '192.0.2.10' }, b = { ...report('b'), mediaAddress: '192.0.2.11' };
   const result = summarizePair(a, b);

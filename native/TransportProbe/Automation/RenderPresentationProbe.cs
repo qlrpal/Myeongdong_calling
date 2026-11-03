@@ -60,6 +60,9 @@ internal static partial class RenderLatencyProbe
         && (points[^1].Position-points[0].Position)/(double)points[0].Frequency
             / ((points[^1].Qpc-points[0].Qpc)/10000000.0) is > .995 and < 1.005;
 
+    private static bool ContinuousPresentation(RenderDiagnostics? render) => render is { EmptyEvents:0 }
+        && (render.Execution?.EmptyDuringSupply is null or 0);
+
     public static void PresentationCheck()
     {
         PresentationPoint[] points = [new(2000, 10.001, 10.002, 480, 100000000, 48000),
@@ -73,6 +76,12 @@ internal static partial class RenderLatencyProbe
             || OrderedPresentationClock([points[0],points[1] with { Before=double.NaN }])
             || OrderedPresentationClock([points[0],points[1] with { Qpc=101000000 }]))
             throw new InvalidOperationException("Presentation clock trust checks failed.");
+        var uninterrupted = new RenderDiagnostics(true,13,22,0);
+        var supplyGap = new RenderExecutionDiagnostics(false,false,true,0,0,0,0,0,1,0,"running");
+        if (!ContinuousPresentation(uninterrupted) || ContinuousPresentation(null)
+            || ContinuousPresentation(uninterrupted with { EmptyEvents=1 })
+            || ContinuousPresentation(uninterrupted with { Execution=supplyGap }))
+            throw new InvalidOperationException("A render drain cannot retain a trusted presentation mapping.");
         var tap = new PresentationTap();
         short[] pcm = [16384,-16384,8192,8192];
         tap.Samples(MemoryMarshal.AsBytes(pcm.AsSpan()), new WaveFormat(Rate,16,2));
@@ -121,11 +130,12 @@ internal static partial class RenderLatencyProbe
                     }
                 });
                 await emitter; var snapshot = sink.Snapshot();
-                await Task.Delay(400); await sink.Close(); trace.Stop();
+                await Task.Delay(400); var finalRender = sink.Snapshot().Render; await sink.Close(); trace.Stop();
                 var points = tap.Points.Where(p => p.Frequency > 0 && p.Position > 0 && p.Qpc > 0
                     && p.Before <= p.After && p.After-p.Before <= .005
                     && p.Qpc/10000000.0 <= p.After+.001 && p.Before-p.Qpc/10000000.0 < .1).ToArray();
-                var ordered = points.Length >= 100 && OrderedPresentationClock(points) && tap.Points[^1].Written == tap.Count;
+                var mappingValid = ContinuousPresentation(finalRender);
+                var ordered = mappingValid && points.Length >= 100 && OrderedPresentationClock(points) && tap.Points[^1].Written == tap.Count;
                 var measurements = new List<object>(); var accepted = 0;
                 foreach (var frame in markerFrames.Order())
                 {
@@ -142,7 +152,7 @@ internal static partial class RenderLatencyProbe
                 complete &= accepted >= 10 && snapshot.DeviceError is null && trace.Snapshot().EvictedRecords == 0;
                 var continuityPassed = snapshot.Render?.EmptyEvents == 0 && snapshot.Render.SafetyFallbacks == 0
                     && snapshot.RtpPlayout?.ConcealedMs == 0 && snapshot.RtpPlayout.Rebuffers == 0 && snapshot.UnderfillMs == 0;
-                rounds.Add(new { headroomMs=headroom, accepted, ordered, rejectedClockPoints=tap.Points.Count-points.Length,
+                rounds.Add(new { headroomMs=headroom, accepted, ordered, mappingValid, rejectedClockPoints=tap.Points.Count-points.Length,
                     continuityPassed, emitterOrigin=began, emitterBegin=begin, measurements, snapshot, clockPoints=tap.Points });
                 Console.WriteLine($"Presentation headroom {headroom}ms: trusted markers {accepted}/14.");
             }

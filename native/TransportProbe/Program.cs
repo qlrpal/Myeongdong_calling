@@ -21,6 +21,8 @@ try
         return;
     }
     _ = OpusBackend.Snapshot();
+    if (args is ["--warmup-transfer-checks", var warmupTransferReport])
+    { await WarmupTransferChecks.RunAsync(warmupTransferReport); return; }
     if (args is ["--recorded-reserve-checks"])
     { RecordedReserveReplay.Check(); return; }
     if (args is ["--render-presentation-checks"])
@@ -83,6 +85,10 @@ try
         await TwoHostGroupProbe.RunAsync(sbServer,sbRoom,sbReport,sbRole,sbWave,long.Parse(sbEpoch,System.Globalization.CultureInfo.InvariantCulture),soakOnly:true,soakSeconds:90,senderMode:sbMode);
     else if (args is ["--two-host-send-compare", var sendServer, var sendRoom, var sendReport, var sendRole, var sendWave, var sendEpoch, var sendMode])
         await TwoHostGroupProbe.RunAsync(sendServer,sendRoom,sendReport,sendRole,sendWave,long.Parse(sendEpoch,System.Globalization.CultureInfo.InvariantCulture),senderMode:sendMode);
+    else if (args is ["--two-host-normal-group-quick-pinned", var normalGroupServer, var normalGroupRoom, var normalGroupReport, var normalGroupRole, var normalGroupWave, var normalGroupEpoch, var normalGroupAddress])
+        await TwoHostGroupProbe.RunAsync(normalGroupServer,normalGroupRoom,normalGroupReport,normalGroupRole,normalGroupWave,long.Parse(normalGroupEpoch,System.Globalization.CultureInfo.InvariantCulture),quick:true,mediaAddress:normalGroupAddress,captureTrace:false,normalGroup:true);
+    else if (args is ["--two-host-normal-group-soak-pinned", var normalSoakServer, var normalSoakRoom, var normalSoakReport, var normalSoakRole, var normalSoakWave, var normalSoakEpoch, var normalSoakAddress])
+        await TwoHostGroupProbe.RunAsync(normalSoakServer,normalSoakRoom,normalSoakReport,normalSoakRole,normalSoakWave,long.Parse(normalSoakEpoch,System.Globalization.CultureInfo.InvariantCulture),mediaAddress:normalSoakAddress,soakOnly:true,captureTrace:false,normalGroup:true);
     else if (args is ["--two-host-group-soak", var autoSoakServer, var autoSoakRoom, var autoSoakReport, var autoSoakRole, var autoSoakWave, var autoSoakEpoch])
         await TwoHostGroupProbe.RunAsync(autoSoakServer, autoSoakRoom, autoSoakReport, autoSoakRole, autoSoakWave, long.Parse(autoSoakEpoch, System.Globalization.CultureInfo.InvariantCulture), soakOnly: true);
     else if (args is ["--two-host-group-boundary", var automaticServer, var automaticRoom, var automaticReport, var automaticRole, var automaticWave, var automaticEpoch])

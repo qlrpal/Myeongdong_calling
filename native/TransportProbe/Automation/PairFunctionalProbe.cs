@@ -11,7 +11,10 @@ internal static class PairFunctionalProbe
     {
         if (traceBaseline && observeSeconds > 45) throw new ArgumentOutOfRangeException(nameof(observeSeconds), "상세 기준선 기록은 최대45초입니다.");
         if (reserveMs is < 10 or > 40) throw new ArgumentOutOfRangeException(nameof(reserveMs));
-        if (observeSeconds is < 5 or > 300) throw new ArgumentOutOfRangeException(nameof(observeSeconds));
+        if (observeSeconds is < 5 or > 3600) throw new ArgumentOutOfRangeException(nameof(observeSeconds));
+        var baselineSampleIntervalMs = observeSeconds > 300 ? 1000 : 250;
+        var warmupSeconds = int.Parse(Environment.GetEnvironmentVariable("MYEONGDONG_TEST_STEADY_WARMUP_SECONDS") ?? "2",System.Globalization.CultureInfo.InvariantCulture);
+        if (warmupSeconds is < 2 or > 60) throw new ArgumentException("Diagnostic steady warmup must be 2–60 seconds.");
         if (!Guid.TryParseExact(run, "N", out _) || role is not ("a" or "b") || route is not ("direct" or "relay"))
             throw new ArgumentException("RunId는 GUID N 형식, 역할은 a/b, 경로는 direct/relay여야 합니다.");
         var request = CallRequest.Create(server, "pair-" + run, "pair-" + role, null, null);
@@ -22,7 +25,7 @@ internal static class PairFunctionalProbe
         if (incidentMode is not ("auto" or "off" or "exercise")) throw new ArgumentException("Unknown diagnostic incident mode");
         var sdkBoundaryEnabled = Environment.GetEnvironmentVariable("MYEONGDONG_TEST_SDK_BOUNDARY") == "1";
         var sdkFullBaseline = Environment.GetEnvironmentVariable("MYEONGDONG_TEST_SDK_BOUNDARY_FULL_BASELINE") == "1";
-        var protocol = new PairBarrier(run, role, route + ":" + shared + ":" + observeSeconds + ":" + reserveMs + ":" + traceBaseline + ":" + buildHash + ":" + probeHash + ":" + fixtureHash + ":" + incidentMode + ":" + sdkBoundaryEnabled + ":" + sdkFullBaseline);
+        var protocol = new PairBarrier(run, role, route + ":" + shared + ":" + observeSeconds + ":" + reserveMs + ":" + traceBaseline + ":" + buildHash + ":" + probeHash + ":" + fixtureHash + ":" + incidentMode + ":" + sdkBoundaryEnabled + ":" + sdkFullBaseline + ":" + warmupSeconds);
         var fixture = SpeechFixture.Load(wave);
         var engine = new WebRtcCallEngine { DirectOnly = route == "direct", ForceRelay = route == "relay",
             UseSharedOutput = shared, DiagnosticReserveMs = reserveMs, DiagnosticCaptureTransform = fixture.Fill, DiagnosticControlReceived = protocol.Receive,
@@ -36,6 +39,7 @@ internal static class PairFunctionalProbe
         IncidentSnapshot? baselineIncident = null;
         IncidentDetails? baselineIncidentDetails = null;
         object? incidentExercise = null;
+        CallDiagnostics? beforeWarmup = null, afterWarmup = null;
         string? error = null;
         var stage = "prepare";
         MediaInterfaceChoice? selectedInterface = null;
@@ -113,7 +117,7 @@ internal static class PairFunctionalProbe
                     Require(muted ? d.Microphone?.LevelDbFs is <= -119 : d.Microphone?.LevelDbFs is > -50, "마이크 음소거 상태 불일치");
                 if (watch.Elapsed.TotalSeconds > 2)
                     Require(d.Peers.All(p => ParticipantAudioStatus.RemoteMuted(p.State, p.Latency) == muted), "상대 마이크 상태 공유 불일치");
-                samples.Add(d); await Task.Delay(250);
+                samples.Add(d); await Task.Delay(phase == "baseline" ? baselineSampleIntervalMs : 250);
                 if (engine.IncidentRecordingActive) recordingSamples++;
                 if (!sdkFullBaseline && phase == "baseline" && engine.IncidentEventId is not null && !engine.IncidentRecordingActive) sdkBoundary?.Stop();
             }
@@ -160,7 +164,9 @@ internal static class PairFunctionalProbe
             stage = "join";
             sdkBoundary = new SdkBoundarySession(sdkBoundaryEnabled);
             await session.ConnectAsync(request); await Connected(); await Barrier("ready");
-            await Task.Delay(2000); // Fixed device/media warmup, excluded from observation resources.
+            beforeWarmup = engine.GetDiagnostics();
+            await Task.Delay(warmupSeconds*1000); // Excluded from baseline resource observations.
+            afterWarmup = engine.GetDiagnostics();
             if (traceBaseline) engine.StartPipelineTrace(observeSeconds + 3);
             await Window("baseline", false);
             sdkBoundary.Stop();
@@ -211,8 +217,8 @@ internal static class PairFunctionalProbe
             string[] recorded; lock (sync) recorded = events.ToArray();
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { schemaVersion = 1, run, role, route, shared,
-                completed = true, error, stage, observeSeconds, reserveMs, traceBaseline, baselineTrace, baselineIncident, baselineIncidentDetails,
-                incidentMode, incidentExercise, sdkFullBaseline, sdkBoundary = sdkBoundary?.Snapshot(),
+                completed = true, error, stage, observeSeconds, baselineSampleIntervalMs, reserveMs, traceBaseline, baselineTrace, baselineIncident, baselineIncidentDetails,
+                incidentMode, warmupSeconds, beforeWarmup, afterWarmup, incidentExercise, sdkFullBaseline, sdkBoundary = sdkBoundary?.Snapshot(),
                 finalIncident = engine.SnapshotIncident(), traceIncludesStartup = false, incidentIncludesStartup = true,
                 mediaAddress, selectedInterface, bindings, failureDiagnostics, buildHash, probeHash, fixtureHash, sdk = SdkBuildIdentity.Read(),
                 hostFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName))),

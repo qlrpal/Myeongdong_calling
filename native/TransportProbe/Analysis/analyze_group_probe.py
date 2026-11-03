@@ -11,9 +11,25 @@ def percentile(values, q):
     return values[math.ceil(len(values)*q)-1] if values else None
 
 
+def sampled_delta(first,last,path):
+    def get(value):
+        for key in path:
+            if not isinstance(value,dict) or key not in value:return None
+            value=value[key]
+        return value
+    before,after=get(first),get(last)
+    if before is None or after is None:return None
+    if not math.isfinite(before) or not math.isfinite(after) or after<before:
+        raise ValueError("Counter reset/nonfinite value in whole sampled window")
+    return after-before
+
+
 def analyze(report):
     if report.get("error") or report.get("failures") or not report.get("cleanupOk"):
         raise ValueError("Failed/incompletely cleaned trial")
+    normal=report.get("normalGroup",False)
+    if normal and (report.get("options") is not None or report.get("senderMode") is not None):
+        raise ValueError("Normal group cannot contain experiment/sender policies")
     required={"three":3,"six":6} if report.get("quick") else {
         "three":3,"six":6,"leave-one":5,"rejoin":6,"reconnect":6,"empty":0,"soak-six":6}
     if report.get("senderMode") == "baseline":required={"pair":2}
@@ -27,6 +43,10 @@ def analyze(report):
     for row in report["samples"]:
         phase,slot,call=row["Phase"],row["Slot"],row["Call"]
         peers=call["Peers"]
+        if normal and (call.get("Experiment") is not None or call.get("FrameMs")!=10
+            or call.get("PlaybackPolicy")!="LowLatency"
+            or any((p["Audio"].get("RtpPlayout") or {}).get("TargetReserveMs")!=20 for p in peers)):
+            raise ValueError("Normal group media policy mismatch")
         if not call["InCall"] or len(peers)!=required[phase]-1 or len({p["Id"] for p in peers})!=len(peers):
             raise ValueError("Stable-window membership mismatch")
         if len(peers)>1 and (call.get("FrameAdaptation") or {}).get("AllPeersReady"):
@@ -63,6 +83,12 @@ def analyze(report):
             return delta(["Audio","RtpPlayout",key])
         held=optional_playout("HeldMs")
         if held is not None and held>plc+1e-6:raise ValueError("PLC hold exceeds total concealment")
+        whole_first,whole_last=points[0][1],points[-1][1]
+        whole={key:sampled_delta(whole_first,whole_last,["Audio","RtpPlayout",key])
+               for key in ("ConcealedMs","HeldMs","LatePackets","DuplicatePackets","InvalidPackets","Rebuffers","RecoveryDiscardedMs")}
+        whole.update(underfillMs=sampled_delta(whole_first,whole_last,["Audio","UnderfillMs"]),
+            renderEmpty=sampled_delta(whole_first,whole_last,["Audio","Render","EmptyEvents"]),
+            safetyFallbacks=sampled_delta(whole_first,whole_last,["Audio","Render","SafetyFallbacks"]))
         rows.append(dict(phase=phase,slot=slot,peer=last["Name"],sameHost=last["Name"].startswith("group-"+report["role"]+"-"),
             seconds=duration,txFrames=tx,rxPackets=rx,
             queueMedianMs=percentile((p["Audio"]["QueueMs"] for _,p in chosen),.5),
@@ -70,22 +96,28 @@ def analyze(report):
             plcMs=plc,plcHoldMs=held,plcAdvanceMs=max(0,plc-held) if held is not None else None,
             latePackets=optional_playout("LatePackets"),duplicatePackets=optional_playout("DuplicatePackets"),rebuffers=optional_playout("Rebuffers"),
             underfillMs=delta(["Audio","UnderfillMs"]),
-            discardMs=delta(["Audio","RtpPlayout","RecoveryDiscardedMs"])))
+            discardMs=delta(["Audio","RtpPlayout","RecoveryDiscardedMs"]),
+            wholeSampledSeconds=points[-1][0]-points[0][0],wholeSampledQuality=whole))
     source_rows=[]
     for (phase,slot),calls in sources.items():
         source_rows.append(dict(phase=phase,slot=slot,
             senderMaxWaitMsSinceJoin=max((c.get("Sender") or {}).get("MaxWaitMs",0) for c in calls),
             senderDropsSinceJoin=max((c.get("Sender") or {}).get("DroppedFrames",0) for c in calls),
             encodeRollingP95MaxMs=max(c["Microphone"]["ProcessingP95Ms"] or 0 for c in calls),
+            wholeSampledSendDrops=sampled_delta(calls[0],calls[-1],["Sender","DroppedFrames"]),
+            wholeSampledCaptureDiscontinuities=sampled_delta(calls[0],calls[-1],["Microphone","CaptureDiscontinuities"]),
+            wholeSampledCaptureTimestampErrors=sampled_delta(calls[0],calls[-1],["Microphone","CaptureTimestampErrors"]),
+            wholeSampledAppDiscardedMs=sampled_delta(calls[0],calls[-1],["Microphone","CaptureContinuity","AppDiscardedMs"]),
             frameMs=sorted({c["FrameMs"] for c in calls})))
     if report.get("soakOnly") or not report.get("quick") and report.get("senderMode") is None:
         soak=[r for r in rows if r["phase"]=="soak-six"]
         if not soak or min(r["seconds"] for r in soak)<report.get("soakSeconds",600)-30:raise ValueError("Six-peer soak too short")
-    return dict(role=report["role"],quick=report.get("quick",False),cleanupOk=True,streams=rows,sources=source_rows,
+    return dict(role=report["role"],quick=report.get("quick",False),normalGroup=normal,cleanupOk=True,streams=rows,sources=source_rows,
         sdkBuild=report.get("sdkBuild"),
         phaseResources=report.get("phaseResources"),resources=report["resources"],
         traceEvicted={k:v["EvictedRecords"] for k,v in report.get("traces",{}).items()},
         limits="Per-peer counters after 10s warmup, receiver-local duration only. Same-host streams bypass the LAN. "
+        "wholeSampledQuality/source deltas separately include those first 10s between the first/last stored samples; join/setup before the first sample is still outside this window. Missing historical counters are null, not zero. "
         "Source maxima are cumulative since join, not isolated phase maxima. Probe process CPU includes all local clients and charged user/kernel time, but excludes audiodg.exe, other processes and uncharged system/driver work. "
         "PLC hold repeats without advancing RTP; advance PLC reflects a playout deadline decision, not proof of physical packet loss. "
         "Retained diagnostics affect memory; before/after private bytes are not a leak verdict. No physical mouth-to-ear claim.")
@@ -137,6 +169,24 @@ def self_test():
     assert len(result["streams"])==17 and all(s["queueMedianMs"]==5 for s in result["streams"])
     assert all(s["plcHoldMs"]==0 and s["plcAdvanceMs"]==0 for s in result["streams"])
     import copy
+    early=copy.deepcopy(r)
+    for sample in early["samples"]:
+        for peer in sample["Call"]["Peers"]:
+            peer["Audio"]["RtpPlayout"]["ConcealedMs"]=0 if sample["Call"]["MonotonicSeconds"]==0 else 7.5
+    assert all(s["plcMs"]==0 and s["wholeSampledQuality"]["ConcealedMs"]==7.5 for s in analyze(early)["streams"])
+    normal=copy.deepcopy(r);normal["normalGroup"]=True
+    for sample in normal["samples"]:
+        sample["Call"].update(FrameMs=10,PlaybackPolicy="LowLatency",Experiment=None)
+        for peer in sample["Call"]["Peers"]:peer["Audio"]["RtpPlayout"]["TargetReserveMs"]=20
+    assert analyze(normal)["normalGroup"] is True
+    for bad in [dict(normal,options={"Mode":"experiment"}),dict(normal,senderMode="inline")]:
+        try:analyze(bad)
+        except ValueError:pass
+        else:raise AssertionError("Experimental policy accepted as normal group")
+    normal["samples"][-1]["Call"]["FrameMs"]=5
+    try:analyze(normal)
+    except ValueError:pass
+    else:raise AssertionError("Changed frame geometry accepted as normal group")
     split=copy.deepcopy(r)
     for sample in split["samples"]:
         at=sample["Call"]["MonotonicSeconds"]

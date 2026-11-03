@@ -66,3 +66,20 @@ python native/TransportProbe/Analysis/analyze_sender_comparison.py INPUT.json OU
 `send-compare`는1:1 45초→3명60초→6명90초, `send-boundary`/`send-untraced`는6명90초다. baseline은 기본10ms 기준선1:1이며 인라인/전용과 프레임·여유가 달라 직접적인 송신 A/B에 섞지 않는다. 세 경로 모두 직접 연결만 사용하며, TURN 시험은 기존 제품/route 도구로 별도 수행한다. 합성6엔진은 독립6대 PC가 아니다.
 
 단계별5초 추적은 켜진 경우에만 보존한다. 추적 비활성 자료에는 `analyze_group_probe.py`를 사용하며 상세 송신 분석기는 불완전한 추적을 거부한다. 송신 처리의 기본값은 이번 대조로 바꾸지 않았다. 새 `--fractional-network-checks`는 미해결 주기를 재현하며 현재 실패한다.
+
+
+## 일반10ms 앱 경로의 그룹 검사
+
+기존 `--two-host-group-*` 명령은 `opus-auto-frames` 실험 구성을 사용한다. 기본 앱의10ms/고정 수신20ms/기존 출력 정책을 검사할 때는 다음 별도 명령을 쓴다. 기존 실험 명령의 동작은 바꾸지 않았다.
+
+```powershell
+TransportProbe.exe --two-host-normal-group-quick-pinned SERVER ROOM REPORT.json pc FIXTURE.wav EPOCH LOCAL_MEDIA_ADDRESS
+TransportProbe.exe --two-host-normal-group-soak-pinned SERVER ROOM REPORT.json pc FIXTURE.wav EPOCH LOCAL_MEDIA_ADDRESS
+# 반대 PC는 laptop 역할과 그 호스트의 주소·보정한 EPOCH를 사용한다.
+```
+
+quick은3명60초→6명90초, soak은6명600초다. 각 호스트에서3개 실제 엔진을 사용한다. `normalGroup=true`, `options=null`, `captureTrace=false`, 표본 간격1000ms와 음원/검사 빌드 해시·호스트 식별자 해시를 기록한다. 매 표본에서 실험 꺼짐·실제10ms 프레임·LowLatency 정책·고정 수신20ms를 확인한다. 호스트 식별자 해시는 두 실행의 혼동을 줄이는 자료이며 독립 하드웨어의 증명은 아니다.
+
+고빈도 패킷 trace가 없어 이 명령의 결과를 기존 `--pairs`의 정확한30방향 패킷 대응으로 분석하지 않는다. 양쪽 보고서를 각각 기존 `analyze_group_probe.py INPUT OUTPUT`으로 읽고, 빌드/음원/SDK/정책·멤버십 일치와 각 피어 품질을 확인한다. 서로 다른 호스트 epoch를 직접 빼서 지연을 계산하지 않는다. 소켓별 주소 지정은 시스템 라우팅 변경이 아니다.
+
+분석기의 정상 구간 큐·PLC 값은 기존대로 첫10초를 제외한다. 별도의 `wholeSampledQuality`는 각 피어의 저장된 첫/마지막 표본 사이를 포함해 초기 PLC·소진·복구/늦은 폐기·재버퍼를 집계한다. 송신 폐기·입력 불연속/시각 오류도 전체 저장 표본 구간의 델타를 분리한다. 실제 참가 준비부터 첫 표본 전까지 완전 포괄하는 기록은 아니며, 과거 보고서에 없는 카운터는null이다. 필터된 지연 분포만으로 품질 합격을 선언하지 않는다.

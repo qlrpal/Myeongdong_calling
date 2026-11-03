@@ -30,3 +30,23 @@ python -m unittest discover -s native/TransportProbe/Analysis -p 'test_*.py'
 쌍 분석의 `sampleWeightedMeanMs`는 **같은 프레임의 두 호스트 내부 기간 합**이다. 전송과 공급 이후 실제 출력이 빠지며 장치 샘플 시각도 음향 시각이 아니다. 프레임 첫 샘플·렌더 단위에 따른 양자화, 정상 프레임의 생존 편향이 남는다. RTT·중앙값 합·교차 PC 절대 시각 차이로 입→귀 수치를 만들지 않는다. 상세 계측 자체의 할당/잠금 비용이 있으므로 여기의 CPU·GC를 일반 앱 비용과 동일시하지 않는다.
 
 동일 조건 A/B/A로 한 변수만 바꾸고 두 방향과 PLC 음성시간·늦은 폐기·재버퍼·캡처 불연속·렌더 부족·송신 폐기까지 비교한다. 송신 단계만 감소하거나 한 방향만 유리하면 기본값 승격 근거로 삼지 않는다. 원본/계산 결과는 개인 정보가 포함될 수 있으므로 Git 제외 위치에 저장한다. 기본 실행으로 복귀할 때는 진단 프로세스를 종료하고 `./native/run.ps1`을 사용한다. 이번 기각 후보용 환경 변수는 현재 코드에 남아 있지 않다.
+
+
+## 장시간 관측과 시작 정착 분리
+
+검사 실행기의 `--observe-seconds`는5~3600초를 지원한다.300초를 넘는 기준선 진단은1초 간격이고 그 외 창은250ms다. 상세 `--trace-baseline`은 계속45초 이하만 허용한다. 긴 관측은 상세 패킷 기록을 무제한 늘리는 모드가 아니며,1Hz 표본 사이의 정확한 사건 시각은 판별하지 못한다.
+
+`--warmup-seconds 60`으로 장치/미디어 준비 뒤 관측 전 정착을2~60초로 지정한다. 양쪽이 같은 값을 써야 한다. 이 시간은 baseline 자원/품질 표본 구간 밖이며 `warmupSeconds`, `beforeWarmup`, `afterWarmup`으로 별도 보존한다. 시작 실패나 정착 중의 문제를 없었던 것으로 판단하지 않는다. 생명주기/재참가 검사는 여전히 관측 뒤에 실행한다. 일반 앱의 시작 지연을 늘리는 설정이 아니다.
+
+```powershell
+# 양쪽 기존 pair 실행 명령에 같은 값을 추가한다.
+# 정상 구간 상세 비교
+# --observe-seconds 45 --warmup-seconds 60 --trace-baseline
+# 저계측30분 관측
+# --observe-seconds 1800 --warmup-seconds 60
+
+# 워밍업 재고 산술48조건: 빈 새 출력 파일명을 쓴다.
+./native/TransportProbe/bin/Release/net10.0-windows10.0.19041.0/TransportProbe.exe --warmup-transfer-checks native/.local/warmup-new.json
+```
+
+마지막 도구는 실제 Opus/RTP 버퍼와 결정적인 장치 패딩 산술만 사용한다. 규칙적 도착·네 위상·128/256/480샘플 읽기·미디어 시작1/3초·워밍업 유무를 비교한다. `TotalInventoryMs`는 소스 큐와 모델 패딩의 재고 합이며 물리 지연이 아니다. 처음부터 낮은 패딩을 쓰는 대조는 안전성이 검증된 제품 정책이 아니다. 실패한 정착/PI/5ms 후보는 활성 제품 코드에 남기지 않았다. 상세 결과는 [145](reports/EXTREME-145.md), [146](reports/EXTREME-146.md), [147](reports/EXTREME-147.md)에 있다.

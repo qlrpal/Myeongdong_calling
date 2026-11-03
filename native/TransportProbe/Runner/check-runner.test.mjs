@@ -17,6 +17,16 @@ test('keeps UTF-8 logs and validates after output is closed', async t => {
     validate: async () => assert.equal(JSON.parse(await readFile(path.join(dir, 'good.log'), 'utf8')).message, '한글 확인') });
   assert.equal(result.status, 'pass');
 });
+test('comparison environment is scoped to its child process', async t => {
+  const dir = await directory(t), key = 'MYEONGDONG_RUNNER_ENV_TEST';
+  const before = process.env[key];
+  const result = await runStep({ id: 'env', command: process.execPath,
+    args: ['-e', `console.log(process.env.${key})`], directory: dir,
+    env: { ...process.env, [key]: 'scoped' } });
+  assert.equal(result.status, 'pass');
+  assert.equal((await readFile(path.join(dir, 'env.log'), 'utf8')).trim(), 'scoped');
+  assert.equal(process.env[key], before);
+});
 test('nonzero, spawn failure, invalid report and timeout remain failures', async t => {
   const dir = await directory(t);
   const base = { command: process.execPath, directory: dir };

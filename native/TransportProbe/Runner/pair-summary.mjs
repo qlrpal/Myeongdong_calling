@@ -17,6 +17,9 @@ export function summarizePair(a, b) {
     || (a?.observeSeconds ?? 5) !== (b?.observeSeconds ?? 5)
     || (a?.traceBaseline ?? false) !== (b?.traceBaseline ?? false)
     || (a?.reserveMs ?? 20) !== (b?.reserveMs ?? 20)
+    || ['warmupSeconds', 'baselineSampleIntervalMs', 'captureMode', 'outputSettle', 'integralControl', 'diagnosticFrameMs']
+      .some(key => (Object.hasOwn(a ?? {}, key) || Object.hasOwn(b ?? {}, key))
+        && (!Object.hasOwn(a ?? {}, key) || !Object.hasOwn(b ?? {}, key) || a[key] !== b[key]))
     || JSON.stringify(a?.sdk) !== JSON.stringify(b?.sdk)) reasons.push('양쪽 실행·경로·출력·빌드·시험 파형 불일치');
   const functionalPassed = reasons.length === 0;
   const differentHostFingerprints = !!a?.hostFingerprint && !!b?.hostFingerprint && a.hostFingerprint !== b.hostFingerprint;

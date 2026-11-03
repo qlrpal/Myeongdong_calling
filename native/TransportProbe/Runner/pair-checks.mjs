@@ -42,7 +42,7 @@ if (command === 'merge') {
       if (args[i] === '--trace-baseline') traceBaseline = true;
       else if (args[i] === '--no-restore') noRestore = true;
       else if (args[i] === '--no-build') noBuild = true;
-      else if (['--server', '--run', '--role', '--route', '--shared', '--media-address', '--observe-seconds', '--reserve-ms'].includes(args[i]) && args[i + 1]) values[args[i].slice(2)] = args[++i];
+      else if (['--server', '--run', '--role', '--route', '--shared', '--media-address', '--observe-seconds', '--warmup-seconds', '--reserve-ms'].includes(args[i]) && args[i + 1]) values[args[i].slice(2)] = args[++i];
       else throw new Error('잘못된 실행 옵션');
     }
     const uri = new URL(values.server);
@@ -51,11 +51,13 @@ if (command === 'merge') {
       || !['direct', 'relay'].includes(values.route) || !['true', 'false'].includes(values.shared)) throw new Error('서버/실행 ID/역할/설정을 확인하세요.');
     if (values['media-address'] && !isIP(values['media-address'])) throw new Error('유효한 로컬 IP 주소를 지정하세요.');
     const observeSeconds = Number(values['observe-seconds'] ?? 5);
-    if (!Number.isInteger(observeSeconds) || observeSeconds < 5 || observeSeconds > 300) throw new Error('관측 시간은 5–300초여야 합니다.');
+    if (!Number.isInteger(observeSeconds) || observeSeconds < 5 || observeSeconds > 3600) throw new Error('관측 시간은 5–3600초여야 합니다. 300초 초과 시 기준선 표본은 1초 간격입니다.');
     if (traceBaseline && observeSeconds > 45) throw new Error('상세 기준선 기록은 최대45초입니다.');
+    const warmupSeconds = Number(values['warmup-seconds'] ?? process.env.MYEONGDONG_TEST_STEADY_WARMUP_SECONDS ?? 2);
+    if (!Number.isInteger(warmupSeconds) || warmupSeconds < 2 || warmupSeconds > 60) throw new Error('정착 시간은 2–60초여야 합니다.');
     const reserveMs = Number(values['reserve-ms'] ?? 20);
     if (!Number.isInteger(reserveMs) || reserveMs < 10 || reserveMs > 40) throw new Error('수신 여유는 10–40ms여야 합니다.');
-    report.settings = { run: values.run, role: values.role, route: values.route, shared: values.shared === 'true', observeSeconds, reserveMs, traceBaseline, mediaAddress: values['media-address'] ?? null, noBuild };
+    report.settings = { run: values.run, role: values.role, route: values.route, shared: values.shared === 'true', observeSeconds, warmupSeconds, reserveMs, traceBaseline, mediaAddress: values['media-address'] ?? null, noBuild };
     if (!noBuild) {
       if (!noRestore) await step('restore', 'dotnet.exe', ['restore', 'native/VoiceCall.slnx', '--locked-mode'], { timeoutMs: 900000 });
       await step('build', 'dotnet.exe', ['build', 'native/VoiceCall.slnx', '-c', 'Release', '--no-restore', '-warnaserror', '-m:1'], { timeoutMs: 900000 });
@@ -65,7 +67,8 @@ if (command === 'merge') {
     console.log('반대 PC에서 같은 RunId/Route/SharedOutput과 반대 Role로 시작하세요. 실제 공유 장치를 열며 합성 음성이 재생될 수 있습니다.');
     await step('participant', path.join(root, 'native/TransportProbe/bin/Release/net10.0-windows10.0.19041.0/TransportProbe.exe'),
       ['--pair-functional', values.server, values.run, values.role, values.route, file, wave, values.shared, values['media-address'] ?? 'auto', String(observeSeconds), String(reserveMs), String(traceBaseline)],
-      { timeoutMs: Math.max(360000, (observeSeconds + 150) * 1000), validate: async () => {
+      { timeoutMs: Math.max(360000, (observeSeconds + warmupSeconds + 150) * 1000),
+        env: { ...process.env, MYEONGDONG_TEST_STEADY_WARMUP_SECONDS: String(warmupSeconds) }, validate: async () => {
         const data = JSON.parse(await readFile(file, 'utf8'));
         if (data.error || !data.completed || data.checks?.length !== 6 || data.checks.some(c => !c.ok)) throw new Error('참가자 보고서 오류/미완료');
       } });

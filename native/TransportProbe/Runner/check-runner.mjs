@@ -16,7 +16,7 @@ export async function stopProcess(child) {
   } else child.kill('SIGKILL');
 }
 
-export async function runStep({ id, command, args = [], cwd, directory, timeoutMs = 120000, signal, validate }) {
+export async function runStep({ id, command, args = [], cwd, directory, timeoutMs = 120000, signal, validate, env }) {
   const started = Date.now();
   const output = createWriteStream(path.join(directory, id + '.log'), { flags: 'wx' });
   const closed = once(output, 'close');
@@ -24,7 +24,7 @@ export async function runStep({ id, command, args = [], cwd, directory, timeoutM
   const stop = () => { aborted = true; if (child?.pid) void stopProcess(child); };
   try {
     if (signal?.aborted) { aborted = true; throw new Error('실행 취소'); }
-    child = spawn(command, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(command, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
     signal?.addEventListener('abort', stop, { once: true });
     timer = setTimeout(() => { timedOut = true; if (child.pid) void stopProcess(child); }, timeoutMs);

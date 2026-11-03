@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using VoiceNative;
 
 // Several real engines per host: shared capture/render, no virtual audio devices.
@@ -14,14 +16,17 @@ internal static class TwoHostGroupProbe
         new("reconnect", 60, [0,1,2,3,4,5]), new("empty", 20, []),
         new("soak-six", 600, [0,1,2,3,4,5])];
 
-    public static async Task RunAsync(string server, string room, string report, string role, string wave, long epoch, bool quick = false, string? mediaAddress = null, bool soakOnly = false, int soakSeconds = 600, string? senderMode = null, bool captureTrace = true)
+    public static async Task RunAsync(string server, string room, string report, string role, string wave, long epoch, bool quick = false, string? mediaAddress = null, bool soakOnly = false, int soakSeconds = 600, string? senderMode = null, bool captureTrace = true, bool normalGroup = false)
     {
         if (senderMode is not (null or "baseline" or "inline" or "dedicated")) throw new ArgumentException("Expected baseline/inline/dedicated sender");
-        var options = senderMode == "baseline" ? null : LatencyExperiment.FromName("opus-auto-frames")!;
+        if (normalGroup && senderMode is not null) throw new ArgumentException("Normal group and sender experiments must be tested separately.");
+        var options = normalGroup || senderMode == "baseline" ? null : LatencyExperiment.FromName("opus-auto-frames")!;
         if (senderMode is "inline" or "dedicated") options = options! with { InlineSend = senderMode == "inline", DedicatedSend = senderMode == "dedicated", AdaptiveFrames = false };
         options?.Validate();
         if (soakSeconds is not (90 or 600)) throw new ArgumentException("Boundary/soak duration must be 90/600s");
         if (role is not ("pc" or "laptop")) throw new ArgumentException("Expected pc/laptop role");
+        var fixtureHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(wave)));
+        var probeHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(typeof(TwoHostGroupProbe).Assembly.Location)));
         using var sdkLog = new TurnSignalingLog();
         SIPSorcery.LogFactory.Set(sdkLog);
         var start = DateTimeOffset.FromUnixTimeSeconds(epoch);
@@ -105,6 +110,10 @@ internal static class TwoHostGroupProbe
                     foreach (var slot in joined)
                     {
                         var d=engines[slot].GetDiagnostics();
+                        if (normalGroup && (d.Experiment is not null || d.FrameMs != 10
+                            || d.PlaybackPolicy != nameof(PlayoutPolicy.LowLatency)
+                            || d.Peers.Any(p => p.Audio.RtpPlayout?.TargetReserveMs != 20)))
+                            throw new InvalidOperationException("Normal group media policy changed during observation.");
                         foreach(var peer in d.Peers) engines[slot].SetPeerVolume(peer.Id, .015f);
                         samples.Add(new(phase.Name,slot,d));
                         if (d.Peers.Length!=phase.Members.Length-1 || d.Peers.Any(p=>p.State!="connected"))
@@ -154,7 +163,8 @@ internal static class TwoHostGroupProbe
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(report))!);
         string[] logged;lock(sync) logged=events.ToArray();
         await File.WriteAllTextAsync(report,JsonSerializer.Serialize(new {
-            role,epoch,quick,soakOnly,soakSeconds,mediaAddress,senderMode,options,captureTrace,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            role,epoch,quick,soakOnly,soakSeconds,mediaAddress,senderMode,options,captureTrace,normalGroup,sampleIntervalMs=1000,engineBuild=typeof(WebRtcCallEngine).Assembly.ManifestModule.ModuleVersionId,
+            fixtureHash,probeHash,hostFingerprint=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName))),
             sdkBuild=SdkBuildIdentity.Read(),sdkIceLog=sdkLog.Snapshot(),
             opusBackend=OpusBackend.Snapshot(),
             sdkReceiveDiagnostics=SdkReceiveDiagnostics.Snapshot(),

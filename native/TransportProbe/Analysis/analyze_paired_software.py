@@ -26,6 +26,12 @@ def summarize(a,b):
     if a['buildHash']!=b['buildHash'] or a['probeHash']!=b['probeHash']:raise ValueError('Mismatched builds')
     for key in ['fixtureHash','route','shared','reserveMs','observeSeconds']:
         if key not in a or key not in b or a[key]!=b[key]:raise ValueError('Mismatched trial configuration: '+key)
+    # Optional metadata was introduced after the original pair schema. Older
+    # reports remain usable together, but a missing or unequal comparison flag
+    # must never silently turn a mixed configuration into a valid pair.
+    for key in ['captureMode','outputSettle','integralControl','diagnosticFrameMs','warmupSeconds']:
+        if (key in a or key in b) and (key not in a or key not in b or a[key]!=b[key]):
+            raise ValueError('Mismatched trial configuration: '+key)
     x,y=analyze(a,True),analyze(b,True)
     return {'run':a['run'],'directions':{
         a['role']+'To'+b['role']:combine(x['frameDetails']['tx'],y['frameDetails']['rx']),

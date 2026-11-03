@@ -19,5 +19,13 @@ class PairedSoftwareChecks(unittest.TestCase):
             b=dict(a,role='b');b[key]=value
             with self.assertRaisesRegex(ValueError,'Mismatched trial configuration'):summarize(a,b)
 
+    def test_optional_comparison_metadata_cannot_be_mixed(self):
+        original=dict(run='same',role='a',buildHash='app',probeHash='probe',fixtureHash='wave',route='direct',shared=False,reserveMs=20,observeSeconds=45)
+        for key,value in [('captureMode','native'),('outputSettle',True),('integralControl',True),('diagnosticFrameMs',5),('warmupSeconds',60)]:
+            a=dict(original);a[key]=value
+            for b in [dict(original,role='b'),dict(a,role='b',**{key:None})]:
+                with self.subTest(key=key,value=b.get(key)):
+                    with self.assertRaisesRegex(ValueError,'Mismatched trial configuration: '+key):summarize(a,b)
+
 
 if __name__=='__main__':unittest.main()

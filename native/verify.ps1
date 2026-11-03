@@ -29,6 +29,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Product controls/settings/reconnection checks 
 & $probe --ui-reading-checks (Join-Path $PSScriptRoot '.local/reports/ui-reading')
 if ($LASTEXITCODE -ne 0) { throw 'UI reading-position checks failed.' }
 if ($Stress) {
+    & $probe --warmup-transfer-checks (Join-Path $PSScriptRoot ('.local/reports/warmup-transfer-' + [Guid]::NewGuid().ToString('N') + '.json'))
+    if ($LASTEXITCODE -ne 0) { throw 'Warmup queue-inventory checks failed.' }
     & $probe --fractional-network-checks (Join-Path $PSScriptRoot '.local/reports/adaptive-network-verify.json')
     if ($LASTEXITCODE -ne 0) { throw 'Adaptive frame/network recovery checks failed.' }
     & $probe --rtp-stress-test (Join-Path $PSScriptRoot '.local/reports/rtp-stress-verify.json')
