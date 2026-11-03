@@ -19,10 +19,11 @@
 클라이언트 실행·베타 빌드는 .NET10 SDK와 Windows PowerShell을 사용합니다. 패키징·검증은 별도 C# [BuildTools](native/docs/BUILD-TOOLS.md)가 담당하며 Node는 서버와 자동 검사 실행기에만 필요합니다.
 
 - [두 호스트 3명·6명 시험](native/docs/TWO-HOST-GROUP-TEST.md)
+- [지연 구간·예상 원인·시험 종합 보고서](native/docs/reports/LATENCY-CAUSES-AND-TESTS-2026-11-03.md)
 - [베타 정리·패키지 검증 결과](native/docs/reports/EXTREME-124.md)
 - [앱 정상 동작 자동 검사](native/docs/APP-CHECKS.md)
 - [두 PC 자동 기능 검사](native/docs/PAIR-CHECKS.md)
-- [최신 기준선·송신 대조·미해결 항목](native/docs/reports/EXTREME-100.md)
+- [이전 기준선·송신 대조 기록(100)](native/docs/reports/EXTREME-100.md)
 - [실행·빌드·소스 구조](native/README.md)
 - [공통 출력 후보·기존 경로 복귀](native/docs/SHARED-OUTPUT.md)
 - [통화 앱 사용법](native/docs/USER-GUIDE.md)

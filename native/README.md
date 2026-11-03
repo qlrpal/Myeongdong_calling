@@ -1,5 +1,7 @@
 # 명동 콜링 Native 0.6.0
 
+현재 지연 수치·예상 원인·채택/기각·시험 한계는 [지연·시험 종합 보고서](docs/reports/LATENCY-CAUSES-AND-TESTS-2026-11-03.md), 최신 실행/검증 상태는 [CURRENT-STATUS](docs/CURRENT-STATUS.md)를 참고하세요. 내부 수치의 산술 합과 실제 입→귀 실측은 구분합니다.
+
 ## 베타 배포 준비 · 0.6.1-beta.1
 
 ```powershell

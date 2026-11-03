@@ -21,6 +21,7 @@ internal static class ProductChecks
         MicrophoneHotkeyChecks.Run();
         SetupFeedbackChecks.Run();
         PacketStorageChecks.Run();
+        GroupQualityChecks.Run();
         await DedicatedSenderChecks.RunAsync();
         await AdaptiveFrameChecks.RunAsync();
         ClockEstimatorChecks.Run();

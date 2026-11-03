@@ -114,7 +114,14 @@ internal sealed class ProcessingWindow
     public (double? P95, double? Max) Snapshot()
     {
         if (values.Count == 0) return (null, null);
-        var sorted = values.Order().ToArray();
+        // Bounded, private scratch: diagnostics can run concurrently on different
+        // windows. Do not allocate sort keys/maps on every UI/probe refresh or
+        // sort the live FIFO (which would change the rolling sample window).
+        Span<double> scratch = stackalloc double[256];
+        var sorted = scratch[..values.Count];
+        var index = 0;
+        foreach (var value in values) sorted[index++] = value;
+        sorted.Sort();
         return (sorted[(int)Math.Ceiling(sorted.Length * 0.95) - 1], sorted[^1]);
     }
 }

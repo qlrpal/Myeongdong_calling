@@ -102,8 +102,34 @@ internal static class LocalGroupOutputProbe
                 return new { plcMs = peer.Audio.RtpPlayout!.ConcealedMs - before.RtpPlayout!.ConcealedMs,
                     underfillMs = peer.Audio.UnderfillMs - before.UnderfillMs,
                     requestedMs = peer.Audio.RequestedMs - before.RequestedMs,
-                    rebuffers = peer.Audio.RtpPlayout.Rebuffers - before.RtpPlayout.Rebuffers };
+                    rebuffers = peer.Audio.RtpPlayout.Rebuffers - before.RtpPlayout.Rebuffers,
+                    latePackets = peer.Audio.RtpPlayout.LatePackets - before.RtpPlayout.LatePackets,
+                    duplicatePackets = peer.Audio.RtpPlayout.DuplicatePackets - before.RtpPlayout.DuplicatePackets,
+                    invalidPackets = peer.Audio.RtpPlayout.InvalidPackets - before.RtpPlayout.InvalidPackets };
             })).ToArray();
+            // End-of-window aggregation only; no additional per-packet recording.
+            var renderCoverage = LocalGroupQuality.RenderCounters(first, last, shared);
+            var renderMeasured = renderCoverage.Streams == renderCoverage.MeasuredStreams;
+            var quality = new
+            {
+                plcMs = totals.Sum(t => t.plcMs), underfillMs = totals.Sum(t => t.underfillMs), rebuffers = totals.Sum(t => t.rebuffers),
+                latePackets = totals.Sum(t => t.latePackets), duplicatePackets = totals.Sum(t => t.duplicatePackets), invalidPackets = totals.Sum(t => t.invalidPackets),
+                renderEmptyEvents = renderCoverage.EmptyEvents,
+                renderSafetyFallbacks = renderCoverage.SafetyFallbacks,
+                sendDrops = last.Sum(kv => kv.Value.Sender!.DroppedFrames - first[kv.Key].Sender!.DroppedFrames),
+                sendExpired = last.Sum(kv => kv.Value.Sender!.ExpiredFrames - first[kv.Key].Sender!.ExpiredFrames),
+                captureDiscontinuities = last.Sum(kv => kv.Value.Microphone!.CaptureDiscontinuities - first[kv.Key].Microphone!.CaptureDiscontinuities),
+                captureTimestampErrors = last.Sum(kv => kv.Value.Microphone!.CaptureTimestampErrors - first[kv.Key].Microphone!.CaptureTimestampErrors),
+                appCaptureDiscardMs = last.Sum(kv => kv.Value.Microphone!.CaptureContinuity!.AppDiscardedMs - first[kv.Key].Microphone!.CaptureContinuity!.AppDiscardedMs),
+                clippedSamples = shared ? (long?)last.Sum(kv => kv.Value.SharedOutput!.ClippedSamples - first[kv.Key].SharedOutput!.ClippedSamples) : null
+            };
+            var observedClear = quality.plcMs == 0 && quality.underfillMs == 0 && quality.rebuffers == 0
+                && quality.latePackets == 0 && quality.duplicatePackets == 0 && quality.invalidPackets == 0
+                && quality.renderEmptyEvents is null or 0 && quality.renderSafetyFallbacks is null or 0
+                && renderCoverage.ObservedEmptyEvents == 0 && renderCoverage.ObservedSafetyFallbacks == 0
+                && quality.sendDrops == 0 && quality.sendExpired == 0 && quality.captureDiscontinuities == 0 && quality.captureTimestampErrors == 0
+                && quality.appCaptureDiscardMs == 0 && quality.clippedSamples is null or 0;
+            bool? qualityCountersClear = !observedClear ? false : renderMeasured ? true : null;
             resources.Add(new { phase, members = joined.Count, seconds = timer.Elapsed.TotalSeconds,
                 cpuCores = (process.TotalProcessorTime - cpu).TotalSeconds / timer.Elapsed.TotalSeconds,
                 allocatedBytes = GC.GetTotalAllocatedBytes() - allocation,
@@ -111,8 +137,11 @@ internal static class LocalGroupOutputProbe
                 handles = process.HandleCount, threads = process.Threads.Count,
                 plcMs = totals.Sum(t => t.plcMs), underfillMs = totals.Sum(t => t.underfillMs),
                 requestedMs = totals.Sum(t => t.requestedMs), rebuffers = totals.Sum(t => t.rebuffers),
-                outputStreams = shared ? last.Values.Sum(d => d.SharedOutput!.OutputStreams) : last.Values.Sum(d => d.Peers.Length) });
-            Console.WriteLine($"PASS local {phase} shared={shared}");
+                outputStreams = shared ? last.Values.Sum(d => d.SharedOutput!.OutputStreams) : last.Values.Sum(d => d.Peers.Length),
+                qualityCounters = quality, qualityCountersClear, renderCoverage,
+                qualityScope = "First/last saved sample deltas; receive-stream/capture-session sums, render counters once per owned output. Null means unmeasured. Clear counters do not prove audible quality or mouth-to-ear latency." });
+            Console.WriteLine($"PASS local {phase} functional shared={shared}");
+            Console.WriteLine($"QUALITY local {phase} counters={(qualityCountersClear is true ? "clear" : qualityCountersClear is false ? "events" : "unmeasured")} plcMs={quality.plcMs} renderEmpty={quality.renderEmptyEvents} sendDrops={quality.sendDrops}");
         }
         try
         {
@@ -195,7 +224,7 @@ internal static class LocalGroupOutputProbe
             sdkBuild = SdkBuildIdentity.Read(), opusBackend = OpusBackend.Snapshot(), events = captured,
             notes = "All 2/3/6 engines on ONE PC. Real shared WASAPI OUTPUT and local WebRTC; synthetic speech, peer gain 0.01. When synthetic=true, timer-fed PCM replaces physical capture entirely, including its clock/scheduling cost; it is not a microphone test. Inspect output endpoint: Remote Audio is not a physical-device benchmark. Departure/rejoin is explicit Leave/Join, not an induced network outage. Output restart reopens the same endpoint, not a physical unplug test. No physical mouth-to-ear or independent-PC/game/Internet quality claim. Stream counts are owned application players, not an OS-wide session audit." }, DiagnosticJson.Readable));
         if (error is not null) throw new InvalidOperationException(error);
-        Console.WriteLine(soakSeconds is not null ? "PASS: local six-engine steady output and cleanup (not independent PCs)."
-            : "PASS: local pair/three/six, one output per engine candidate, mute, restart, departure/rejoin, fresh call and cleanup.");
+        Console.WriteLine(soakSeconds is not null ? "PASS: local six-engine functional output and cleanup; inspect per-phase QUALITY counters (not independent PCs)."
+            : "PASS: local group functional lifecycle and cleanup; inspect per-phase QUALITY counters.");
     }
 }

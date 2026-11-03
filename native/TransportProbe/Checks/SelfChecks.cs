@@ -299,6 +299,33 @@ internal static class SelfChecks
             var timing = new VoiceNative.ProcessingWindow();
             for (var i = 1; i <= 100; i++) timing.Add(i);
             if (timing.Snapshot().P95 != 95 || timing.Snapshot().Max != 100) throw new InvalidOperationException("Processing percentile failed.");
+            // Compare every fill/eviction with the original ordered-window
+            // definition, including duplicates and IEEE special values.
+            var rolling = new VoiceNative.ProcessingWindow();
+            var reference = new Queue<double>();
+            if (rolling.Snapshot() != (null, null)) throw new InvalidOperationException("Empty processing window failed.");
+            var random = new Random(152);
+            for (var i = 0; i < 2048; i++)
+            {
+                double value = (i % 127) switch
+                {
+                    0 => double.NaN, 1 => double.NegativeInfinity,
+                    2 => double.PositiveInfinity, _ => random.Next(-50, 51)
+                };
+                rolling.Add(value);
+                if (reference.Count == 256) reference.Dequeue();
+                reference.Enqueue(value);
+                var sorted = reference.Order().ToArray();
+                var actual = rolling.Snapshot();
+                if (!actual.P95!.Value.Equals(sorted[(int)Math.Ceiling(sorted.Length * .95) - 1])
+                    || !actual.Max!.Value.Equals(sorted[^1]) || !actual.Equals(rolling.Snapshot()))
+                    throw new InvalidOperationException("Rolling processing percentile changed samples or ordering.");
+            }
+            for (var i = 0; i < 1000; i++) _ = rolling.Snapshot();
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 10000; i++) _ = rolling.Snapshot();
+            if (GC.GetAllocatedBytesForCurrentThread() != allocatedBefore)
+                throw new InvalidOperationException("Processing snapshots allocated managed memory after warmup.");
             Console.WriteLine("PASS: RTP wrap/reorder/duplicates, SSRC filtering/reset, RTCP RTT delay subtraction, report age, loss direction, negative RTT rejection, P95.");
             return true;
         }
