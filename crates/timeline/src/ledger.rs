@@ -40,7 +40,12 @@ pub struct FrameLedger {
 impl FrameLedger {
     #[must_use]
     pub const fn new(epoch: Epoch) -> Self {
-        FrameLedger { epoch, entries: [None; LEDGER_CAPACITY], cursor: 0, played_until: None }
+        FrameLedger {
+            epoch,
+            entries: [None; LEDGER_CAPACITY],
+            cursor: 0,
+            played_until: None,
+        }
     }
 
     #[must_use]
@@ -56,10 +61,10 @@ impl FrameLedger {
         if epoch > self.epoch {
             return Admission::NewerEpoch;
         }
-        if let Some(p) = self.played_until {
-            if range.start() < p {
-                return Admission::Late;
-            }
+        if let Some(p) = self.played_until
+            && range.start() < p
+        {
+            return Admission::Late;
         }
         for e in self.entries.iter().flatten() {
             if *e == range {
@@ -108,8 +113,16 @@ mod tests {
         let mut l = FrameLedger::new(Epoch(0));
         l.admit(Epoch(0), r(0, 240));
         assert_eq!(l.admit(Epoch(0), r(0, 120)), Admission::Conflict);
-        assert_eq!(l.admit(Epoch(0), r(120, 240)), Admission::Conflict, "부분 겹침");
-        assert_eq!(l.admit(Epoch(0), r(240, 120)), Admission::New, "경계 맞닿음은 정상");
+        assert_eq!(
+            l.admit(Epoch(0), r(120, 240)),
+            Admission::Conflict,
+            "부분 겹침"
+        );
+        assert_eq!(
+            l.admit(Epoch(0), r(240, 120)),
+            Admission::New,
+            "경계 맞닿음은 정상"
+        );
     }
 
     #[test]

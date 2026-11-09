@@ -22,7 +22,9 @@ pub enum ResetReason {
 pub enum CaptureContinuity {
     Continuous,
     /// 정확한 길이를 아는 유실.
-    Gap { missing: u64 },
+    Gap {
+        missing: u64,
+    },
     /// 길이를 알 수 없음 → 새 epoch.
     Reset(ResetReason),
 }
@@ -38,7 +40,10 @@ impl GapDetector {
     /// `max_gap`: 정확한 공백으로 인정할 최대 유실 샘플 수.
     #[must_use]
     pub const fn new(max_gap: u64) -> Self {
-        GapDetector { expected: None, max_gap }
+        GapDetector {
+            expected: None,
+            max_gap,
+        }
     }
 
     /// 다음 판정에서 처음 패킷처럼 다시 시작한다.
@@ -49,7 +54,12 @@ impl GapDetector {
     /// `device_position`: GetBuffer가 준 첫 프레임의 장치 위치.
     /// `frames`: 이번 패킷의 프레임 수.
     /// `reliable`: 위치를 믿을 수 있는지(예: 타임스탬프 오류 플래그가 없을 때 참).
-    pub fn observe(&mut self, device_position: u64, frames: u32, reliable: bool) -> CaptureContinuity {
+    pub fn observe(
+        &mut self,
+        device_position: u64,
+        frames: u32,
+        reliable: bool,
+    ) -> CaptureContinuity {
         let next = device_position.saturating_add(u64::from(frames));
         let prev = self.expected.replace(next);
         if !reliable {
@@ -107,14 +117,23 @@ impl CaptureTimeline {
 
     #[must_use]
     pub const fn key(&self) -> StreamKey {
-        StreamKey { peer: self.peer, stream: self.stream, epoch: self.epoch }
+        StreamKey {
+            peer: self.peer,
+            stream: self.stream,
+            epoch: self.epoch,
+        }
     }
 
     /// 캡처 패킷 하나를 시간축에 배치한다.
     ///
     /// epoch를 넘어서도 인덱스 번호는 계속 증가시킨다(로그 가독성). 단, 다른 epoch의
     /// 인덱스 사이에는 오프셋 의미가 없다.
-    pub fn on_packet(&mut self, device_position: u64, frames: u32, reliable: bool) -> CapturePlacement {
+    pub fn on_packet(
+        &mut self,
+        device_position: u64,
+        frames: u32,
+        reliable: bool,
+    ) -> CapturePlacement {
         let continuity = self.detector.observe(device_position, frames, reliable);
         let (start, gap_before, epoch_changed) = match continuity {
             CaptureContinuity::Continuous => (self.next_index, false, false),
@@ -132,7 +151,14 @@ impl CaptureTimeline {
             }
         };
         self.next_index = start.checked_add(u64::from(frames)).unwrap_or(start);
-        CapturePlacement { key: self.key(), clock: self.clock, start, gap_before, epoch_changed, continuity }
+        CapturePlacement {
+            key: self.key(),
+            clock: self.clock,
+            start,
+            gap_before,
+            epoch_changed,
+            continuity,
+        }
     }
 
     /// 캡처 장치가 바뀌었다: 새 클록 도메인, 새 epoch, 판정기 초기화.
@@ -177,7 +203,10 @@ mod tests {
         let mut t = tl();
         t.on_packet(10_000, 128, true);
         let p = t.on_packet(500, 128, true);
-        assert_eq!(p.continuity, CaptureContinuity::Reset(ResetReason::Backwards));
+        assert_eq!(
+            p.continuity,
+            CaptureContinuity::Reset(ResetReason::Backwards)
+        );
         assert!(p.epoch_changed);
         assert_eq!(p.key.epoch, Epoch(1));
         assert_eq!(p.clock, ClockDomainId(7), "같은 장치면 클록 도메인 유지");
@@ -192,7 +221,10 @@ mod tests {
         let mut t = tl();
         t.on_packet(0, 128, true);
         let p = t.on_packet(128 + 48_001, 128, true);
-        assert_eq!(p.continuity, CaptureContinuity::Reset(ResetReason::GapTooLarge { missing: 48_001 }));
+        assert_eq!(
+            p.continuity,
+            CaptureContinuity::Reset(ResetReason::GapTooLarge { missing: 48_001 })
+        );
         assert!(p.epoch_changed && !p.gap_before);
     }
 
@@ -201,7 +233,10 @@ mod tests {
         let mut t = tl();
         t.on_packet(0, 128, true);
         let p = t.on_packet(128, 128, false);
-        assert_eq!(p.continuity, CaptureContinuity::Reset(ResetReason::Unreliable));
+        assert_eq!(
+            p.continuity,
+            CaptureContinuity::Reset(ResetReason::Unreliable)
+        );
         assert!(p.epoch_changed);
     }
 
@@ -213,6 +248,10 @@ mod tests {
         let p = t.on_packet(0, 128, true);
         assert_eq!(p.clock, ClockDomainId(8));
         assert_eq!(p.key.epoch, Epoch(1));
-        assert_eq!(p.continuity, CaptureContinuity::Continuous, "새 장치의 첫 패킷");
+        assert_eq!(
+            p.continuity,
+            CaptureContinuity::Continuous,
+            "새 장치의 첫 패킷"
+        );
     }
 }

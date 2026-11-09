@@ -124,6 +124,12 @@ impl SampleRange {
         self.len
     }
 
+    /// 생성자가 len ≥ 1을 보장하므로 항상 false.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        false
+    }
+
     /// 배타적 끝. 생성 시 오버플로를 검사했으므로 항상 유효하다.
     #[must_use]
     pub const fn end(self) -> SampleIndex {

@@ -71,7 +71,7 @@ impl SharedPeriods {
     #[must_use]
     pub const fn allows(&self, period_frames: u32) -> bool {
         self.fundamental_frames != 0
-            && period_frames % self.fundamental_frames == 0
+            && period_frames.is_multiple_of(self.fundamental_frames)
             && period_frames >= self.min_frames
             && period_frames <= self.max_frames
     }
@@ -84,7 +84,7 @@ impl SharedPeriods {
         }
         let mut p = self.min_frames.div_ceil(self.fundamental_frames) * self.fundamental_frames;
         while p <= self.max_frames {
-            if p % multiple_of == 0 {
+            if p.is_multiple_of(multiple_of) {
                 return Some(p);
             }
             p += self.fundamental_frames;
@@ -196,7 +196,12 @@ mod tests {
     use super::*;
 
     // 정수배·범위 규칙 검사용 가상의 장치 값.
-    const DOC_EXAMPLE: SharedPeriods = SharedPeriods { default_frames: 448, fundamental_frames: 48, min_frames: 48, max_frames: 448 };
+    const DOC_EXAMPLE: SharedPeriods = SharedPeriods {
+        default_frames: 448,
+        fundamental_frames: 48,
+        min_frames: 48,
+        max_frames: 448,
+    };
 
     #[test]
     fn shared_period_rules() {
@@ -210,11 +215,21 @@ mod tests {
     #[test]
     fn aligned_period_search() {
         // HDAudio 예: fundamental 128, min 128, max 480 가정 시 240 정렬은 불가
-        let hda = SharedPeriods { default_frames: 480, fundamental_frames: 128, min_frames: 128, max_frames: 480 };
+        let hda = SharedPeriods {
+            default_frames: 480,
+            fundamental_frames: 128,
+            min_frames: 128,
+            max_frames: 480,
+        };
         assert_eq!(hda.smallest_aligned(240), None);
         assert_eq!(hda.smallest_aligned(128), Some(128));
         // fundamental 16이면 240 정렬 가능
-        let fine = SharedPeriods { default_frames: 480, fundamental_frames: 16, min_frames: 128, max_frames: 480 };
+        let fine = SharedPeriods {
+            default_frames: 480,
+            fundamental_frames: 16,
+            min_frames: 128,
+            max_frames: 480,
+        };
         assert_eq!(fine.smallest_aligned(240), Some(240));
         assert_eq!(fine.smallest_aligned(120), Some(240));
     }

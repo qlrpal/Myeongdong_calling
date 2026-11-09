@@ -40,13 +40,13 @@ const fn only_factors_2_3_5(mut n: u16) -> bool {
     if n == 0 {
         return false;
     }
-    while n % 2 == 0 {
+    while n.is_multiple_of(2) {
         n /= 2;
     }
-    while n % 3 == 0 {
+    while n.is_multiple_of(3) {
         n /= 3;
     }
-    while n % 5 == 0 {
+    while n.is_multiple_of(5) {
         n /= 5;
     }
     n == 1
@@ -96,7 +96,10 @@ impl Payload {
         }
         let mut bytes = [0u8; MAX_PAYLOAD];
         bytes[..data.len()].copy_from_slice(data);
-        Ok(Payload { len: data.len() as u16, bytes })
+        Ok(Payload {
+            len: data.len() as u16,
+            bytes,
+        })
     }
 
     #[must_use]
@@ -156,13 +159,27 @@ impl MediaFrame {
         payload: Payload,
     ) -> Result<Self, FrameError> {
         if !codec.accepts_sample_count(sample_count) {
-            return Err(FrameError::UnsupportedSampleCount { codec, samples: sample_count });
+            return Err(FrameError::UnsupportedSampleCount {
+                codec,
+                samples: sample_count,
+            });
         }
         if codec == Codec::Pcm16 && payload.len() != sample_count as usize * 2 {
-            return Err(FrameError::PcmLengthMismatch { samples: sample_count, bytes: payload.len() });
+            return Err(FrameError::PcmLengthMismatch {
+                samples: sample_count,
+                bytes: payload.len(),
+            });
         }
-        let range = SampleRange::new(start, u32::from(sample_count)).ok_or(FrameError::RangeOverflow)?;
-        Ok(MediaFrame { key, clock, range, codec, flags, payload })
+        let range =
+            SampleRange::new(start, u32::from(sample_count)).ok_or(FrameError::RangeOverflow)?;
+        Ok(MediaFrame {
+            key,
+            clock,
+            range,
+            codec,
+            flags,
+            payload,
+        })
     }
 
     #[must_use]
@@ -197,7 +214,11 @@ mod tests {
     use crate::{Epoch, PeerId, StreamId};
 
     fn key() -> StreamKey {
-        StreamKey { peer: PeerId(1), stream: StreamId(0), epoch: Epoch(0) }
+        StreamKey {
+            peer: PeerId(1),
+            stream: StreamId(0),
+            epoch: Epoch(0),
+        }
     }
 
     #[test]
@@ -219,17 +240,51 @@ mod tests {
     #[test]
     fn pcm_length_must_match() {
         let p = Payload::from_slice(&[0u8; 256]).unwrap();
-        assert!(MediaFrame::new(key(), ClockDomainId(0), SampleIndex::ZERO, 128, Codec::Pcm16, FrameFlags::empty(), p).is_ok());
+        assert!(
+            MediaFrame::new(
+                key(),
+                ClockDomainId(0),
+                SampleIndex::ZERO,
+                128,
+                Codec::Pcm16,
+                FrameFlags::empty(),
+                p
+            )
+            .is_ok()
+        );
         assert_eq!(
-            MediaFrame::new(key(), ClockDomainId(0), SampleIndex::ZERO, 120, Codec::Pcm16, FrameFlags::empty(), p).unwrap_err(),
-            FrameError::PcmLengthMismatch { samples: 120, bytes: 256 }
+            MediaFrame::new(
+                key(),
+                ClockDomainId(0),
+                SampleIndex::ZERO,
+                120,
+                Codec::Pcm16,
+                FrameFlags::empty(),
+                p
+            )
+            .unwrap_err(),
+            FrameError::PcmLengthMismatch {
+                samples: 120,
+                bytes: 256
+            }
         );
     }
 
     #[test]
     fn pcm_10ms_fits_inline() {
         let p = Payload::from_slice(&[0u8; 960]).unwrap();
-        assert!(MediaFrame::new(key(), ClockDomainId(0), SampleIndex::ZERO, 480, Codec::Pcm16, FrameFlags::empty(), p).is_ok());
+        assert!(
+            MediaFrame::new(
+                key(),
+                ClockDomainId(0),
+                SampleIndex::ZERO,
+                480,
+                Codec::Pcm16,
+                FrameFlags::empty(),
+                p
+            )
+            .is_ok()
+        );
         assert!(Payload::from_slice(&[0u8; MAX_PAYLOAD + 1]).is_err());
     }
 
