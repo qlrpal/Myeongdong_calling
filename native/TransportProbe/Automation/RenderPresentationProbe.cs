@@ -12,7 +12,13 @@ internal static partial class RenderLatencyProbe
     {
         public float[] Pcm { get; } = new float[Rate * (Seconds + 5)];
         public List<PresentationPoint> Points { get; } = new(20000);
+        public List<RenderSubmissionObservation> Submissions { get; } = new(20000);
         public int Count { get; private set; }
+        public void Submitted(RenderSubmissionObservation observation)
+        {
+            if (Submissions.Count >= 20000) throw new InvalidOperationException("Presentation submission limit.");
+            Submissions.Add(observation);
+        }
         public TaskCompletionSource<double> Origin { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Samples(ReadOnlySpan<byte> data, WaveFormat format)
         {
@@ -63,6 +69,59 @@ internal static partial class RenderLatencyProbe
     private static bool ContinuousPresentation(RenderDiagnostics? render) => render is { EmptyEvents:0 }
         && (render.Execution?.EmptyDuringSupply is null or 0);
 
+    private sealed record PresentationStages(double AdmissionApiMs, double QueueUntilDecodeMs,
+        double DecodeAndBookkeepingMs, double DecodedToPcmReadyMs, double PcmReadyToReleaseMs,
+        double ReleaseApiMs, double ReleaseReturnToDeviceMs, double TotalMs);
+
+    private sealed record PresentationWait(double UntilFirstReadCallMs, double BetweenReadCallsMs,
+        double ReadLockWaitMs, double ReadWorkBeforeDecodeMs, double TotalMs,
+        int ObservedReads, double CompletedReadAudioMs);
+
+    // Partition host elapsed time, not causal policy contributions. In particular,
+    // gaps outside Read include WASAPI pacing, other render work and scheduling.
+    private static PresentationWait? SplitWait(double admitted, double decode, PipelineRead[] reads)
+    {
+        if (!double.IsFinite(admitted) || !double.IsFinite(decode) || decode < admitted) return null;
+        var selected = reads.Where(r => r.CalledAt < decode && r.ReturnedAt > admitted)
+            .OrderBy(r => r.CalledAt).ToArray();
+        if (selected.Length == 0 || selected.Any(r => !double.IsFinite(r.CalledAt)
+                || !double.IsFinite(r.LockAt) || !double.IsFinite(r.ReturnedAt)
+                || r.CalledAt > r.LockAt || r.LockAt > r.ReturnedAt)
+            || !selected.Zip(selected.Skip(1)).All(p => p.First.ReturnedAt <= p.Second.CalledAt)
+            || selected.Count(r => r.LockAt <= decode && decode <= r.ReturnedAt) != 1) return null;
+        static double Overlap(double left, double right, double start, double end) =>
+            Math.Max(0, Math.Min(right,end)-Math.Max(left,start))*1000;
+        var first = Math.Max(0, selected[0].CalledAt-admitted)*1000;
+        double locks = 0, work = 0, laterGaps = 0;
+        var cursor = Math.Max(admitted, selected[0].CalledAt);
+        foreach (var r in selected)
+        {
+            laterGaps += Math.Max(0, Math.Min(decode,r.CalledAt)-cursor)*1000;
+            locks += Overlap(r.CalledAt,r.LockAt,admitted,decode);
+            work += Overlap(r.LockAt,r.ReturnedAt,admitted,decode);
+            cursor = Math.Max(cursor,Math.Min(decode,r.ReturnedAt));
+        }
+        laterGaps += Math.Max(0,decode-cursor)*1000;
+        var total = (decode-admitted)*1000;
+        if (Math.Abs(first+laterGaps+locks+work-total) > 1e-6) return null;
+        return new(first,laterGaps,locks,work,total,selected.Length,
+            selected.Where(r => r.CalledAt >= admitted && r.ReturnedAt <= decode).Sum(r => r.ProvidedSamples)/48.0);
+    }
+
+    private static PresentationStages? Stages(double admitted, double admissionReturned,
+        double decodeStart, double decodeEnd, double supplied, RenderSubmissionObservation submission, double presented)
+    {
+        double[] times = [admitted, admissionReturned, decodeStart, decodeEnd, supplied,
+            submission.PcmReadyAt, submission.BeforeRelease, submission.AfterRelease, presented];
+        if (times.Any(t => !double.IsFinite(t))
+            || !times.Zip(times.Skip(1)).All(pair => pair.First <= pair.Second)) return null;
+        return new((admissionReturned-admitted)*1000, (decodeStart-admissionReturned)*1000,
+            (decodeEnd-decodeStart)*1000, (submission.PcmReadyAt-decodeEnd)*1000,
+            (submission.BeforeRelease-submission.PcmReadyAt)*1000,
+            (submission.AfterRelease-submission.BeforeRelease)*1000,
+            (presented-submission.AfterRelease)*1000, (presented-admitted)*1000);
+    }
+
     public static void PresentationCheck()
     {
         PresentationPoint[] points = [new(2000, 10.001, 10.002, 480, 100000000, 48000),
@@ -92,6 +151,22 @@ internal static partial class RenderLatencyProbe
         using var unstarted = new SharedRenderPlayer(40,true,true);
         try { unstarted.ConfigureProbe(tap,3); throw new InvalidOperationException("Uninitialized probe accepted."); }
         catch (InvalidOperationException error) when (error.Message != "Uninitialized probe accepted.") { }
+        var stages = Stages(1,1.001,1.020,1.0201,1.0202,new(480,128,1.0203,1.0204,1.0205),1.030)!;
+        if (Math.Abs(stages.TotalMs - (stages.AdmissionApiMs + stages.QueueUntilDecodeMs
+                + stages.DecodeAndBookkeepingMs + stages.DecodedToPcmReadyMs + stages.PcmReadyToReleaseMs
+                + stages.ReleaseApiMs + stages.ReleaseReturnToDeviceMs)) > 1e-9
+            || Stages(1,1.1,1.020,1.0201,1.0202,new(480,128,1.0203,1.0204,1.0205),1.030) is not null
+            || Stages(1,1.001,1.020,double.NaN,1.0202,new(480,128,1.0203,1.0204,1.0205),1.030) is not null)
+            throw new InvalidOperationException("Presentation stage accounting/order/finite checks failed.");
+        PipelineRead Read(double call, double locked, double end) => new("",call,locked,end,128,128,0,20,20,true);
+        var wait = SplitWait(1.001,1.007,[Read(1.002,1.003,1.004),Read(1.005,1.006,1.008)])!;
+        if (Math.Abs(wait.UntilFirstReadCallMs-1)>1e-8 || Math.Abs(wait.BetweenReadCallsMs-1)>1e-8
+            || Math.Abs(wait.ReadLockWaitMs-2)>1e-8 || Math.Abs(wait.ReadWorkBeforeDecodeMs-2)>1e-8
+            || SplitWait(1.001,1.003,[Read(1,1.002,1.004)]) is not { UntilFirstReadCallMs:0 }
+            || SplitWait(1.001,1.007,[]) is not null
+            || SplitWait(1.001,1.007,[Read(1.002,1.003,1.006),Read(1.005,1.006,1.008)]) is not null
+            || SplitWait(double.NaN,1.007,[Read(1.002,1.003,1.008)]) is not null)
+            throw new InvalidOperationException("Presentation wait partition/clipping/missing/overlap checks failed.");
         Console.WriteLine("PASS: device-position interpolation and missing-bracket rejection.");
     }
 
@@ -102,6 +177,12 @@ internal static partial class RenderLatencyProbe
         var markerFrames = Enumerable.Range(0,14).Select(i => 500+i*200).ToHashSet();
         var plan = BuildRenderPlan(markerFrames, OpusProfile.LowDelay64, false);
         var rounds = new List<object>(); var complete = true;
+        async Task Save(bool finished)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+            await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new { complete=finished && complete, rounds,
+                limits="Same-host preencoded RTP admission to bracketed device stream clock, not physical DAC/ear, capture, encoder execution or network. Decoded reference excludes codec content displacement. Submission API calls are timed directly; decode endpoint includes existing trace bookkeeping. PcmReadyToRelease includes observer work. Partial/error rounds are not valid timing. Observer overhead is present. No raw audio saved; product defaults unchanged." }, DiagnosticJson.Readable));
+        }
         foreach (var headroom in new[] { 5, 3, 5 })
         {
             using var codec = new OpusAudioEncoder(OpusProfile.LowDelay64);
@@ -136,7 +217,8 @@ internal static partial class RenderLatencyProbe
                     && p.Qpc/10000000.0 <= p.After+.001 && p.Before-p.Qpc/10000000.0 < .1).ToArray();
                 var mappingValid = ContinuousPresentation(finalRender);
                 var ordered = mappingValid && points.Length >= 100 && OrderedPresentationClock(points) && tap.Points[^1].Written == tap.Count;
-                var measurements = new List<object>(); var accepted = 0;
+                var boundaries = trace.Snapshot();
+                var measurements = new List<object>(); var accepted = 0; var stagesAccepted = 0; var waitAccepted = 0;
                 foreach (var frame in markerFrames.Order())
                 {
                     var center = (int)((admitted[frame]-began)*Rate);
@@ -146,25 +228,56 @@ internal static partial class RenderLatencyProbe
                     var at = ordered ? PresentationAt(points, sample, Rate) : null;
                     var valid = match.Correlation >= .7 && at is not null && at >= admitted[frame] && at-admitted[frame] < .35;
                     if (valid) accepted++;
+                    var timestamp = (uint)(frame * Frame);
+                    var entries = boundaries.Admissions.Where(a => a.Ssrc == 1 && a.Timestamp == timestamp && a.Outcome == "queued").ToArray();
+                    var plays = boundaries.Playout.Where(p => p.Ssrc == 1 && p.Timestamp == timestamp && p.Outcome == "played").ToArray();
+                    var commits = tap.Submissions.Where(s => s.FirstFrame <= sample && sample < s.FirstFrame+s.Frames).ToArray();
+                    PresentationStages? stages = null;
+                    if (valid && entries.Length == 1 && plays.Length == 1 && commits.Length == 1
+                        && plays[0].DecodeStart is { } decodeStart && plays[0].DecodeEnd is { } decodeEnd
+                        && plays[0].SubmittedAt is { } supplied)
+                        stages = Stages(admitted[frame], entries[0].ReturnedAt, decodeStart, decodeEnd, supplied, commits[0], at!.Value);
+                    if (stages is not null) stagesAccepted++;
+                    PresentationWait? wait = null;
+                    if (stages is not null)
+                        wait = SplitWait(entries[0].ReturnedAt, plays[0].DecodeStart!.Value, boundaries.Reads);
+                    if (wait is not null) waitAccepted++;
                     measurements.Add(new { frame, match.Correlation, sample, admittedAt=admitted[frame],
-                        presentationAt=at, valid, admissionToDeviceClockMs=valid ? (at-admitted[frame])*1000 : null });
+                        presentationAt=at, valid, admissionToDeviceClockMs=valid ? (at-admitted[frame])*1000 : null,
+                        stages, wait,
+                        audioAheadAtAdmissionMs=entries.Length == 1 && entries[0].FrameSamples is { } samples
+                            ? (double?)(entries[0].QueueMs-samples/48.0) : null,
+                        reads=wait is not null ? boundaries.Reads.Where(r => r.CalledAt < plays[0].DecodeStart
+                            && r.ReturnedAt > entries[0].ReturnedAt).ToArray() : null,
+                        admission=entries.Length == 1 ? entries[0] : null,
+                        playout=plays.Length == 1 ? plays[0] : null,
+                        submission=commits.Length == 1 ? (RenderSubmissionObservation?)commits[0] : null });
                 }
-                complete &= accepted >= 10 && snapshot.DeviceError is null && trace.Snapshot().EvictedRecords == 0;
+                complete &= accepted >= 10 && stagesAccepted == accepted && waitAccepted == accepted
+                    && snapshot.DeviceError is null && boundaries.EvictedRecords == 0;
                 var continuityPassed = snapshot.Render?.EmptyEvents == 0 && snapshot.Render.SafetyFallbacks == 0
                     && snapshot.RtpPlayout?.ConcealedMs == 0 && snapshot.RtpPlayout.Rebuffers == 0 && snapshot.UnderfillMs == 0;
-                rounds.Add(new { headroomMs=headroom, accepted, ordered, mappingValid, rejectedClockPoints=tap.Points.Count-points.Length,
+                rounds.Add(new { headroomMs=headroom, accepted, stagesAccepted, waitAccepted, ordered, mappingValid, rejectedClockPoints=tap.Points.Count-points.Length,
                     continuityPassed, emitterOrigin=began, emitterBegin=begin, measurements, snapshot, clockPoints=tap.Points });
-                Console.WriteLine($"Presentation headroom {headroom}ms: trusted markers {accepted}/14.");
+                Console.WriteLine($"Presentation headroom {headroom}ms: trusted markers {accepted}/14, staged boundaries {stagesAccepted}/{accepted}, wait partitions {waitAccepted}/{accepted}.");
+                await Save(false);
+            }
+            catch (Exception error)
+            {
+                complete = false;
+                rounds.Add(new { headroomMs=headroom, error=error.ToString(), snapshot=sink.Snapshot(), boundaries=trace.Snapshot() });
+                await Save(false);
+                throw;
             }
             finally
             {
-                cancel.Cancel(); if (emitter is not null) try { await emitter; } catch (OperationCanceledException) { }
+                // The main await above records emitter failures. Cleanup must not
+                // throw the same task exception again and bypass device cleanup.
+                cancel.Cancel(); if (emitter is not null) try { await emitter; } catch (Exception) { }
                 await sink.Close(); trace.Stop();
             }
         }
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
-        await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new { complete, rounds,
-            limits="Timing complete is separate from continuityPassed. Emitter starts at stream clock origin+1s. Same-host synthetic 10ms native LowDelay64 RTP admission to correlated renderer PCM position mapped by bracketed IAudioClock. Decoded PCM reference excludes codec content displacement. Not physical DAC/ear, microphone or network latency. Explicit observer copies PCM transiently and samples clocks each commit; observer overhead is present in all rounds. No loopback capture timestamp is used. Full clock observations are metadata; audio samples are never saved. Product defaults unchanged." }, DiagnosticJson.Readable));
+        await Save(true);
         if (!complete) throw new InvalidOperationException("Unqualified presentation comparison; inspect rejected clocks/markers.");
     }
 }

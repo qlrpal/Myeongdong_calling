@@ -307,10 +307,12 @@ internal sealed class SharedRenderPlayer : IDisposable
         var readEnd = Stopwatch.GetTimestamp();
         var leaseAt = readEnd;
         int? beforeCommit = null;
+        double pcmReadyAt = 0, beforeRelease = 0, afterRelease = 0;
         using (var lease = render.GetBufferLease(frames, OutputWaveFormat.BlockAlign))
         {
             if (stagedBuffers) staging.AsSpan(0, bytes).CopyTo(lease.Buffer);
             else ReadProvider(lease.Buffer);
+            if (probe is not null) pcmReadyAt = ProbeClock.Now;
             probe?.Samples(lease.Buffer, OutputWaveFormat);
             // Observe before release so committing fresh frames cannot hide a miss.
             if (monitorDrain)
@@ -318,11 +320,14 @@ internal sealed class SharedRenderPlayer : IDisposable
                 beforeCommit = client!.CurrentPadding;
                 if (beforeCommit == 0) ObserveEmpty("supply");
             }
+            if (probe is not null) beforeRelease = ProbeClock.Now;
             lease.Release(frames);
+            if (probe is not null) afterRelease = ProbeClock.Now;
         }
         var end = Stopwatch.GetTimestamp();
         if (probe is not null)
         {
+            probe.Submitted(new(probeWrittenFrames, frames, pcmReadyAt, beforeRelease, afterRelease));
             probeWrittenFrames += frames;
             var clock = client!.AudioClockClient;
             var before = ProbeClock.Now;
