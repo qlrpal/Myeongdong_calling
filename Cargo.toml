@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# 실시간 경로의 예측 가능성을 위해 릴리스 빌드에서 panic=abort, 단일 코드 생성 단위.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+debug = "line-tables-only"
