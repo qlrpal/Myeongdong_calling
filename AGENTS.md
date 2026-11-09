@@ -80,5 +80,7 @@
 
 ```
 cargo test --workspace          # 플랫폼 독립 테스트 (Linux에서도 통과해야 함)
+cargo test -p timeline          # 크레이트 하나만
+cargo test -p timeline <이름>   # 이름에 <이름>이 들어간 테스트만
 cargo build --workspace --release
 ```
