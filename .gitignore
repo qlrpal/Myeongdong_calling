@@ -1,3 +1,4 @@
 target/
 .local/
 *.wav
+.claude/settings.local.json

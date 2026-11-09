@@ -65,7 +65,8 @@
 
 - 크레이트 의존성 방향은 `docs/DESIGN.md` 6장을 따른다. 오디오 엔진은 Noise·DTLS·ICE·RTP 같은 전송 내부 타입을 참조하지 않는다. `transport`는 `audio`에 의존하지 않는다. `server`는 미디어 크레이트에 의존하지 않는다.
 - 플랫폼 독립 로직(시간축, 패킷 형식, 지터·드리프트 정책, 분석기)은 Linux에서도 `cargo test`가 돌아야 한다. Windows 전용 코드(WASAPI, MMCSS)는 `cfg(windows)` 모듈에 둔다.
-- 새 외부 의존성을 추가하면 이유를 `docs/DESIGN.md`에 한 줄 남긴다.
+- 새 외부 의존성 추가는 **사용자 승인 사항**이다. 승인되면 이유를 `docs/DESIGN.md`에 한 줄 남긴다.
+- Windows 전용 코드는 Windows 네이티브(MSVC) 툴체인에서 빌드·테스트한다. WSL에서는 `cfg(windows)` 코드가 컴파일되지 않는다.
 - `timeline`의 불변식은 테스트로 보호한다. 불변식을 바꾸는 변경은 DESIGN 변경이다.
 
 ## 사용자 환경
@@ -78,9 +79,35 @@
 
 ## 명령
 
+크레이트 이름에는 `mdc-` 접두어가 붙는다(`-p timeline`은 동작하지 않는다).
+
 ```
-cargo test --workspace          # 플랫폼 독립 테스트 (Linux에서도 통과해야 함)
-cargo test -p timeline          # 크레이트 하나만
-cargo test -p timeline <이름>   # 이름에 <이름>이 들어간 테스트만
+cargo test --workspace              # 플랫폼 독립 테스트 (Linux에서도 통과해야 함)
+cargo test -p mdc-timeline          # 크레이트 하나만
+cargo test -p mdc-timeline <이름>   # 이름에 <이름>이 들어간 테스트만
 cargo build --workspace --release
 ```
+
+### 작업 완료 전 검증 (구현자가 직접 실행)
+
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace --release
+```
+
+- 기존 경고, 새 경고, 테스트 실패를 구분해 보고한다. 실행하지 못한 항목은 "미실행"으로 적는다.
+- clippy 통과를 실시간 안전성의 증거로 보지 않는다. 실시간 경로는 코드 리뷰와 해당 단계의 계측으로 확인한다.
+- 입→귀 지연 개선은 외부 측정 리그 결과로만 판정한다.
+
+## AI 협업 작업 제약
+
+- 역할: **Claude Code**는 설계, 작업 관리, 최종 리뷰. **Codex**는 독립 검증, 구현, 테스트. 상세 절차는 `CLAUDE.md`와 `.claude/commands/delegate.md`.
+- 구현을 위임받은 에이전트는 위임서에 적힌 허용 파일만 수정한다. 범위 밖 리팩터링을 하지 않는다.
+- **Codex는 커밋, 푸시, 병합, 브랜치 전환을 하지 않는다.** 커밋은 최종 보고 뒤 **사용자 승인을 받아 Claude가** 한다. 푸시는 사용자가 지시할 때만 한다.
+- `AGENTS.md`, `CLAUDE.md`, `docs/DESIGN.md`, `.claude/`는 사용자 승인 없이 수정하지 않는다. `docs/ROADMAP.md`(결론 한 줄), `docs/DISCUSSION-LOG.md`, `docs/experiments/`는 문서 규칙에 따라 기록할 수 있다.
+- 다른 에이전트가 작업하는 동안 같은 작업 트리를 수정하지 않는다.
+- 기존 사용자 변경사항을 덮어쓰거나 삭제하지 않는다.
+- 설계 변경은 위의 '합의 변경 절차'를, 새 문서는 '문서 규칙'을 따른다.
+- 테스트 성공, 실패, 미실행을 명확히 구분해 보고한다.
