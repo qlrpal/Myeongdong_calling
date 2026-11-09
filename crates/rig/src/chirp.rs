@@ -342,3 +342,55 @@ pub fn write_wav<W: Write>(cfg: &ChirpConfig, mut w: W) -> Result<(), RigError> 
     }
     Ok(())
 }
+
+/// Cosine quadrature of the unit-amplitude sync template, with the same window.
+pub fn sync_template_quadrature(cfg: &ChirpConfig) -> Vec<f64> {
+    if cfg.validate().is_err() {
+        return Vec::new();
+    }
+    let len = cfg.sync_len;
+    let (f0, f1) = (cfg.f_low_hz, cfg.f_high_hz);
+    let fs = f64::from(SAMPLE_RATE_HZ);
+    (0..len)
+        .map(|n| {
+            let t = n as f64 / fs;
+            let edge = n.min(len.saturating_sub(1).saturating_sub(n)) as f64;
+            let taper = cfg.taper_fraction * len.saturating_sub(1) as f64;
+            let window = if taper > 0.0 && edge < taper {
+                0.5 * (1.0 - (std::f64::consts::PI * edge / taper).cos())
+            } else {
+                1.0
+            };
+            (std::f64::consts::TAU * (f0 * t + (f1 - f0) * t * t / (2.0 * len as f64 / fs))).cos()
+                * window
+        })
+        .collect()
+}
+
+/// Cosine quadrature of the bit template (false = up, true = down).
+pub fn bit_template_quadrature(cfg: &ChirpConfig, bit: bool) -> Vec<f64> {
+    if cfg.validate().is_err() {
+        return Vec::new();
+    }
+    let len = cfg.bit_len;
+    let (f0, f1) = if bit {
+        (cfg.f_high_hz, cfg.f_low_hz)
+    } else {
+        (cfg.f_low_hz, cfg.f_high_hz)
+    };
+    let fs = f64::from(SAMPLE_RATE_HZ);
+    (0..len)
+        .map(|n| {
+            let t = n as f64 / fs;
+            let edge = n.min(len.saturating_sub(1).saturating_sub(n)) as f64;
+            let taper = cfg.taper_fraction * len.saturating_sub(1) as f64;
+            let window = if taper > 0.0 && edge < taper {
+                0.5 * (1.0 - (std::f64::consts::PI * edge / taper).cos())
+            } else {
+                1.0
+            };
+            (std::f64::consts::TAU * (f0 * t + (f1 - f0) * t * t / (2.0 * len as f64 / fs))).cos()
+                * window
+        })
+        .collect()
+}
