@@ -4,6 +4,7 @@ use std::{
 };
 
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
+pub const MAX_MARKERS: usize = 2048;
 
 #[derive(Debug)]
 pub enum RigError {
@@ -135,7 +136,7 @@ impl ChirpConfig {
         if !self.peak_dbfs.is_finite() || !(-60.0..=-1.0).contains(&self.peak_dbfs) {
             return Err(RigError::Invalid("peak"));
         }
-        if !(1..=4096).contains(&self.marker_count) || ![1, 2].contains(&self.channels) {
+        if !(1..=MAX_MARKERS).contains(&self.marker_count) || ![1, 2].contains(&self.channels) {
             return Err(RigError::Invalid("count or channels"));
         }
         if self.interval_len
@@ -151,14 +152,73 @@ impl ChirpConfig {
     }
 }
 pub fn encode_marker_id(index: u16) -> Option<u16> {
-    if index >= 4096 {
+    if usize::from(index) >= MAX_MARKERS {
         return None;
     }
-    Some((index << 4) | ((index ^ (index >> 4) ^ (index >> 8)) & 15))
+    // Hamming positions 1..=15 occupy word bits 0..=14. Positions
+    // 1, 2, 4, 8 hold even parity; the remaining positions in ascending
+    // order hold index bits 0..=10. Bit 15 is overall even parity.
+    // marker_template transmits word bits MSB first, including bit 15.
+    let mut word = 0u16;
+    let mut data_bit = 0;
+    let mut syndrome = 0u8;
+    for position in 1u8..=15 {
+        if !position.is_power_of_two() {
+            if index & (1 << data_bit) != 0 {
+                word |= 1 << (position - 1);
+                syndrome ^= position;
+            }
+            data_bit += 1;
+        }
+    }
+    for parity in [1u8, 2, 4, 8] {
+        if syndrome & parity != 0 {
+            word |= 1 << (parity - 1);
+        }
+    }
+    word |= ((word.count_ones() & 1) as u16) << 15;
+    Some(word)
 }
-pub fn decode_marker_id(word: u16) -> Option<u16> {
-    let index = word >> 4;
-    (encode_marker_id(index) == Some(word)).then_some(index)
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerIdDecode {
+    Exact(u16),
+    Corrected { index: u16, flipped_bit: u8 },
+    Uncorrectable,
+}
+
+/// SECDED classification; three or more flipped bits can be misclassified.
+pub fn decode_marker_id(mut word: u16) -> MarkerIdDecode {
+    let mut syndrome = 0u8;
+    for position in 1u8..=15 {
+        if word & (1 << (position - 1)) != 0 {
+            syndrome ^= position;
+        }
+    }
+    let odd_parity = word.count_ones() & 1 != 0;
+    if syndrome != 0 && !odd_parity {
+        return MarkerIdDecode::Uncorrectable;
+    }
+    let flipped_bit = if odd_parity {
+        // Syndrome is in 0..=15; zero identifies overall parity bit 15.
+        let bit = if syndrome == 0 { 15 } else { syndrome - 1 };
+        word ^= 1 << bit;
+        Some(bit)
+    } else {
+        None
+    };
+    let mut index = 0u16;
+    let mut data_bit = 0;
+    for position in 1u8..=15 {
+        if !position.is_power_of_two() {
+            index |= ((word >> (position - 1)) & 1) << data_bit;
+            data_bit += 1;
+        }
+    }
+    match flipped_bit {
+        Some(flipped_bit) => MarkerIdDecode::Corrected { index, flipped_bit },
+        None => MarkerIdDecode::Exact(index),
+    }
 }
 fn chirp(cfg: &ChirpConfig, len: usize, down: bool) -> Vec<f64> {
     if cfg.validate().is_err() {

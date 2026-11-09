@@ -186,46 +186,75 @@ fn t6_direction() {
 }
 #[test]
 fn t7_codes() {
-    let words: Vec<_> = (0..4096)
+    assert_eq!(MAX_MARKERS, 2048);
+    let words: Vec<_> = (0..2048)
         .map(|id| {
             let w = encode_marker_id(id).unwrap();
-            assert_eq!(decode_marker_id(w), Some(id));
+            assert_eq!(decode_marker_id(w), MarkerIdDecode::Exact(id));
             for bit in 0..16 {
-                assert_eq!(decode_marker_id(w ^ (1 << bit)), None);
+                assert_eq!(
+                    decode_marker_id(w ^ (1 << bit)),
+                    MarkerIdDecode::Corrected {
+                        index: id,
+                        flipped_bit: bit
+                    }
+                );
+                for second in bit + 1..16 {
+                    assert_eq!(
+                        decode_marker_id(w ^ (1 << bit) ^ (1 << second)),
+                        MarkerIdDecode::Uncorrectable
+                    );
+                }
             }
             w
         })
         .collect();
-    for id in 4096..=u16::MAX {
+    for id in 2048..=u16::MAX {
         assert_eq!(encode_marker_id(id), None);
     }
+    let mut minimum_distance = 16;
     for (i, a) in words.iter().enumerate() {
         for b in &words[i + 1..] {
-            assert!((a ^ b).count_ones() >= 2);
+            let distance = (a ^ b).count_ones();
+            assert!(distance >= 4);
+            minimum_distance = minimum_distance.min(distance);
         }
     }
+    println!("T7 minimum Hamming distance: {minimum_distance}");
+    assert_eq!(minimum_distance, 4);
+    let (mut exact, mut corrected, mut uncorrectable) = (0, 0, 0);
     for word in 0..=u16::MAX {
-        assert_eq!(
-            decode_marker_id(word).is_some(),
-            words.binary_search(&word).is_ok()
-        );
+        match decode_marker_id(word) {
+            MarkerIdDecode::Exact(_) => exact += 1,
+            MarkerIdDecode::Corrected { .. } => corrected += 1,
+            MarkerIdDecode::Uncorrectable => uncorrectable += 1,
+        }
     }
+    println!("T7e Exact: {exact}, Corrected: {corrected}, Uncorrectable: {uncorrectable}");
+    assert_eq!((exact, corrected, uncorrectable), (2048, 32768, 30720));
 }
 #[test]
 fn t8_unique() {
     let c = small();
-    let ids = [0, 1, 2, 4095];
+    let zero = encode_marker_id(0).unwrap();
+    let distance_four_id = (3..2047)
+        .find(|id| (encode_marker_id(*id).unwrap() ^ zero).count_ones() == 4)
+        .unwrap();
+    let ids = [0, 1, 2, 2047, distance_four_id];
+    println!("T8 distance-four pair: 0 vs {distance_four_id}");
     let templates: Vec<_> = ids
         .iter()
         .map(|i| marker_template(&c, *i).unwrap())
         .collect();
     let start = c.sync_len + c.gap_len;
     for (i, a) in templates.iter().enumerate() {
-        assert!((correlation(&a[start..], &a[start..], 0) - 1.0).abs() < 1e-12);
+        let self_r = correlation(&a[start..], &a[start..], 0);
+        println!("T8 {} self ID correlation: {self_r:.12}", ids[i]);
+        assert!((self_r - 1.0).abs() < 1e-12);
         for (j, b) in templates.iter().enumerate().skip(i + 1) {
             let r = correlation(&a[start..], &b[start..], 0);
             println!("T8 {} vs {} ID correlation: {r:.12}", ids[i], ids[j]);
-            assert!(r < 0.9);
+            assert!(r < 0.8);
         }
     }
 }
@@ -271,7 +300,7 @@ fn t9_invalid() {
             ..small()
         });
     }
-    for marker_count in [0, 4097, usize::MAX] {
+    for marker_count in [0, 2049, usize::MAX] {
         cases.push(ChirpConfig {
             marker_count,
             ..small()
@@ -333,7 +362,7 @@ fn t9_invalid() {
         assert!(marker_template(&c, 0).is_err());
         assert!(write_wav(&c, Vec::new()).is_err());
     }
-    assert!(marker_template(&small(), 4096).is_err());
+    assert!(marker_template(&small(), 2048).is_err());
     for taper_fraction in [0.0, 0.5] {
         ChirpConfig {
             taper_fraction,
@@ -344,7 +373,7 @@ fn t9_invalid() {
     }
     ChirpConfig {
         f_high_hz: 21600.0,
-        marker_count: 4096,
+        marker_count: 2048,
         ..small()
     }
     .validate()
