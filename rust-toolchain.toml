@@ -1,0 +1,6 @@
+# 로컬(Windows·Linux)과 CI가 같은 컴파일러·clippy를 쓰도록 고정한다.
+# clippy 린트는 버전마다 늘어나므로, 올릴 때는 이 파일만 바꾸고 검증 명령 4개를 다시 통과시킨다.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -101,6 +101,14 @@ cargo build --workspace --release
 - clippy 통과를 실시간 안전성의 증거로 보지 않는다. 실시간 경로는 코드 리뷰와 해당 단계의 계측으로 확인한다.
 - 입→귀 지연 개선은 외부 측정 리그 결과로만 판정한다.
 
+### CI (플랫폼 검증)
+
+- push마다 GitHub Actions(`.github/workflows/ci.yml`)가 Linux·Windows에서 위 명령 4개와 `#[ignore]` 수용 시험(release)을 실행한다.
+- **Linux 검증은 CI 결과로 판정한다.** 로컬에서 Linux를 돌릴 필요는 없다. 보고에는 "CI 대기 / 통과 / 실패"와 해당 커밋을 적는다.
+- 후보 채택·동결처럼 플랫폼 검증이 필요한 결론은 해당 커밋의 CI가 통과한 뒤에만 보고한다.
+- 컴파일러 버전은 `rust-toolchain.toml`로 고정한다. 올릴 때는 이 파일만 바꾸고 CI 통과를 확인한다.
+- CI가 하지 않는 것: WASAPI 실장치 시험, 외부 리그 측정. 이것은 사용자 PC에서 한다.
+
 ## AI 협업 작업 제약
 
 - 역할: **Claude Code**는 설계, 작업 관리, 최종 리뷰. **Codex**는 독립 검증, 구현, 테스트. 상세 절차는 `CLAUDE.md`와 `.claude/commands/delegate.md`.

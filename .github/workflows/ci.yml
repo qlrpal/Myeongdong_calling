@@ -1,0 +1,55 @@
+# AGENTS.md '작업 완료 전 검증' 명령 4개 + ignored 수용 시험을 Linux·Windows에서 실행한다.
+# 구현한 에이전트가 아니라 독립된 환경의 결과로 플랫폼 검증을 판정하기 위한 것이다.
+# 실장치(WASAPI)·외부 리그 측정은 여기서 하지 않는다.
+name: ci
+
+on:
+  push:
+    branches: [v2]
+  pull_request:
+    branches: [v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml의 버전을 설치한다(로컬과 같은 컴파일러·clippy).
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: build (release)
+        run: cargo build --workspace --release
+
+      # 무거워서 기본 실행에서 빠진 수용 시험(#[ignore])을 release로 실행한다.
+      - name: ignored acceptance tests (release)
+        run: cargo test --workspace --release -- --ignored --nocapture
