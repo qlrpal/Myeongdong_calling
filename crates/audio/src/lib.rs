@@ -234,3 +234,7 @@ mod tests {
         assert_eq!(fine.smallest_aligned(120), Some(240));
     }
 }
+/// Read-only device probe records and presentation, outside realtime paths.
+pub mod probe_table;
+#[cfg(windows)]
+pub mod wasapi;
