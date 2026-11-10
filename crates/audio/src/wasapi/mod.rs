@@ -1,4 +1,5 @@
 //! Read-only WASAPI probe. No stream initialization, start, or realtime threads.
+pub mod stream;
 use crate::probe_table::{DeviceProbe, EffectRegistration, Query};
 use crate::{DataFlow, ExclusivePeriods, Format, Hns, SharedPeriods};
 use windows::{

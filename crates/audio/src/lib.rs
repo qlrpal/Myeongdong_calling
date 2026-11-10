@@ -236,5 +236,7 @@ mod tests {
 }
 /// Read-only device probe records and presentation, outside realtime paths.
 pub mod probe_table;
+pub mod spsc;
+pub mod stream_report;
 #[cfg(windows)]
 pub mod wasapi;
