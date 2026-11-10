@@ -17,7 +17,7 @@
 목표: 기존 명동콜링의 외부 기준선 확보, 측정계 자체의 정확도·반복성 확인. 구성은 `RIG.md`.
 
 - [x] 측정 신호 생성기: 고유 코드가 들어간 대역 제한 처프 열 WAV (`crates/rig`) → 결과: 구현(`d34af91`, SECDED `962bb0f`). 신호는 미동결이며, A0 ID 배치 변경이 실험 002 채택 전 후보
-- [ ] 분석기: L/R 녹음에서 상호상관으로 마커별 지연, 마커 누락·오검출 판정 → 결과: 실험 001 검증 후보 기각(Windows 독립 검증 기준 1·2·4·5 불합격, 3·6 합격). 기준 미동결, `docs/experiments/001-analyzer-validation.md`. 실험 002 설계 동결(개정 5.1), 분석기 재구현 승인·실행 보류, `docs/experiments/002-analyzer-revalidation.md`
+- [ ] 분석기: L/R 녹음에서 상호상관으로 마커별 지연, 마커 누락·오검출 판정 → 결과: 실험 001 검증 후보 기각(Windows 독립 검증 기준 1·2·4·5 불합격, 3·6 합격). 기준 미동결, `docs/experiments/001-analyzer-validation.md`. 실험 002 설계 동결(개정 5.2), 분석기 재구현 승인·실행 보류, `docs/experiments/002-analyzer-revalidation.md`
 - [ ] 재시작 단위 통계: 실행별 P50/P95/P99, 보존율, 실행 간 분산
 - [ ] 리그 자체 검증 절차 자동화 (`RIG.md` 4장)
 - [ ] 기존 명동콜링(`native` 브랜치 배포본) 노트북→PC 기준선, 재시작 N회
