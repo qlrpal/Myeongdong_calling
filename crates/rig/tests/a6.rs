@@ -21,7 +21,7 @@ fn detections(c: &AnalysisConfig) -> Vec<Detection> {
             id: IdReading {
                 outcome: IdOutcome::Exact(codeword_of_marker(id).unwrap()),
                 word: None,
-                bits: 0,
+                bits: encode_marker_id(codeword_of_marker(id).unwrap()).unwrap(),
                 erasure_mask: 0,
                 segments_present: 17,
                 min_margin_db: None,
@@ -213,7 +213,7 @@ fn xtalk_safety_boundaries_and_sample_count() {
     let l = detections(&c);
     // W=[-2,2], A_x=[-2,10], search=(-7,15].
     for (d, rejected, unchecked) in [
-        (-7.0, false, true),
+        (-7.0, true, false),
         (-6.99, true, false),
         (-2.01, true, false),
         (-2.0, false, false),
@@ -222,7 +222,7 @@ fn xtalk_safety_boundaries_and_sample_count() {
         (10.0, false, false),
         (10.01, true, false),
         (15.0, true, false),
-        (15.01, false, true),
+        (15.01, true, false),
     ] {
         let r = shifted_detections(&l, d);
         let a = matched(&c, &calibration(), &l, &r);

@@ -1,4 +1,5 @@
 //! Offline channel alignment and conservative marker matching. Times are ADC samples.
+const T_P: u32 = 3;
 use crate::calib::{Calibration, CalibrationState};
 use crate::{
     ChirpConfig, DetectorConfig, IdOutcome, IdReading, RigError, StereoRecording, SyncCandidate,
@@ -32,6 +33,7 @@ pub struct AnalysisConfig {
     pub chirp: ChirpConfig,
     pub detector: DetectorConfig,
     pub max_delay: f64,
+    pub source_max: f64,
     pub mode: AnalysisMode,
     pub z: f64,
     pub x: f64,
@@ -44,6 +46,7 @@ impl Default for AnalysisConfig {
             chirp: ChirpConfig::default(),
             detector: DetectorConfig::default(),
             max_delay: 48000.0,
+            source_max: 96000.0,
             mode: AnalysisMode::Measurement,
             z: 0.0,
             x: 0.0,
@@ -54,7 +57,10 @@ impl Default for AnalysisConfig {
 }
 impl AnalysisConfig {
     pub fn validate(&self) -> Result<(), RigError> {
-        if !self.z.is_finite()
+        if !self.source_max.is_finite()
+            || self.source_max <= 0.0
+            || self.source_max < self.max_delay
+            || !self.z.is_finite()
             || !(0.0..=u32::MAX as f64).contains(&self.z)
             || !self.x.is_finite()
             || !(0.0..=u32::MAX as f64).contains(&self.x)
@@ -79,10 +85,11 @@ impl AnalysisConfig {
     /// Lossless settings identity, including all signal, detector and matching fields.
     pub fn identity(&self) -> String {
         format!(
-            "{:?};{:?};max_delay={:?};overlap=marker_len;alignment=exact_ls;anchor_residual_limit=interval/4;l_search=interval/4;undecodable_search=(interval-marker_len)/2;mismatch_search=interval/2;xtalk_margin_samples=2;xtalk_ratio_margin_db=3;normal_selection=earliest;mode={:?};Z={:?};X={:?};N={};no_detection={:?}",
+            "{:?};{:?};max_delay={:?};overlap=marker_len;alignment=exact_ls;anchor_residual_limit=interval/4;l_search=interval/4;source_matching=interval_A1;xtalk_margin_samples=2;xtalk_ratio_margin_db=3;normal_selection=earliest_unresolved;source_max={:?};T_p=3;mode={:?};Z={:?};X={:?};N={};no_detection={:?}",
             self.chirp,
             self.detector,
             self.max_delay,
+            self.source_max,
             self.mode,
             self.z,
             self.x,
@@ -293,6 +300,12 @@ pub struct MarkerResult {
     /// Channel-offset-corrected R-L time, reported alongside raw delay.
     pub corrected_delay: Option<f64>,
     pub reason: String,
+    /// 7 denotes both step 7 and 7a (distinguished by reason).
+    pub decision_step: u8,
+    pub c0: Option<Detection>,
+    pub possible_sources: Vec<u16>,
+    pub distance_violations: Vec<(u16, u16)>,
+    pub later_confirmed: bool,
 }
 #[derive(Debug)]
 pub struct Analysis {
@@ -301,8 +314,14 @@ pub struct Analysis {
     pub alignment: Alignment,
     pub markers: Vec<MarkerResult>,
     pub r_duplicate: usize,
-    pub r_orphan: usize,
-    pub r_unassigned_undecodable: usize,
+    pub r_shared: usize,
+    pub blocked_self_id: usize,
+    pub blocked_other: usize,
+    pub blocked_earlier: usize,
+    pub blocked_boundary: usize,
+    pub outside_ids: Vec<(f64, u16)>,
+    pub e1_suspect: usize,
+    pub xtalk_candidates: usize,
     pub warnings: Vec<String>,
     pub reject_reasons: Vec<RejectReason>,
     pub e5_unchecked: bool,
@@ -382,8 +401,14 @@ pub fn match_detections(
                 },
                 markers: Vec::new(),
                 r_duplicate: 0,
-                r_orphan: 0,
-                r_unassigned_undecodable: 0,
+                r_shared: 0,
+                blocked_self_id: 0,
+                blocked_other: 0,
+                blocked_earlier: 0,
+                blocked_boundary: 0,
+                outside_ids: Vec::new(),
+                e1_suspect: 0,
+                xtalk_candidates: 0,
                 warnings: vec!["E5_unchecked".into()],
                 reject_reasons,
                 e5_unchecked: true,
@@ -481,6 +506,11 @@ pub fn match_detections(
             }),
             delay: None,
             corrected_delay: None,
+            decision_step: if lc == LeftClass::Ambiguous { 2 } else { 1 },
+            c0: None,
+            possible_sources: Vec::new(),
+            distance_violations: Vec::new(),
+            later_confirmed: false,
             reason: if lc == LeftClass::Ambiguous {
                 "l_ambiguous".into()
             } else {
@@ -488,210 +518,269 @@ pub fn match_detections(
             },
         });
     }
-    // Temporary A6: A3-confirmed ordinal and L_ok only; no dist_ok/source confidence yet.
-    let mut xtalk_count = 0;
-    let mut outside = false;
-    for row in rows.iter().filter(|r| r.left_class == LeftClass::Ok) {
-        if let Some(l) = &row.left {
-            for p in right
-                .iter()
-                .filter(|p| decoded_id(p.id.outcome) == Some(row.id))
-            {
-                let d = p.sync.time - l.sync.time;
-                if d > wlo - x && d <= whi + z + x {
-                    xtalk_count += 1;
-                    outside |= d < wlo || d > whi + z;
+    let words = rows
+        .iter()
+        .map(|r| {
+            crate::codeword_of_marker(r.id)
+                .and_then(crate::encode_marker_id)
+                .ok_or(RigError::Invalid("marker codeword"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let interval = |p: &Detection, r: &MarkerResult| {
+        (
+            p.sync.time - r.left_interval.1,
+            p.sync.time - r.left_interval.0,
+        )
+    };
+    let overlaps = |d: (f64, f64), lo: f64, hi: f64| d.1 > lo && d.0 <= hi;
+    let violations = |set: &[usize]| {
+        let mut bad = Vec::new();
+        for (i, &a) in set.iter().enumerate() {
+            for &b in set.iter().skip(i + 1) {
+                if let (Some(wa), Some(wb), Some(ra), Some(rb)) =
+                    (words.get(a), words.get(b), rows.get(a), rows.get(b))
+                    && (wa ^ wb).count_ones() < 8
+                {
+                    bad.push((ra.id, rb.id));
                 }
             }
         }
+        bad
+    };
+    struct Candidate<'a> {
+        p: &'a Detection,
+        xtalk: Option<u16>,
+        explained: Option<u16>,
+        possible: Vec<u16>,
+        bad: Vec<(u16, u16)>,
+    }
+    let mut sorted = right.iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| a.sync.time.total_cmp(&b.sync.time));
+    let mut candidates = Vec::new();
+    let mut outside_ids = Vec::new();
+    let mut e1_suspect = 0;
+    let mut outside = false;
+    let mut xtalk_count = 0;
+    for p in sorted {
+        let mx = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| overlaps(interval(p, r), wlo - x, whi + z + x))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let mc = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| overlaps(interval(p, r), whi + z, c.source_max))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let confirmed_word = match p.id.outcome {
+            IdOutcome::Exact(n)
+            | IdOutcome::Corrected { index: n, .. }
+            | IdOutcome::ErasureCorrected { index: n, .. } => Some(n),
+            _ => None,
+        };
+        let confirmed = confirmed_word
+            .and_then(marker_of_codeword)
+            .filter(|id| usize::from(*id) < rows.len());
+        if let Some(n) = confirmed_word
+            && confirmed.is_none()
+        {
+            outside_ids.push((p.sync.time, n));
+        }
+        if let Some(id) = confirmed
+            && !mc.contains(&usize::from(id))
+            && !mx.contains(&usize::from(id))
+        {
+            e1_suspect += 1;
+        }
+        let xtalk =
+            confirmed.filter(|id| mx.contains(&usize::from(*id)) && violations(&mx).is_empty());
+        if let Some(id) = xtalk {
+            xtalk_count += 1;
+            if let Some(r) = rows.get(usize::from(id)) {
+                let t = if r.left_class == LeftClass::Ok {
+                    r.left.as_ref().map_or(r.predicted_left, |l| l.sync.time)
+                } else {
+                    r.predicted_left
+                };
+                let d = p.sync.time - t;
+                outside |= d < wlo || d > whi + z;
+            }
+        }
+        let bad = violations(&mc);
+        let possible = mc
+            .iter()
+            .filter_map(|i| {
+                let word = words.get(*i)?;
+                (crate::detect::nonerased_distance(p.id.bits, p.id.erasure_mask, *word) <= T_P)
+                    .then(|| rows.get(*i).map(|r| r.id))
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let explained = confirmed
+            .filter(|id| xtalk.is_none() && bad.is_empty() && possible.as_slice() == [*id]);
+        candidates.push(Candidate {
+            p,
+            xtalk,
+            explained,
+            possible,
+            bad,
+        });
     }
     let e5_unchecked = xtalk_count < c.xtalk_min_candidates;
     if !e5_unchecked && outside {
         reject_reasons.push(RejectReason::CalibrationMismatch);
     }
-    if !reject_reasons.is_empty() {
-        return Ok(Analysis {
-            config: c.clone(),
-            calibration: cal.clone(),
-            alignment,
-            markers: Vec::new(),
-            r_duplicate: 0,
-            r_orphan: 0,
-            r_unassigned_undecodable: 0,
-            warnings: if e5_unchecked {
-                vec!["E5_unchecked".into()]
-            } else {
-                Vec::new()
-            },
-            reject_reasons,
-            e5_unchecked,
-            z,
-            x,
-        });
-    }
-    // Every R candidate has one disposition: normal, duplicate, near, orphan, or undecoded.
-    let mut used = vec![false; right.len()];
-    let mut duplicate = 0;
-    for row in rows.iter_mut().filter(|r| r.left_class == LeftClass::Ok) {
-        let l = row.left.as_ref().ok_or(ALIGN)?;
-        let mut candidates: Vec<_> = right
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                let d = p.sync.time - l.sync.time;
-                decoded_id(p.id.outcome) == Some(row.id) && d > whi && d <= c.max_delay
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.1.sync.time.total_cmp(&b.1.sync.time));
-        if let Some((_, p)) = candidates.first() {
-            row.class = Some(Class::Normal);
-            row.right = Some((*p).clone());
-            let d = p.sync.time - l.sync.time;
-            row.delay = Some(d);
-            row.corrected_delay = Some(d - cal.channel_offset);
-            duplicate += candidates.len().saturating_sub(1);
-            for (i, _) in candidates {
-                if let Some(v) = used.get_mut(i) {
-                    *v = true;
-                }
-            }
-        }
-    }
-    let delays: Vec<_> = rows.iter().filter_map(|r| r.delay).collect();
-    let dhat = median(&delays);
-    let mut unassigned = 0;
-    for (i, p) in right
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| decoded_id(p.id.outcome).is_none())
-    {
-        if !rows
-            .iter()
-            .filter(|r| r.left_class == LeftClass::Ok)
-            .any(|r| {
-                r.left.as_ref().is_some_and(|l| {
-                    let d = p.sync.time - l.sync.time;
-                    d > whi && d <= c.max_delay
-                })
-            })
-        {
-            continue;
-        }
-        let targets: Vec<_> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                if r.left_class != LeftClass::Ok {
-                    return false;
-                }
-                let Some(l) = r.left.as_ref() else {
-                    return false;
-                };
-                let d = p.sync.time - l.sync.time;
-                dhat.is_some_and(|center| {
-                    d > whi
-                        && d <= c.max_delay
-                        && (d - center).abs()
-                            < (c.chirp.interval_len - c.chirp.marker_len()) as f64 / 2.0
-                })
-            })
-            .map(|(j, _)| j)
-            .collect();
-        if targets.len() == 1
-            && let Some(row) = targets.first().and_then(|j| rows.get_mut(*j))
-            && row.class.is_none()
-        {
-            row.class = Some(Class::IdUndecodable);
-            row.right = Some(p.clone());
-            if let Some(v) = used.get_mut(i) {
-                *v = true;
-            }
-        } else {
-            unassigned += 1;
-        }
-    }
-    let mut orphan = 0;
-    let mut orphan_indices = Vec::new();
-    for (i, p) in right.iter().enumerate() {
-        if used.get(i) == Some(&true) || decoded_id(p.id.outcome).is_none() {
-            continue;
-        }
-        let near = rows
-            .iter()
-            .filter(|r| r.left_class == LeftClass::Ok)
-            .any(|r| {
-                r.left.as_ref().is_some_and(|l| {
-                    let d = p.sync.time - l.sync.time;
-                    decoded_id(p.id.outcome) == Some(r.id) && d >= wlo && d <= whi
-                })
-            });
-        if !near {
-            orphan += 1;
-            orphan_indices.push(i);
-        }
-    }
     let mut warnings = Vec::new();
     if e5_unchecked {
         warnings.push("E5_unchecked".into());
     }
-    if dhat.is_none() {
-        warnings.push("no_latency_reference".into());
+    if e1_suspect > 0 {
+        warnings.push("E1_suspect".into());
     }
-    if unassigned > 0 {
-        warnings.push(format!("unassigned_undecodable={unassigned}"));
-    }
-    for row in rows
-        .iter_mut()
-        .filter(|r| r.left_class == LeftClass::Ok && r.class.is_none())
-    {
-        let l = row.left.as_ref().ok_or(ALIGN)?;
-        let mismatch = orphan_indices
-            .iter()
-            .filter_map(|i| right.get(*i))
-            .find(|p| {
-                let d = p.sync.time - l.sync.time;
-                decoded_id(p.id.outcome) != Some(row.id)
-                    && d > whi
-                    && d <= c.max_delay
-                    && dhat.is_none_or(|v| (d - v).abs() <= c.chirp.interval_len as f64 / 2.0)
-            });
-        let near = right.iter().find(|p| {
-            let d = p.sync.time - l.sync.time;
-            d >= wlo
-                && d <= whi
-                && (decoded_id(p.id.outcome) == Some(row.id) || decoded_id(p.id.outcome).is_none())
-        });
-        if let Some(p) = mismatch {
-            row.class = Some(Class::IdMismatch);
-            row.right = Some(p.clone());
-        } else if let Some(p) = near {
-            row.class = Some(Class::Ambiguous);
-            row.right = Some(p.clone());
-            let ratio = 20.0 * (p.sync.amplitude / l.sync.amplitude).log10();
-            row.reason = if cal
-                .xtalk
-                .as_ref()
-                .is_some_and(|x| ratio >= x.ratio_min_db - 3.0 && ratio <= x.ratio_max_db + 3.0)
-            {
-                "xtalk_like"
-            } else {
-                "abnormal_near"
-            }
-            .into();
-        } else if let Some(p) = right.iter().enumerate().find_map(|(i, p)| {
-            let d = p.sync.time - l.sync.time;
-            (used.get(i) == Some(&false)
-                && decoded_id(p.id.outcome).is_none()
-                && d > whi
-                && d <= c.max_delay)
-                .then_some(p)
-        }) {
-            row.class = Some(Class::Ambiguous);
-            row.right = Some(p.clone());
-            row.reason = "unassigned_undecodable".into();
-        } else {
+    let mut shared = vec![0usize; candidates.len()];
+    let mut duplicate = 0;
+    let (mut blocked_self_id, mut blocked_other, mut blocked_earlier, mut blocked_boundary) =
+        (0, 0, 0, 0);
+    if reject_reasons.is_empty() {
+        for row in rows.iter_mut().filter(|r| r.left_class == LeftClass::Ok) {
+            let rk = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| overlaps(interval(q.p, row), wlo, c.source_max))
+                .collect::<Vec<_>>();
+            row.decision_step = 3;
             row.class = Some(Class::Missing);
+            row.reason = "no_candidate".into();
+            if rk.is_empty() {
+                continue;
+            }
+            let unresolved = rk
+                .iter()
+                .copied()
+                .filter(|(_, q)| q.xtalk.is_none() && q.explained.is_none_or(|id| id == row.id))
+                .collect::<Vec<_>>();
+            for (i, _) in &unresolved {
+                if let Some(n) = shared.get_mut(*i) {
+                    *n += 1;
+                }
+            }
+            row.decision_step = 4;
+            row.reason = "explained_elsewhere".into();
+            if unresolved.is_empty() {
+                if rk.iter().any(|(_, q)| q.xtalk == Some(row.id)) {
+                    row.class = Some(Class::Ambiguous);
+                    row.reason = "xtalk_like".into();
+                }
+                continue;
+            }
+            // Step 4a uses decision_step 4; the reason distinguishes this boundary hold.
+            if let Some((_, q)) = rk
+                .iter()
+                .find(|(_, q)| q.xtalk == Some(row.id) && interval(q.p, row).1 > whi + z)
+            {
+                row.class = Some(Class::Ambiguous);
+                row.reason = "xtalk_boundary".into();
+                row.c0 = Some(q.p.clone());
+                row.right = Some(q.p.clone());
+                blocked_boundary += 1;
+                continue;
+            }
+            let (_, q) = unresolved.first().copied().ok_or(ALIGN)?;
+            row.c0 = Some(q.p.clone());
+            row.right = Some(q.p.clone());
+            row.possible_sources = q.possible.clone();
+            row.distance_violations = q.bad.clone();
+            row.later_confirmed = rk.iter().any(|(_, later)| {
+                let d = interval(later.p, row);
+                later.p.sync.time > q.p.sync.time
+                    && later.explained == Some(row.id)
+                    && d.0 > whi + z
+                    && d.1 <= c.max_delay
+            });
+            let d = interval(q.p, row);
+            row.class = Some(Class::Ambiguous);
+            if unresolved
+                .iter()
+                .skip(1)
+                .any(|(_, p)| p.p.sync.time - q.p.sync.time <= 2.0)
+            {
+                row.decision_step = 5;
+                row.reason = "tie".into();
+            } else if d.1 >= wlo && d.0 <= whi + z {
+                row.decision_step = 6;
+                row.reason = if d.0 >= wlo && d.1 <= whi + z {
+                    let ratio = row
+                        .left
+                        .as_ref()
+                        .map(|l| 20.0 * (q.p.sync.amplitude / l.sync.amplitude).log10());
+                    if ratio.is_some_and(|ratio| {
+                        cal.xtalk.as_ref().is_some_and(|x| {
+                            ratio >= x.ratio_min_db - 3.0 && ratio <= x.ratio_max_db + 3.0
+                        })
+                    }) {
+                        "xtalk_like"
+                    } else {
+                        "abnormal_near"
+                    }
+                } else {
+                    "boundary"
+                }
+                .into();
+            } else if !q.bad.is_empty() {
+                row.decision_step = 7;
+                row.reason = "source_set_distance".into();
+                blocked_self_id += 1;
+            } else if q.explained != Some(row.id) {
+                row.decision_step = 7;
+                row.reason = if q.possible.contains(&row.id) {
+                    blocked_self_id += 1;
+                    if q.possible.len() == 1 {
+                        row.class = Some(Class::IdUndecodable);
+                        "id_undecodable"
+                    } else {
+                        "correspondence"
+                    }
+                } else {
+                    "unassigned_candidate"
+                }
+                .into();
+            } else if d.0 <= whi + z || d.1 > c.max_delay {
+                row.decision_step = 8;
+                row.reason = if d.1 > c.max_delay {
+                    "out_of_support"
+                } else {
+                    "boundary"
+                }
+                .into();
+            } else {
+                row.decision_step = 9;
+                row.class = Some(Class::Normal);
+                row.reason.clear();
+                let delay = q.p.sync.time - row.left.as_ref().ok_or(ALIGN)?.sync.time;
+                row.delay = Some(delay);
+                row.corrected_delay = Some(delay - cal.channel_offset);
+                duplicate += rk
+                    .iter()
+                    .filter(|(_, p)| p.p.sync.time > q.p.sync.time && p.explained == Some(row.id))
+                    .count();
+            }
+            if matches!(
+                row.reason.as_str(),
+                "xtalk_like" | "abnormal_near" | "unassigned_candidate"
+            ) {
+                blocked_other += 1;
+            }
+            if matches!(row.reason.as_str(), "boundary" | "out_of_support") {
+                blocked_boundary += 1;
+            }
+            if (5..=7).contains(&row.decision_step) && row.later_confirmed {
+                blocked_earlier += 1;
+            }
         }
+    } else {
+        rows.clear();
     }
     Ok(Analysis {
         config: c.clone(),
@@ -699,8 +788,14 @@ pub fn match_detections(
         alignment,
         markers: rows,
         r_duplicate: duplicate,
-        r_orphan: orphan,
-        r_unassigned_undecodable: unassigned,
+        r_shared: shared.iter().filter(|n| **n > 1).count(),
+        blocked_self_id,
+        blocked_other,
+        blocked_earlier,
+        blocked_boundary,
+        outside_ids,
+        e1_suspect,
+        xtalk_candidates: xtalk_count,
         warnings,
         reject_reasons,
         e5_unchecked,
@@ -708,6 +803,7 @@ pub fn match_detections(
         x,
     })
 }
+
 pub fn analyze(
     c: &AnalysisConfig,
     calibration: Option<&Calibration>,

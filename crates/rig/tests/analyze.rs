@@ -44,9 +44,9 @@ fn b3_errors() {
         a.markers[1].right.as_ref().unwrap().id.outcome,
         IdOutcome::Corrected { .. }
     ));
-    for i in [2, 3] {
-        assert_eq!(a.markers[i].class, Some(Class::IdUndecodable));
-    }
+    assert_eq!(a.markers[2].class, Some(Class::IdUndecodable));
+    assert_eq!(a.markers[3].class, Some(Class::Ambiguous));
+    assert_eq!(a.markers[3].reason, "correspondence");
     let s = mdc_rig::report::summarize(&a, &recording(l, r), "", "");
     assert_eq!(s.count("r_corrected").unwrap(), 1);
 }
@@ -63,7 +63,8 @@ fn b4_mismatch() {
         *v = (s * 10f64.powf(-12.0 / 20.0)) as f32;
     }
     let a = run(&c, l, r);
-    assert_eq!(a.markers[2].class, Some(Class::IdMismatch));
+    assert_eq!(a.markers[2].class, Some(Class::Ambiguous));
+    assert_eq!(a.markers[2].reason, "unassigned_candidate");
 }
 #[test]
 fn b5_xtalk_and_silence() {
@@ -226,15 +227,11 @@ fn b14_all_undecodable() {
     }
     let a = run(&c, l, r);
     assert_eq!(classes(&a, Class::Normal), 0);
-    assert_eq!(classes(&a, Class::IdUndecodable), 0);
+    assert_eq!(classes(&a, Class::IdUndecodable), 4);
     assert_eq!(classes(&a, Class::Missing), 0);
-    assert_eq!(classes(&a, Class::Ambiguous), 4);
-    assert!(
-        a.markers
-            .iter()
-            .all(|r| r.reason == "unassigned_undecodable")
-    );
-    assert!(a.warnings.iter().any(|w| w == "no_latency_reference"));
+    assert_eq!(classes(&a, Class::Ambiguous), 0);
+    assert!(a.markers.iter().all(|r| r.reason == "id_undecodable"));
+    assert!(!a.warnings.iter().any(|w| w == "no_latency_reference"));
 }
 #[test]
 fn b14b_far_undecodable() {
@@ -248,8 +245,8 @@ fn b14b_far_undecodable() {
     r[t + 13000..t + 13000 + c.chirp.marker_len()].copy_from_slice(&marker);
     let a = run(&c, l, r);
     assert_eq!(classes(&a, Class::Normal), 4);
-    assert_eq!(a.markers[4].class, Some(Class::Ambiguous));
-    assert_eq!(a.markers[4].reason, "unassigned_undecodable");
+    assert_eq!(a.markers[4].class, Some(Class::IdUndecodable));
+    assert_eq!(a.markers[4].reason, "id_undecodable");
     assert_eq!(classes(&a, Class::Missing), 0);
 }
 #[test]
@@ -271,6 +268,9 @@ fn window_boundaries_duplicates_and_alignment_outlier() {
         assert_eq!(classes(&a, Class::Normal), 0);
         assert_eq!(classes(&a, Class::Ambiguous), 7);
     }
+    // The duplicate test needs xtalk fully inside the window, including L uncertainty.
+    let mut c = c;
+    c.z = 10.0;
     let mut right = Vec::new();
     for l in &left {
         for d in [4900.0, 0.0, 4800.0] {

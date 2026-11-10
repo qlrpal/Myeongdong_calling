@@ -49,8 +49,15 @@ pub const SUMMARY_HEADER: &[&str] = &[
     "ambiguous",
     "missing",
     "r_duplicate",
-    "r_orphan",
-    "r_unassigned_undecodable",
+    "r_shared",
+    "blocked_self_id",
+    "blocked_other",
+    "blocked_earlier",
+    "blocked_boundary",
+    "outside_id_count",
+    "outside_ids",
+    "e1_suspect",
+    "xtalk_candidates",
     "r_corrected",
     DETECTION_RATE,
     "latency_inclusion_rate",
@@ -78,7 +85,13 @@ pub const SUMMARY_HEADER: &[&str] = &[
     "xtalk_candidate_definition",
 ];
 pub const MARKER_HEADER: &[&str] = &[
-    "id",
+    "ordinal",
+    "codeword_index",
+    "decision_step",
+    "c0_time_samples",
+    "possible_sources",
+    "distance_violations",
+    "later_confirmed",
     "predicted_left_samples",
     "left_uncertainty_samples",
     "left_interval_min_samples",
@@ -256,7 +269,7 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
         ("e5_unchecked", a.e5_unchecked.to_string()),
         (
             "xtalk_candidate_definition",
-            "temporary:A3_confirmed_ordinal_and_L_ok;no_dist_ok_or_source_confidence".into(),
+            "A1_5.3:M_c_x_interval_overlap;pair_distance_ge_8;A3_confirmed".into(),
         ),
         ("analyzer_version", VERSION.into()),
         ("settings", a.config.identity()),
@@ -268,6 +281,14 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
     ] {
         put(k, v);
     }
+    put(
+        "outside_ids",
+        a.outside_ids
+            .iter()
+            .map(|(t, id)| format!("{t}:{id}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    );
     let aligned = |v| (a.alignment.anchors > 0).then_some(v);
     for (k, v) in [
         ("alignment_u_samples", aligned(a.alignment.u)),
@@ -312,16 +333,26 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
         ("ambiguous", amb),
         ("missing", missing),
         ("r_duplicate", a.r_duplicate),
-        ("r_orphan", a.r_orphan),
-        ("r_unassigned_undecodable", a.r_unassigned_undecodable),
+        ("r_shared", a.r_shared),
+        ("blocked_self_id", a.blocked_self_id),
+        ("blocked_other", a.blocked_other),
+        ("blocked_earlier", a.blocked_earlier),
+        ("blocked_boundary", a.blocked_boundary),
+        ("outside_id_count", a.outside_ids.len()),
+        ("e1_suspect", a.e1_suspect),
+        ("xtalk_candidates", a.xtalk_candidates),
         (
             "r_corrected",
             a.markers
                 .iter()
                 .filter(|r| {
-                    r.right
-                        .as_ref()
-                        .is_some_and(|p| matches!(p.id.outcome, crate::IdOutcome::Corrected { .. }))
+                    r.right.as_ref().is_some_and(|p| {
+                        matches!(
+                            p.id.outcome,
+                            crate::IdOutcome::Corrected { .. }
+                                | crate::IdOutcome::ErasureCorrected { .. }
+                        )
+                    })
                 })
                 .count(),
         ),
@@ -412,6 +443,7 @@ pub fn read_summary(mut r: impl Read) -> Result<RunSummary, RigError> {
             "z_basis",
             "e5_unchecked",
             "xtalk_candidate_definition",
+            "outside_ids",
         ]
         .contains(k)
     }) {
@@ -428,6 +460,12 @@ pub fn write_markers(mut w: impl Write, a: &Analysis) -> Result<(), RigError> {
             &mut w,
             &[
                 r.id.to_string(),
+                crate::codeword_of_marker(r.id).map_or_else(|| "NA".into(), |id| id.to_string()),
+                r.decision_step.to_string(),
+                number(r.c0.as_ref().map(|p| p.sync.time)),
+                format!("{:?}", r.possible_sources),
+                format!("{:?}", r.distance_violations),
+                r.later_confirmed.to_string(),
                 number(Some(r.predicted_left)),
                 number(Some(r.left_uncertainty)),
                 number(Some(r.left_interval.0)),
