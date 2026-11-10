@@ -17,3 +17,6 @@ pub use wav_in::*;
 pub mod analyze;
 pub mod calib;
 pub mod report;
+
+mod provenance;
+pub use provenance::analyzer_commit_hash;

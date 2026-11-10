@@ -1,3 +1,4 @@
+//! A0 이전 신호 전용, 실험 001과 비교 불가.
 //! Independent experiment 001 oracle. No existing test helpers are used.
 use mdc_rig::{
     analyze::{self, AnalysisConfig, Class, LeftClass},
@@ -7,7 +8,7 @@ use mdc_rig::{
 use std::{
     fs::{self, File},
     io::{BufWriter, Write},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     time::Instant,
 };
 #[derive(Clone, Debug)]
@@ -237,13 +238,80 @@ fn damage(src: &mut [f64], cfg: &ChirpConfig, kind: &str) {
         }
     }
 }
+const NOTICE: &str = "A0 이전 신호 전용, 실험 001과 비교 불가";
+
+fn assert_safe_output(path: &Path) {
+    // Resolve existing ancestors (including symlinks), then normalize nonexistent suffixes.
+    fn normalize(path: &Path) -> PathBuf {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap().join(path)
+        };
+        let mut result = PathBuf::new();
+        for part in absolute.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    result.pop();
+                }
+                other => {
+                    result.push(other.as_os_str());
+                    if result.exists() {
+                        result = result.canonicalize().unwrap();
+                    }
+                }
+            }
+        }
+        result
+    }
+    let local = normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.local"));
+    let normalized = normalize(path);
+    if let Ok(relative) = normalized.strip_prefix(local) {
+        let first = relative
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase());
+        assert!(
+            !first.is_some_and(|s| s == "001" || s.starts_with("001-backup-")),
+            "protected experiment 001 output path"
+        );
+    }
+}
 fn outdir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.local/001")
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.local/runs/exp001-harness-postA0");
+    assert_safe_output(&dir);
+    dir
+}
+#[test]
+fn rejects_protected_output_paths() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.local");
+    for suffix in [
+        "001",
+        "001/child",
+        "runs/../001/child",
+        "001-backup-2026-11-10/child",
+        "001-backup-other",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| assert_safe_output(&root.join(suffix))).is_err(),
+            "{suffix}"
+        );
+    }
+    assert_safe_output(&root.join("runs/exp001-harness-postA0"));
 }
 fn run(all: bool) {
     let now = Instant::now();
     let dir = outdir();
     fs::create_dir_all(&dir).unwrap();
+    let metadata = format!(
+        "{NOTICE}; analyzer_commit={}; marker_placement_fnv1a64=0x{:016x}",
+        analyzer_commit_hash(),
+        marker_placement_fnv1a64()
+    );
+    println!("{metadata}");
+    fs::write(dir.join("run-metadata.txt"), format!("{metadata}\n")).unwrap();
     let prefix = if all { "full" } else { "smoke" };
     let mut csv = BufWriter::new(File::create(dir.join(format!("{prefix}-cells.csv"))).unwrap());
     let mut markers =
@@ -252,6 +320,9 @@ fn run(all: bool) {
         BufWriter::new(File::create(dir.join(format!("{prefix}-failures.csv"))).unwrap());
     let mut calout =
         BufWriter::new(File::create(dir.join(format!("{prefix}-calibration.csv"))).unwrap());
+    for output in [&mut csv, &mut markers, &mut failures, &mut calout] {
+        writeln!(output, "# {metadata}").unwrap();
+    }
     writeln!(csv,"cell,group,delay,frac,db,sign,other,snr,damage,ppm,total,actual,distinguishable,normal,undecodable,mismatch,ambiguous,missing,excluded,l_not_ok,censored,false_confirm,miss,overlap_fn,overlap_fp,c4_bad,c6_bad,accuracy_max,error").unwrap();
     let header = "cell,group,id,actual,truth_delay,paths,distinguishable,injected_overlap,left_class,class,delay,overlap,false_confirm,miss,c4_bad,c6_bad,cause,evidence,c4_applicable,c5_bad,truth_censored,reason";
     writeln!(markers, "{header}").unwrap();

@@ -55,6 +55,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<Vec<_>, RigError>>()?;
         let groups = aggregate(&summaries)?;
         fs::create_dir_all(&out)?;
+        fs::write(
+            out.join("run-metadata.txt"),
+            format!(
+                "analyzer_commit={}; marker_placement_fnv1a64=0x{:016x}\n",
+                mdc_rig::analyzer_commit_hash(),
+                mdc_rig::marker_placement_fnv1a64()
+            ),
+        )?;
         write_aggregate(File::create(out.join("aggregate.csv"))?, &groups)?;
         return Ok(());
     }
@@ -83,6 +91,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let label = options.get("--label").map(String::as_str).unwrap_or("");
             let summary = summarize(&a, &rec, label, input);
             fs::create_dir_all(&out)?;
+            fs::write(
+                out.join("run-metadata.txt"),
+                format!(
+                    "analyzer_commit={}; marker_placement_fnv1a64=0x{:016x}\n",
+                    mdc_rig::analyzer_commit_hash(),
+                    mdc_rig::marker_placement_fnv1a64()
+                ),
+            )?;
             let stem = Path::new(input)
                 .file_stem()
                 .and_then(|s| s.to_str())

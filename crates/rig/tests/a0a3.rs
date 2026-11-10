@@ -63,6 +63,7 @@ fn a0_placement_reproduction_and_hash() {
             (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
         });
     assert_eq!(hash, 0xf04865d91d86aa86);
+    assert_eq!(marker_placement_fnv1a64(), hash);
     println!("A0 FNV-1a64 LE u16: {hash:016x}");
 }
 
@@ -393,4 +394,92 @@ fn a0_window_distance_bounds_and_attainment() {
     println!(
         "6c-win code-distance bounds: Corrected/ErasureCorrected t>=7, Exact t>=8; boundaries attained by ordinals 0 -> 1"
     );
+}
+
+#[test]
+#[ignore = "6c-win exhaustive actual error positions; run this test in release"]
+fn a3_6c_win_exhaustive() {
+    let table = marker_placement();
+    let errors: Vec<_> = (0..=8).map(masks).collect();
+    let mut counts = [0u64; 3];
+    let mut pairs = [
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    ];
+    let mut first = [None; 3];
+    let mut wrong = 0u64;
+    let mut exact_below_eight = 0u64;
+    // Each ordered pair belongs to a six-ordinal window iff 0 < |k-m| <= 5.
+    // Count each distinct ordered pair once, even if it occurs in several windows.
+    for e in 0..=16 {
+        let erasure = if e == 0 { 0 } else { 1u16 << (e - 1) };
+        // Production decoder, all bit observations. Reuse only identical inputs.
+        let lookup: Vec<_> = (0..=u16::MAX)
+            .map(|bits| decode_id(bits & !erasure, erasure))
+            .collect();
+        for (k, &source) in table.iter().enumerate() {
+            let word = encode_marker_id(source).unwrap();
+            // Explicit ordered targets in the union of all six-ordinal windows.
+            let targets: Vec<_> = (k.saturating_sub(5)..=(k + 5).min(table.len() - 1))
+                .filter(|&m| m != k)
+                .collect();
+            for (t, flips) in errors.iter().enumerate().take(if e == 0 { 9 } else { 8 }) {
+                for &flip in flips.iter().filter(|&&f| f & erasure == 0) {
+                    let outcome = lookup[usize::from((word ^ flip) & !erasure)];
+                    for &m in &targets {
+                        let target = table[m];
+                        let confirmed = match outcome {
+                            IdOutcome::Exact(i) | IdOutcome::Corrected { index: i, .. }
+                                if e == 0 =>
+                            {
+                                i == target
+                            }
+                            IdOutcome::ErasureCorrected { index: i, .. } if e != 0 => i == target,
+                            _ => false,
+                        };
+                        if !confirmed {
+                            continue;
+                        }
+                        if t <= 6 {
+                            wrong += 1;
+                        }
+                        if t <= 7 && matches!(outcome, IdOutcome::Exact(_)) {
+                            exact_below_eight += 1;
+                        }
+                        let category = match (e == 0, t, outcome) {
+                            (true, 7, IdOutcome::Corrected { .. }) => Some(0),
+                            (true, 8, IdOutcome::Exact(_)) => Some(1),
+                            (false, 7, IdOutcome::ErasureCorrected { .. }) => Some(2),
+                            _ => None,
+                        };
+                        if let Some(c) = category {
+                            counts[c] += 1;
+                            pairs[c].insert((k, m));
+                            first[c].get_or_insert((k, m, flip, erasure));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("6c-win t<=6 wrong={wrong}; Exact t<=7 wrong={exact_below_eight}");
+    for (c, label) in [
+        "e=0 Corrected t=7",
+        "e=0 Exact t=8",
+        "e=1 ErasureCorrected t=7",
+    ]
+    .iter()
+    .enumerate()
+    {
+        println!(
+            "6c-win {label}: cases={} pairs={} first(k,m,error_mask,erasure_mask)={:?}",
+            counts[c],
+            pairs[c].len(),
+            first[c]
+        );
+        assert!(counts[c] > 0);
+    }
+    assert_eq!(wrong, 0);
+    assert_eq!(exact_below_eight, 0);
 }

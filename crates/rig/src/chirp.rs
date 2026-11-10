@@ -115,6 +115,16 @@ pub fn marker_placement() -> &'static [u16] {
     &MARKER_CODEWORDS
 }
 
+/// FNV-1a 64 over the placement indices as little-endian u16 bytes.
+pub fn marker_placement_fnv1a64() -> u64 {
+    MARKER_CODEWORDS
+        .iter()
+        .flat_map(|c| c.to_le_bytes())
+        .fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+        })
+}
+
 /// Returns the codeword index assigned to a marker ordinal.
 pub fn codeword_of_marker(i: u16) -> Option<u16> {
     MARKER_CODEWORDS.get(usize::from(i)).copied()
