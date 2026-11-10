@@ -10,20 +10,50 @@ pub struct Xtalk {
     pub ratio_max_db: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub enum CalibrationState {
+    NotPerformed,
+    ValidNoDetection,
+    Insufficient,
+    Measured(Xtalk),
+}
+impl CalibrationState {
+    pub fn as_ref(&self) -> Option<&Xtalk> {
+        if let Self::Measured(x) = self {
+            Some(x)
+        } else {
+            None
+        }
+    }
+    pub fn is_none(&self) -> bool {
+        self.as_ref().is_none()
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
     pub channel_offset: f64,
-    pub xtalk: Option<Xtalk>,
+    pub xtalk: CalibrationState,
+    pub z: f64,
+    pub x: f64,
+    pub z_basis: String,
     pub source_files: String,
 }
 impl Calibration {
     pub fn validate(&self) -> Result<(), RigError> {
+        if !self.z.is_finite()
+            || !(0.0..=u32::MAX as f64).contains(&self.z)
+            || !self.x.is_finite()
+            || !(0.0..=u32::MAX as f64).contains(&self.x)
+            || self.z_basis.contains(['\r', '\n'])
+        {
+            return Err(RigError::Invalid("calibration safety settings"));
+        }
         if !self.channel_offset.is_finite()
             || self.channel_offset.abs() > u32::MAX as f64
             || self.source_files.contains(['\r', '\n'])
         {
             return Err(RigError::Invalid("calibration offset or source_files"));
         }
-        if let Some(x) = &self.xtalk
+        if let Some(x) = self.xtalk.as_ref()
             && (![x.delay_min, x.delay_max, x.ratio_min_db, x.ratio_max_db]
                 .iter()
                 .all(|v| v.is_finite())
@@ -49,7 +79,7 @@ impl Calibration {
     }
     /// Exact in-memory comparison identity; provenance is included deliberately.
     pub fn identity(&self) -> String {
-        format!("version=1;{self:?}")
+        format!("version=2;{self:?}")
     }
     pub fn to_text(&self) -> Result<String, RigError> {
         self.validate()?;
@@ -59,15 +89,25 @@ impl Calibration {
                 .map_or_else(|| "none".into(), |x| format!("{:.12}", f(x)))
         };
         Ok(format!(
-            "version=1\nchannel_offset={:.12}\nxtalk_delay_min={}\nxtalk_delay_max={}\nxtalk_ratio_min_db={}\nxtalk_ratio_max_db={}\nsource_files={}\n",
+            "version=2\nchannel_offset={:.12}\nxtalk_delay_min={}\nxtalk_delay_max={}\nxtalk_ratio_min_db={}\nxtalk_ratio_max_db={}\nsource_files={}\nstate={}\nz={:?}\nx={:?}\nz_basis={}\n",
             self.channel_offset,
             optional(|x| x.delay_min),
             optional(|x| x.delay_max),
             optional(|x| x.ratio_min_db),
             optional(|x| x.ratio_max_db),
-            self.source_files
+            self.source_files,
+            match self.xtalk {
+                CalibrationState::NotPerformed => "not_performed",
+                CalibrationState::ValidNoDetection => "valid_no_detection",
+                CalibrationState::Insufficient => "insufficient",
+                CalibrationState::Measured(_) => "measured",
+            },
+            self.z,
+            self.x,
+            self.z_basis
         ))
     }
+    /// Version 1 is rejected: it cannot distinguish unperformed from valid no detection.
     pub fn from_text(s: &str) -> Result<Self, RigError> {
         const BAD: RigError = RigError::Invalid("calibration file");
         let mut values = BTreeMap::new();
@@ -78,7 +118,7 @@ impl Calibration {
             }
         }
         let get = |k| values.get(k).copied().ok_or(BAD);
-        if values.len() != 7 || get("version")? != "1" {
+        if values.len() != 11 || get("version")? != "2" {
             return Err(BAD);
         }
         let number = |k| -> Result<f64, RigError> { get(k)?.parse().map_err(|_| BAD) };
@@ -106,7 +146,16 @@ impl Calibration {
         };
         let result = Self {
             channel_offset: number("channel_offset")?,
-            xtalk,
+            xtalk: match (get("state")?, xtalk) {
+                ("not_performed", None) => CalibrationState::NotPerformed,
+                ("valid_no_detection", None) => CalibrationState::ValidNoDetection,
+                ("insufficient", None) => CalibrationState::Insufficient,
+                ("measured", Some(x)) => CalibrationState::Measured(x),
+                _ => return Err(BAD),
+            },
+            z: number("z")?,
+            x: number("x")?,
+            z_basis: get("z_basis")?.into(),
             source_files: get("source_files")?.into(),
         };
         result.validate()?;
@@ -169,7 +218,10 @@ pub fn calibrate_offset(
     };
     let cal = Calibration {
         channel_offset: center,
-        xtalk: None,
+        xtalk: CalibrationState::NotPerformed,
+        z: 0.0,
+        x: 0.0,
+        z_basis: String::new(),
         source_files: source.into(),
     };
     cal.validate()?;
@@ -184,10 +236,29 @@ pub fn calibrate_xtalk(
     cal.validate()?;
     let pairs = pairs(c, rec)?;
     let mut next = cal.clone();
-    next.xtalk = if pairs.is_empty() {
-        None
+    let left = detect_channel(c, &rec.left)?;
+    let successful = left
+        .iter()
+        .filter_map(|p| decoded_id(p.id.outcome))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let left_aligned = crate::analyze::align_left(c, &left).is_ok();
+    let sufficient = c.no_detection.as_ref().is_some_and(|v| {
+        left_aligned
+            && successful >= v.min_left
+            && rec.left.len() >= v.min_frames
+            && crate::amplitude_gate(&c.detector, &rec.right) <= v.detection_limit
+    });
+    next.xtalk = if !left_aligned || successful < 3 {
+        CalibrationState::Insufficient
+    } else if pairs.is_empty() {
+        if sufficient {
+            CalibrationState::ValidNoDetection
+        } else {
+            CalibrationState::Insufficient
+        }
     } else {
-        Some(Xtalk {
+        CalibrationState::Measured(Xtalk {
             delay_min: pairs.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
             delay_max: pairs.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
             ratio_min_db: pairs.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),

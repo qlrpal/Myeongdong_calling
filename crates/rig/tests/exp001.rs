@@ -418,18 +418,24 @@ fn run(all: bool) {
         let cal = Calibration {
             channel_offset: 0.,
             xtalk: if c.group == "G2" || c.group == "G4" {
-                c.other.map(|(d, db, _)| Xtalk {
-                    delay_min: d,
-                    delay_max: d,
-                    ratio_min_db: db,
-                    ratio_max_db: db,
-                })
+                c.other
+                    .map(|(d, db, _)| Xtalk {
+                        delay_min: d,
+                        delay_max: d,
+                        ratio_min_db: db,
+                        ratio_max_db: db,
+                    })
+                    .map(mdc_rig::calib::CalibrationState::Measured)
+                    .unwrap_or(mdc_rig::calib::CalibrationState::ValidNoDetection)
             } else {
-                None
+                mdc_rig::calib::CalibrationState::ValidNoDetection
             },
+            z: 0.0,
+            x: 0.0,
+            z_basis: "synthetic".into(),
             source_files: "independent injected truth".into(),
         };
-        let (wlo, whi) = if let Some(x) = &cal.xtalk {
+        let (wlo, whi) = if let Some(x) = cal.xtalk.as_ref() {
             (x.delay_min.min(0.) - 2., x.delay_max.max(0.) + 2.)
         } else {
             (-2., 2.)
@@ -446,7 +452,7 @@ fn run(all: bool) {
             .unwrap_or_default();
         if c.group == "G4" {
             let mut measured = Calibration {
-                xtalk: None,
+                xtalk: mdc_rig::calib::CalibrationState::ValidNoDetection,
                 ..cal.clone()
             };
             let pairs = calibrate_xtalk(&ac, &rec, &mut measured, "G4");

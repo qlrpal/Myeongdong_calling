@@ -84,7 +84,7 @@ fn b6_weak_real_xtalk() {
         *dst += *src * 10f32.powf(-10.0 / 20.0);
     }
     let cal = Calibration {
-        xtalk: Some(Xtalk {
+        xtalk: CalibrationState::Measured(Xtalk {
             delay_min: 0.0,
             delay_max: 0.0,
             ratio_min_db: -10.0,
@@ -155,7 +155,12 @@ fn b9_exact_only() {
     let mut l = signal(&c);
     let r = shifted(&l, 4800, 1.0);
     replace_bits(&c, &mut l, 1, 0, &[0, 1, 2], false);
-    assert!(analyze(&c, Some(&calibration()), &recording(l, r)).is_err());
+    assert!(
+        analyze(&c, Some(&calibration()), &recording(l, r))
+            .unwrap()
+            .reject_reasons
+            .contains(&RejectReason::AlignmentFailed)
+    );
 }
 #[test]
 #[ignore = "sinc resampling acceptance; run in release"]
@@ -194,9 +199,14 @@ fn b11_calibration() {
     let tmp = Temp::new("calibration");
     cal.write(tmp.0.join("cal.txt")).unwrap();
     assert!(Calibration::read(tmp.0.join("cal.txt")).is_ok());
-    assert!(analyze(&c, None, &rec).is_err());
+    assert!(
+        analyze(&c, None, &rec)
+            .unwrap()
+            .reject_reasons
+            .contains(&RejectReason::CalibrationNotPerformed)
+    );
     for invalid in [
-        text.replace("version=1", "version=2"),
+        text.replace("version=2", "version=1"),
         text.replace("channel_offset=", "channel_offset=NaN"),
         format!("{text}version=1\n"),
     ] {

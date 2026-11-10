@@ -94,9 +94,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             fs::write(
                 out.join("run-metadata.txt"),
                 format!(
-                    "analyzer_commit={}; marker_placement_fnv1a64=0x{:016x}\n",
+                    "analyzer_commit={}; marker_placement_fnv1a64=0x{:016x}; analysis_mode={:?}; uncertainty_note=u and u_L are residual-based estimates, not guaranteed bounds.\n",
                     mdc_rig::analyzer_commit_hash(),
-                    mdc_rig::marker_placement_fnv1a64()
+                    mdc_rig::marker_placement_fnv1a64(),
+                    config.mode
                 ),
             )?;
             let stem = Path::new(input)
@@ -109,9 +110,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &summary,
             )?;
             println!(
-                "analyzed {} markers; warnings={}",
+                "analyzed {} markers; rejected={:?}; warnings={}; mode={:?}",
                 a.markers.len(),
-                a.warnings.join(";")
+                a.reject_reasons,
+                a.warnings.join(";"),
+                config.mode
             );
         }
         "calibrate-offset" => {

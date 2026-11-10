@@ -1,15 +1,42 @@
 //! Offline channel alignment and conservative marker matching. Times are ADC samples.
-use crate::calib::Calibration;
+use crate::calib::{Calibration, CalibrationState};
 use crate::{
     ChirpConfig, DetectorConfig, IdOutcome, IdReading, RigError, StereoRecording, SyncCandidate,
     amplitude_gate, detect_sync, marker_of_codeword, marker_schedule, read_id,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisMode {
+    Measurement,
+    Synthetic,
+}
+#[derive(Clone, Debug)]
+/// Explicit rig-validation thresholds. detection_limit is the maximum linear
+/// amplitude gate allowed for a no-detection recording (not a dB value).
+pub struct NoDetectionCriteria {
+    pub min_left: usize,
+    pub min_frames: usize,
+    pub detection_limit: f64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectReason {
+    CalibrationNotPerformed,
+    CalibrationInsufficient,
+    ZBasisMissing,
+    PpmOutOfRange,
+    AlignmentFailed,
+    CalibrationMismatch,
+}
 #[derive(Clone, Debug)]
 pub struct AnalysisConfig {
     pub chirp: ChirpConfig,
     pub detector: DetectorConfig,
     pub max_delay: f64,
+    pub mode: AnalysisMode,
+    pub z: f64,
+    pub x: f64,
+    pub xtalk_min_candidates: usize,
+    pub no_detection: Option<NoDetectionCriteria>,
 }
 impl Default for AnalysisConfig {
     fn default() -> Self {
@@ -17,11 +44,30 @@ impl Default for AnalysisConfig {
             chirp: ChirpConfig::default(),
             detector: DetectorConfig::default(),
             max_delay: 48000.0,
+            mode: AnalysisMode::Measurement,
+            z: 0.0,
+            x: 0.0,
+            xtalk_min_candidates: 10,
+            no_detection: None,
         }
     }
 }
 impl AnalysisConfig {
     pub fn validate(&self) -> Result<(), RigError> {
+        if !self.z.is_finite()
+            || !(0.0..=u32::MAX as f64).contains(&self.z)
+            || !self.x.is_finite()
+            || !(0.0..=u32::MAX as f64).contains(&self.x)
+            || self.xtalk_min_candidates == 0
+            || self.no_detection.as_ref().is_some_and(|v| {
+                v.min_left < 3
+                    || v.min_frames == 0
+                    || !v.detection_limit.is_finite()
+                    || v.detection_limit <= 0.0
+            })
+        {
+            return Err(RigError::Invalid("analysis safety settings"));
+        }
         self.chirp.validate()?;
         self.detector.validate()?;
         if !self.max_delay.is_finite() || self.max_delay <= 0.0 || self.max_delay > u32::MAX as f64
@@ -33,8 +79,15 @@ impl AnalysisConfig {
     /// Lossless settings identity, including all signal, detector and matching fields.
     pub fn identity(&self) -> String {
         format!(
-            "{:?};{:?};max_delay={:?};overlap=marker_len;alignment=exact_ls;anchor_residual_limit=interval/4;l_search=interval/4;undecodable_search=(interval-marker_len)/2;mismatch_search=interval/2;xtalk_margin_samples=2;xtalk_ratio_margin_db=3;normal_selection=earliest;mode=measurement",
-            self.chirp, self.detector, self.max_delay
+            "{:?};{:?};max_delay={:?};overlap=marker_len;alignment=exact_ls;anchor_residual_limit=interval/4;l_search=interval/4;undecodable_search=(interval-marker_len)/2;mismatch_search=interval/2;xtalk_margin_samples=2;xtalk_ratio_margin_db=3;normal_selection=earliest;mode={:?};Z={:?};X={:?};N={};no_detection={:?}",
+            self.chirp,
+            self.detector,
+            self.max_delay,
+            self.mode,
+            self.z,
+            self.x,
+            self.xtalk_min_candidates,
+            self.no_detection
         )
     }
 }
@@ -63,6 +116,8 @@ pub fn detect_channel(c: &AnalysisConfig, x: &[f32]) -> Result<Vec<Detection>, R
         .collect())
 }
 #[derive(Clone, Debug)]
+/// anchors == 0 denotes failed alignment in a rejected Analysis; fit fields are
+/// placeholders and must not be interpreted as estimates.
 pub struct Alignment {
     pub offset: f64,
     pub ratio: f64,
@@ -70,6 +125,44 @@ pub struct Alignment {
     pub residual_rms: f64,
     pub residual_max: f64,
     pub anchors: usize,
+    /// u and u_L = u*sum|h_i| are estimates derived from anchor residuals, not guaranteed upper bounds.
+    pub u: f64,
+    pub anchor_times: Vec<f64>,
+}
+impl Alignment {
+    pub fn predict(&self, t: f64) -> f64 {
+        if self.anchors == 0 {
+            return f64::NAN;
+        }
+        self.offset + self.ratio * t
+    }
+    /// Least-squares h_i weights on scheduled anchor times.
+    pub fn weights(&self, t: f64) -> Vec<f64> {
+        let n = self.anchor_times.len() as f64;
+        let mean = self.anchor_times.iter().sum::<f64>() / n;
+        let xx = self
+            .anchor_times
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>();
+        self.anchor_times
+            .iter()
+            .map(|x| 1.0 / n + (t - mean) * (x - mean) / xx)
+            .collect()
+    }
+    /// u and u_L = u*sum|h_i| are estimates derived from anchor residuals, not guaranteed upper bounds.
+    pub fn uncertainty(&self, t: f64) -> f64 {
+        if self.anchors == 0 {
+            return f64::NAN;
+        }
+        self.u
+            * self
+                .weights(t)
+                .iter()
+                .map(|h| h.abs())
+                .sum::<f64>()
+                .max(1.0)
+    }
 }
 pub(crate) fn median(v: &[f64]) -> Option<f64> {
     let mut v: Vec<_> = v.iter().copied().filter(|v| v.is_finite()).collect();
@@ -128,6 +221,29 @@ pub fn align_left(c: &AnalysisConfig, left: &[Detection]) -> Result<Alignment, R
     if residual_max > c.chirp.interval_len as f64 / 4.0 {
         return Err(ALIGN);
     }
+    let min = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let max = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    if max - min < 2.0 * c.chirp.interval_len as f64 {
+        return Err(ALIGN);
+    }
+    let &(x_a, y_a) = points
+        .iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .ok_or(ALIGN)?;
+    let &(x_b, y_b) = points
+        .iter()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .ok_or(ALIGN)?;
+    let dx = x_b - x_a;
+    let dy = y_b - y_a;
+    let u = (residual_max + 1.0).max(2.0);
+    // For a least-squares line, dy - r*dx = e_b - e_a, so the residual
+    // bound automatically satisfies this explicit consistency check.
+    // Effective defenses: constant range >= 2*interval, residual <= interval/4,
+    // r > 0 (least_squares), and |ppm| > 100 rejected by match_detections.
+    if dy <= 0.0 || (dy - r * dx).abs() > 2.0 * u {
+        return Err(ALIGN);
+    }
     Ok(Alignment {
         offset: a,
         ratio: r,
@@ -135,11 +251,14 @@ pub fn align_left(c: &AnalysisConfig, left: &[Detection]) -> Result<Alignment, R
         residual_rms: (errors.iter().map(|e| e * e).sum::<f64>() / errors.len() as f64).sqrt(),
         residual_max,
         anchors: points.len(),
+        u,
+        anchor_times: points.iter().map(|p| p.0).collect(),
     })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftClass {
     Ok,
+    Ambiguous,
     IdErased,
     IdUndecodable,
     IdMismatch,
@@ -158,6 +277,10 @@ pub enum Class {
 pub struct MarkerResult {
     pub id: u16,
     pub predicted_left: f64,
+    /// u and u_L = u*sum|h_i| are estimates derived from anchor residuals, not guaranteed upper bounds.
+    pub left_uncertainty: f64,
+    /// u and u_L = u*sum|h_i| are estimates derived from anchor residuals, not guaranteed upper bounds.
+    pub left_interval: (f64, f64),
     pub left_class: LeftClass,
     pub left_extra: usize,
     pub left: Option<Detection>,
@@ -181,6 +304,10 @@ pub struct Analysis {
     pub r_orphan: usize,
     pub r_unassigned_undecodable: usize,
     pub warnings: Vec<String>,
+    pub reject_reasons: Vec<RejectReason>,
+    pub e5_unchecked: bool,
+    pub z: f64,
+    pub x: f64,
 }
 /// Analyze pre-detected channels, also used by independent validation harnesses.
 pub fn match_detections(
@@ -191,7 +318,15 @@ pub fn match_detections(
     right: &[Detection],
 ) -> Result<Analysis, RigError> {
     c.validate()?;
-    let cal = calibration.ok_or(RigError::Invalid("판정 불가: calibration required"))?;
+    let absent = Calibration {
+        channel_offset: 0.0,
+        xtalk: CalibrationState::NotPerformed,
+        z: 0.0,
+        x: 0.0,
+        z_basis: String::new(),
+        source_files: String::new(),
+    };
+    let cal = calibration.unwrap_or(&absent);
     cal.validate()?;
     if left.iter().chain(right).any(|p| {
         !p.sync.time.is_finite()
@@ -204,7 +339,59 @@ pub fn match_detections(
     }) {
         return Err(RigError::Invalid("non-finite or invalid detection"));
     }
-    let alignment = align_left(c, left)?;
+    let mut reject_reasons = Vec::new();
+    match cal.xtalk {
+        CalibrationState::NotPerformed => {
+            reject_reasons.push(RejectReason::CalibrationNotPerformed)
+        }
+        CalibrationState::Insufficient => {
+            reject_reasons.push(RejectReason::CalibrationInsufficient)
+        }
+        _ => {}
+    }
+    if c.mode == AnalysisMode::Measurement && cal.z_basis.trim().is_empty() {
+        reject_reasons.push(RejectReason::ZBasisMissing);
+    }
+    let (z, x) = if c.mode == AnalysisMode::Synthetic {
+        (c.z, c.x)
+    } else {
+        (cal.z, cal.x)
+    };
+    let alignment = match align_left(c, left) {
+        Ok(a) => {
+            // 1e-8 ppm only absorbs floating-point roundoff at the inclusive boundary.
+            if a.ppm.abs() > 100.0 + 1e-8 {
+                reject_reasons.push(RejectReason::PpmOutOfRange);
+            }
+            a
+        }
+        Err(_) => {
+            reject_reasons.push(RejectReason::AlignmentFailed);
+            return Ok(Analysis {
+                config: c.clone(),
+                calibration: cal.clone(),
+                alignment: Alignment {
+                    offset: 0.0,
+                    ratio: 1.0,
+                    ppm: 0.0,
+                    residual_rms: 0.0,
+                    residual_max: 0.0,
+                    anchors: 0,
+                    u: 2.0,
+                    anchor_times: Vec::new(),
+                },
+                markers: Vec::new(),
+                r_duplicate: 0,
+                r_orphan: 0,
+                r_unassigned_undecodable: 0,
+                warnings: vec!["E5_unchecked".into()],
+                reject_reasons,
+                e5_unchecked: true,
+                z,
+                x,
+            });
+        }
+    };
     let (wlo, whi) = cal.window();
     let mut rows = Vec::new();
     for (id, start, _) in marker_schedule(&c.chirp)? {
@@ -215,11 +402,29 @@ pub fn match_detections(
             .iter()
             .filter(|p| (p.sync.time - predicted).abs() <= c.chirp.interval_len as f64 / 4.0)
             .collect();
-        let selected = candidates
+        let mut confirmed: Vec<&Detection> = left
             .iter()
-            .find(|p| decoded_id(p.id.outcome) == Some(id))
-            .copied()
-            .or_else(|| {
+            .filter(|p| decoded_id(p.id.outcome) == Some(id))
+            .collect();
+        confirmed.sort_by(|a, b| b.sync.amplitude.total_cmp(&a.sync.amplitude));
+        let mut unique: Vec<&Detection> = Vec::new();
+        for p in confirmed {
+            if !unique
+                .iter()
+                .any(|q| (p.sync.time - q.sync.time).abs() <= 2.0)
+            {
+                unique.push(p);
+            }
+        }
+        let ambiguous = unique.iter().any(|p| {
+            unique
+                .iter()
+                .any(|q| (p.sync.time - q.sync.time).abs() > alignment.u)
+        });
+        let selected = if ambiguous {
+            None
+        } else {
+            unique.first().copied().or_else(|| {
                 candidates
                     .iter()
                     .min_by(|a, b| {
@@ -228,9 +433,12 @@ pub fn match_detections(
                             .total_cmp(&(b.sync.time - predicted).abs())
                     })
                     .copied()
-            });
+            })
+        };
         let lc = if censored {
             LeftClass::Censored
+        } else if ambiguous {
+            LeftClass::Ambiguous
         } else {
             match selected.map(|p| p.id.outcome) {
                 Some(i) if decoded_id(i) == Some(id) => LeftClass::Ok,
@@ -243,6 +451,16 @@ pub fn match_detections(
         rows.push(MarkerResult {
             id,
             predicted_left: predicted,
+            left_uncertainty: alignment.uncertainty(start as f64),
+            left_interval: {
+                let u = alignment.uncertainty(start as f64);
+                let actual = if lc == LeftClass::Ok {
+                    selected.map_or(predicted, |p| p.sync.time)
+                } else {
+                    predicted
+                };
+                (actual.min(predicted) - u, actual.max(predicted) + u)
+            },
             left_class: lc,
             left_extra: candidates.len().saturating_sub(1),
             left: selected.cloned(),
@@ -263,7 +481,52 @@ pub fn match_detections(
             }),
             delay: None,
             corrected_delay: None,
-            reason: String::new(),
+            reason: if lc == LeftClass::Ambiguous {
+                "l_ambiguous".into()
+            } else {
+                String::new()
+            },
+        });
+    }
+    // Temporary A6: A3-confirmed ordinal and L_ok only; no dist_ok/source confidence yet.
+    let mut xtalk_count = 0;
+    let mut outside = false;
+    for row in rows.iter().filter(|r| r.left_class == LeftClass::Ok) {
+        if let Some(l) = &row.left {
+            for p in right
+                .iter()
+                .filter(|p| decoded_id(p.id.outcome) == Some(row.id))
+            {
+                let d = p.sync.time - l.sync.time;
+                if d > wlo - x && d <= whi + z + x {
+                    xtalk_count += 1;
+                    outside |= d < wlo || d > whi + z;
+                }
+            }
+        }
+    }
+    let e5_unchecked = xtalk_count < c.xtalk_min_candidates;
+    if !e5_unchecked && outside {
+        reject_reasons.push(RejectReason::CalibrationMismatch);
+    }
+    if !reject_reasons.is_empty() {
+        return Ok(Analysis {
+            config: c.clone(),
+            calibration: cal.clone(),
+            alignment,
+            markers: Vec::new(),
+            r_duplicate: 0,
+            r_orphan: 0,
+            r_unassigned_undecodable: 0,
+            warnings: if e5_unchecked {
+                vec!["E5_unchecked".into()]
+            } else {
+                Vec::new()
+            },
+            reject_reasons,
+            e5_unchecked,
+            z,
+            x,
         });
     }
     // Every R candidate has one disposition: normal, duplicate, near, orphan, or undecoded.
@@ -368,6 +631,9 @@ pub fn match_detections(
         }
     }
     let mut warnings = Vec::new();
+    if e5_unchecked {
+        warnings.push("E5_unchecked".into());
+    }
     if dhat.is_none() {
         warnings.push("no_latency_reference".into());
     }
@@ -436,6 +702,10 @@ pub fn match_detections(
         r_orphan: orphan,
         r_unassigned_undecodable: unassigned,
         warnings,
+        reject_reasons,
+        e5_unchecked,
+        z,
+        x,
     })
 }
 pub fn analyze(
@@ -443,9 +713,6 @@ pub fn analyze(
     calibration: Option<&Calibration>,
     rec: &StereoRecording,
 ) -> Result<Analysis, RigError> {
-    if calibration.is_none() {
-        return Err(RigError::Invalid("판정 불가: calibration required"));
-    }
     if rec.left.len() != rec.right.len() {
         return Err(RigError::Invalid("channel length mismatch"));
     }

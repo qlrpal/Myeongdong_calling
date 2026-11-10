@@ -32,6 +32,7 @@ pub const SUMMARY_HEADER: &[&str] = &[
     "alignment_residual_rms_samples",
     "alignment_residual_max_samples",
     "alignment_anchors",
+    "alignment_u_samples",
     "observable",
     "censored",
     "l_ok",
@@ -39,6 +40,7 @@ pub const SUMMARY_HEADER: &[&str] = &[
     "l_id_undecodable",
     "l_id_mismatch",
     "l_missing",
+    "l_ambiguous",
     "l_extra",
     "l_evaluable_rate",
     "normal",
@@ -65,10 +67,22 @@ pub const SUMMARY_HEADER: &[&str] = &[
     "p99_ms",
     "min_ms",
     "max_ms",
+    "reject_reasons",
+    "calibration_state",
+    "z_samples",
+    "x_samples",
+    "xtalk_min_candidates",
+    "analysis_mode",
+    "z_basis",
+    "e5_unchecked",
+    "xtalk_candidate_definition",
 ];
 pub const MARKER_HEADER: &[&str] = &[
     "id",
     "predicted_left_samples",
+    "left_uncertainty_samples",
+    "left_interval_min_samples",
+    "left_interval_max_samples",
     "left_class",
     "left_extra",
     "left_time_samples",
@@ -229,6 +243,21 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
     let missing = count(Class::Missing);
     let (lo, hi) = a.calibration.window();
     for (k, v) in [
+        ("reject_reasons", format!("{:?}", a.reject_reasons)),
+        ("calibration_state", format!("{:?}", a.calibration.xtalk)),
+        ("z_samples", number(Some(a.z))),
+        ("x_samples", number(Some(a.x))),
+        (
+            "xtalk_min_candidates",
+            a.config.xtalk_min_candidates.to_string(),
+        ),
+        ("analysis_mode", format!("{:?}", a.config.mode)),
+        ("z_basis", a.calibration.z_basis.clone()),
+        ("e5_unchecked", a.e5_unchecked.to_string()),
+        (
+            "xtalk_candidate_definition",
+            "temporary:A3_confirmed_ordinal_and_L_ok;no_dist_ok_or_source_confidence".into(),
+        ),
         ("analyzer_version", VERSION.into()),
         ("settings", a.config.identity()),
         ("calibration", a.calibration.identity()),
@@ -239,22 +268,24 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
     ] {
         put(k, v);
     }
+    let aligned = |v| (a.alignment.anchors > 0).then_some(v);
     for (k, v) in [
+        ("alignment_u_samples", aligned(a.alignment.u)),
         ("window_min_samples", Some(lo)),
         ("window_max_samples", Some(hi)),
         ("duration_seconds", Some(rec.left.len() as f64 / 48000.0)),
         ("peak_left_dbfs", rec.peak_left_dbfs),
         ("peak_right_dbfs", rec.peak_right_dbfs),
-        ("alignment_offset_samples", Some(a.alignment.offset)),
-        ("alignment_ratio", Some(a.alignment.ratio)),
-        ("alignment_ppm", Some(a.alignment.ppm)),
+        ("alignment_offset_samples", aligned(a.alignment.offset)),
+        ("alignment_ratio", aligned(a.alignment.ratio)),
+        ("alignment_ppm", aligned(a.alignment.ppm)),
         (
             "alignment_residual_rms_samples",
-            Some(a.alignment.residual_rms),
+            aligned(a.alignment.residual_rms),
         ),
         (
             "alignment_residual_max_samples",
-            Some(a.alignment.residual_max),
+            aligned(a.alignment.residual_max),
         ),
     ] {
         put(k, number(v));
@@ -302,6 +333,7 @@ pub fn summarize(a: &Analysis, rec: &StereoRecording, label: &str, input: &str) 
         ("l_id_undecodable", LeftClass::IdUndecodable),
         ("l_id_mismatch", LeftClass::IdMismatch),
         ("l_missing", LeftClass::Missing),
+        ("l_ambiguous", LeftClass::Ambiguous),
     ] {
         put(
             k,
@@ -370,11 +402,19 @@ pub fn read_summary(mut r: impl Read) -> Result<RunSummary, RigError> {
     let result = RunSummary {
         fields: h.iter().cloned().zip(values.iter().cloned()).collect(),
     };
-    for k in SUMMARY_HEADER
-        .iter()
-        .skip(7)
-        .filter(|k| !["truncated", "warnings"].contains(k))
-    {
+    for k in SUMMARY_HEADER.iter().skip(7).filter(|k| {
+        ![
+            "truncated",
+            "warnings",
+            "reject_reasons",
+            "calibration_state",
+            "analysis_mode",
+            "z_basis",
+            "e5_unchecked",
+            "xtalk_candidate_definition",
+        ]
+        .contains(k)
+    }) {
         result.value(k)?;
     }
     Ok(result)
@@ -389,6 +429,9 @@ pub fn write_markers(mut w: impl Write, a: &Analysis) -> Result<(), RigError> {
             &[
                 r.id.to_string(),
                 number(Some(r.predicted_left)),
+                number(Some(r.left_uncertainty)),
+                number(Some(r.left_interval.0)),
+                number(Some(r.left_interval.1)),
                 format!("{:?}", r.left_class),
                 r.left_extra.to_string(),
                 number(l.map(|p| p.sync.time)),

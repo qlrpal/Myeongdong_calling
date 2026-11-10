@@ -4,6 +4,7 @@ use mdc_rig::calib::Calibration;
 use mdc_rig::*;
 pub fn config(n: usize) -> AnalysisConfig {
     AnalysisConfig {
+        mode: mdc_rig::analyze::AnalysisMode::Synthetic,
         chirp: ChirpConfig {
             marker_count: n,
             lead_silence: 4800,
@@ -23,8 +24,11 @@ pub fn signal(c: &AnalysisConfig) -> Vec<f32> {
 pub fn calibration() -> Calibration {
     Calibration {
         channel_offset: 0.0,
-        xtalk: None,
+        xtalk: mdc_rig::calib::CalibrationState::ValidNoDetection,
         source_files: "synthetic".into(),
+        z: 0.0,
+        x: 0.0,
+        z_basis: "synthetic".into(),
     }
 }
 pub fn shifted(x: &[f32], delay: usize, gain: f32) -> Vec<f32> {

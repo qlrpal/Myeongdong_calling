@@ -110,6 +110,9 @@ fn b13_cli() {
         "--calibration",
         cal.to_str().unwrap(),
     ]);
+    let mut calibrated = mdc_rig::calib::Calibration::read(&cal).unwrap();
+    calibrated.z_basis = "synthetic CLI fixture".into();
+    calibrated.write(&cal).unwrap();
     let rec = recording(l.clone(), shifted(&l, 4800, 1.0));
     let input = tmp.0.join("measure.wav");
     std::fs::write(&input, wav(&rec)).unwrap();
