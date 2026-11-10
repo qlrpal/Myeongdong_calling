@@ -12,6 +12,8 @@ pub struct DetectorConfig {
     pub dedup_radius: usize,
     pub bit_search: usize,
     pub bit_q_min: f64,
+    /// Require quality and amplitude to pass at the same template and start.
+    pub joint_bit_gate: bool,
     pub bit_margin_db: f64,
 }
 impl Default for DetectorConfig {
@@ -23,6 +25,7 @@ impl Default for DetectorConfig {
             dedup_radius: 48,
             bit_search: 2,
             bit_q_min: 0.5,
+            joint_bit_gate: true,
             bit_margin_db: 6.0,
         }
     }
@@ -90,6 +93,24 @@ fn quality(e: f64, ts: f64, xs: f64) -> f64 {
         0.0
     } else {
         e / (ts * xs).sqrt()
+    }
+}
+/// Tests paired (quality, amplitude) observations. In joint mode each pair must
+/// describe one template at one start; split mode permits separate witnesses.
+/// Window validity and positive peak correlation are checked by the caller.
+pub fn bit_gate_exists(
+    observations: &[(f64, f64)],
+    bit_q_min: f64,
+    gate: f64,
+    joint: bool,
+) -> bool {
+    if joint {
+        observations
+            .iter()
+            .any(|&(q, a)| q >= bit_q_min && a >= gate)
+    } else {
+        observations.iter().any(|&(q, _)| q >= bit_q_min)
+            && observations.iter().any(|&(_, a)| a >= gate)
     }
 }
 #[derive(Clone, Debug)]
@@ -328,6 +349,7 @@ pub fn read_id(
         let mut peaks = [0.0f64; 2];
         let mut qs = [0.0f64; 2];
         let mut amplitudes = [0.0f64; 2];
+        let mut joint_exists = false;
         let valid = (|| -> Option<()> {
             let center = center?;
             if !center.is_finite() || center < 0.0 || center >= usize::MAX as f64 {
@@ -352,6 +374,12 @@ pub fn read_id(
                         return None;
                     }
                     let (v, xs) = dot(segment, t);
+                    joint_exists |= bit_gate_exists(
+                        &[(quality(v, ts, xs), if ts > 1e-20 { v / ts } else { 0.0 })],
+                        det.bit_q_min,
+                        threshold,
+                        true,
+                    );
                     *q = q.max(quality(v, ts, xs));
                     if v > *e {
                         *e = v;
@@ -371,8 +399,12 @@ pub fn read_id(
             0.0
         };
         let exists = valid
-            && qs.iter().any(|q| *q >= det.bit_q_min)
-            && amplitudes.iter().any(|a| *a >= threshold)
+            && if det.joint_bit_gate {
+                joint_exists
+            } else {
+                // Preserve the original summaries and comparisons exactly.
+                qs.iter().any(|q| *q >= det.bit_q_min) && amplitudes.iter().any(|a| *a >= threshold)
+            }
             && emax > 0.0;
         if exists {
             present = match present.checked_add(1) {
