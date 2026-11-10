@@ -69,7 +69,7 @@ pub fn replace_bits(
     bits: &[usize],
     silent: bool,
 ) {
-    let word = encode_marker_id(id as u16).unwrap();
+    let word = encode_marker_id(codeword_of_marker(id as u16).unwrap()).unwrap();
     for &bit in bits {
         let t = start(c, id)
             + delay

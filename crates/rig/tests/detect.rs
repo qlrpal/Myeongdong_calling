@@ -33,7 +33,7 @@ fn check(c: &ChirpConfig, x: &[f32], starts: &[f64], tol: f64, ids: bool) -> f64
         if ids {
             assert_eq!(
                 read_id(c, &d, x, gate, p).outcome,
-                IdOutcome::Exact(k as u16)
+                IdOutcome::Exact(codeword_of_marker(k as u16).unwrap())
             );
         }
         assert!(p.q.is_finite() && p.amplitude.is_finite() && p.level_dbfs.is_finite());
@@ -249,9 +249,9 @@ fn d6_ids_small() {
     all_ids(16);
 }
 #[test]
-#[ignore = "all 2048 IDs; run in release"]
+#[ignore = "all 1704 marker IDs; run in release"]
 fn d6_all_ids() {
-    all_ids(2048);
+    all_ids(MAX_MARKERS);
 }
 #[test]
 fn d7_paths() {
@@ -410,8 +410,15 @@ fn d9_secded_and_erasures() {
         let r = read_id(&c, &det, &x, amplitude_gate(&det, &x), &sync(&c, &x));
         assert_eq!(
             r.outcome,
-            IdOutcome::Erased {
-                count: bits.len() as u8
+            if bits.len() == 1 {
+                IdOutcome::ErasureCorrected {
+                    index: 0,
+                    erased_bit: 5,
+                }
+            } else {
+                IdOutcome::Erased {
+                    count: bits.len() as u8,
+                }
             }
         );
         assert_eq!(r.word, None);
@@ -487,7 +494,7 @@ fn performance_600() {
         readings
             .iter()
             .enumerate()
-            .all(|(i, r)| r.outcome == IdOutcome::Exact(i as u16))
+            .all(|(i, r)| r.outcome == IdOutcome::Exact(codeword_of_marker(i as u16).unwrap()))
     );
     println!(
         "PERFORMANCE stereo frames={} duration={:.3}s candidates={} detect+read_id={:.6}s",
@@ -548,7 +555,16 @@ fn invalid_and_boundaries() {
         let mut inside = x.clone();
         inside[bit_start] = value;
         let r = read_id(&c, &det, &inside, gate, &s);
-        assert!(matches!(r.outcome, IdOutcome::Erased { .. }));
+        assert_eq!(
+            r.outcome,
+            IdOutcome::ErasureCorrected {
+                index: 0,
+                erased_bit: 15
+            }
+        );
+        assert_eq!(r.erasure_mask, 1 << 15);
+        assert_eq!(r.bits, 0);
+        assert_eq!(r.word, None);
         assert!(r.min_margin_db.is_none_or(f64::is_finite));
     }
     let silent = vec![0.0; x.len()];

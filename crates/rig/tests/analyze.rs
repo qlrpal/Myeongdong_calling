@@ -58,7 +58,7 @@ fn b4_mismatch() {
     let t = start(&c, 2) + 4800;
     for (v, s) in r[t..t + c.chirp.marker_len()]
         .iter_mut()
-        .zip(marker_template(&c.chirp, 2047).unwrap())
+        .zip(marker_template(&c.chirp, (MAX_MARKERS - 1) as u16).unwrap())
     {
         *v = (s * 10f64.powf(-12.0 / 20.0)) as f32;
     }

@@ -79,7 +79,10 @@ fn t3_schedule_silence_sync() {
     for (k, (id, start, word)) in schedule.into_iter().enumerate() {
         assert_eq!(usize::from(id), k);
         assert_eq!(start, c.lead_silence + k * c.interval_len);
-        assert_eq!(Some(word), encode_marker_id(id));
+        assert_eq!(
+            Some(word),
+            codeword_of_marker(id).and_then(encode_marker_id)
+        );
         assert!(mono[start..start + c.marker_len()].iter().any(|s| *s != 0));
         active[start..start + c.marker_len()].fill(true);
         let sync = mono[start..start + c.sync_len].to_vec();
@@ -186,7 +189,8 @@ fn t6_direction() {
 }
 #[test]
 fn t7_codes() {
-    assert_eq!(MAX_MARKERS, 2048);
+    assert_eq!(MAX_MARKERS, 1704);
+    assert_eq!(CODE_SPACE, 2048);
     let words: Vec<_> = (0..2048)
         .map(|id| {
             let w = encode_marker_id(id).unwrap();
@@ -237,10 +241,12 @@ fn t7_codes() {
 fn t8_unique() {
     let c = small();
     let zero = encode_marker_id(0).unwrap();
-    let distance_four_id = (3..2047)
-        .find(|id| (encode_marker_id(*id).unwrap() ^ zero).count_ones() == 4)
+    let distance_four_id = (3..MAX_MARKERS as u16)
+        .find(|id| {
+            (encode_marker_id(codeword_of_marker(*id).unwrap()).unwrap() ^ zero).count_ones() == 4
+        })
         .unwrap();
-    let ids = [0, 1, 2, 2047, distance_four_id];
+    let ids = [0, 1, 2, (MAX_MARKERS - 1) as u16, distance_four_id];
     println!("T8 distance-four pair: 0 vs {distance_four_id}");
     let templates: Vec<_> = ids
         .iter()
@@ -300,7 +306,7 @@ fn t9_invalid() {
             ..small()
         });
     }
-    for marker_count in [0, 2049, usize::MAX] {
+    for marker_count in [0, 1705, usize::MAX] {
         cases.push(ChirpConfig {
             marker_count,
             ..small()
@@ -373,7 +379,7 @@ fn t9_invalid() {
     }
     ChirpConfig {
         f_high_hz: 21600.0,
-        marker_count: 2048,
+        marker_count: 1704,
         ..small()
     }
     .validate()

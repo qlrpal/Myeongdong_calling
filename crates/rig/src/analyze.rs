@@ -2,7 +2,7 @@
 use crate::calib::Calibration;
 use crate::{
     ChirpConfig, DetectorConfig, IdOutcome, IdReading, RigError, StereoRecording, SyncCandidate,
-    amplitude_gate, detect_sync, marker_schedule, read_id,
+    amplitude_gate, detect_sync, marker_of_codeword, marker_schedule, read_id,
 };
 
 #[derive(Clone, Debug)]
@@ -45,7 +45,9 @@ pub struct Detection {
 }
 pub fn decoded_id(id: IdOutcome) -> Option<u16> {
     match id {
-        IdOutcome::Exact(n) | IdOutcome::Corrected { index: n, .. } => Some(n),
+        IdOutcome::Exact(n)
+        | IdOutcome::Corrected { index: n, .. }
+        | IdOutcome::ErasureCorrected { index: n, .. } => marker_of_codeword(n),
         _ => None,
     }
 }
@@ -108,8 +110,8 @@ pub fn align_left(c: &AnalysisConfig, left: &[Detection]) -> Result<Alignment, R
         .iter()
         .filter_map(|p| {
             if let IdOutcome::Exact(id) = p.id.outcome {
-                schedule
-                    .get(usize::from(id))
+                marker_of_codeword(id)
+                    .and_then(|ordinal| schedule.get(usize::from(ordinal)))
                     .map(|(_, t, _)| (*t as f64, p.sync.time))
             } else {
                 None

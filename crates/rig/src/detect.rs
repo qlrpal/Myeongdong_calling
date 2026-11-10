@@ -216,6 +216,7 @@ pub fn detect_sync(
 pub enum IdOutcome {
     Exact(u16),
     Corrected { index: u16, flipped_bit: u8 },
+    ErasureCorrected { index: u16, erased_bit: u8 },
     Uncorrectable,
     Erased { count: u8 },
 }
@@ -223,13 +224,52 @@ pub enum IdOutcome {
 pub struct IdReading {
     pub outcome: IdOutcome,
     pub word: Option<u16>,
+    /// MSB-first slot decisions; erased positions are zero.
+    pub bits: u16,
+    /// One at each erased word bit (slot k corresponds to bit 15-k).
+    pub erasure_mask: u16,
     pub segments_present: u8,
     pub min_margin_db: Option<f64>,
 }
+/// Hamming distance restricted to positions that were not erased.
+pub fn nonerased_distance(bits: u16, erasure_mask: u16, codeword_word: u16) -> u32 {
+    ((bits ^ codeword_word) & !erasure_mask).count_ones()
+}
+
+/// A3: SECDED without erasures; one erasure permits no nonerased errors.
+/// Results contain codeword indices, not marker ordinals.
+pub fn decode_id(bits: u16, erasure_mask: u16) -> IdOutcome {
+    let count = erasure_mask.count_ones() as u8;
+    if count >= 2 {
+        return IdOutcome::Erased { count };
+    }
+    if count == 1 {
+        let known = bits & !erasure_mask;
+        for word in [known, known | erasure_mask] {
+            if let MarkerIdDecode::Exact(index) = decode_marker_id(word) {
+                return IdOutcome::ErasureCorrected {
+                    index,
+                    erased_bit: erasure_mask.trailing_zeros() as u8,
+                };
+            }
+        }
+        return IdOutcome::Erased { count };
+    }
+    match decode_marker_id(bits) {
+        MarkerIdDecode::Exact(index) => IdOutcome::Exact(index),
+        MarkerIdDecode::Corrected { index, flipped_bit } => {
+            IdOutcome::Corrected { index, flipped_bit }
+        }
+        MarkerIdDecode::Uncorrectable => IdOutcome::Uncorrectable,
+    }
+}
+
 fn erased() -> IdReading {
     IdReading {
         outcome: IdOutcome::Erased { count: 16 },
         word: None,
+        bits: 0,
+        erasure_mask: u16::MAX,
         segments_present: 1,
         min_margin_db: None,
     }
@@ -247,7 +287,7 @@ fn dot(x: &[f32], t: &[Complex]) -> (f64, f64) {
 }
 /// Reads MSB-first bits using a precomputed recording amplitude gate.
 /// Only the bit search windows are inspected; non-finite windows are erased.
-/// Any erased bit bypasses SECDED, including silent ID zero.
+/// One erased bit uses A3 exact punctured decoding; two or more are rejected.
 pub fn read_id(
     cfg: &ChirpConfig,
     det: &DetectorConfig,
@@ -274,7 +314,7 @@ pub fn read_id(
     ];
     let threshold = gate;
     let mut word = 0u16;
-    let mut count = 0u8;
+    let mut erasure_mask = 0u16;
     let mut present = 1u8;
     let mut min_margin: Option<f64> = None;
     for k in 0usize..16 {
@@ -342,30 +382,25 @@ pub fn read_id(
             min_margin = Some(min_margin.map_or(margin, |v| v.min(margin)));
         }
         if !exists || margin < det.bit_margin_db {
-            count = match count.checked_add(1) {
-                Some(v) => v,
-                None => return erased(),
+            let Some(mask) = 15usize
+                .checked_sub(k)
+                .and_then(|shift| 1u16.checked_shl(shift as u32))
+            else {
+                return erased();
             };
+            erasure_mask |= mask;
         } else if peaks.get(1) > peaks.first()
             && let Some(shift) = 15usize.checked_sub(k).and_then(|v| u32::try_from(v).ok())
         {
             word |= 1u16.checked_shl(shift).unwrap_or(0);
         }
     }
-    let outcome = if count > 0 {
-        IdOutcome::Erased { count }
-    } else {
-        match decode_marker_id(word) {
-            MarkerIdDecode::Exact(v) => IdOutcome::Exact(v),
-            MarkerIdDecode::Corrected { index, flipped_bit } => {
-                IdOutcome::Corrected { index, flipped_bit }
-            }
-            MarkerIdDecode::Uncorrectable => IdOutcome::Uncorrectable,
-        }
-    };
+    let outcome = decode_id(word, erasure_mask);
     IdReading {
         outcome,
-        word: if count == 0 { Some(word) } else { None },
+        word: if erasure_mask == 0 { Some(word) } else { None },
+        bits: word,
+        erasure_mask,
         segments_present: present,
         min_margin_db: min_margin,
     }
