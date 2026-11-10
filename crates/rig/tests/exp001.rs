@@ -1,5 +1,17 @@
 //! A0 이전 신호 전용, 실험 001과 비교 불가.
 //! Independent experiment 001 oracle. No existing test helpers are used.
+//!
+//! 실험 001 재현 절차(A0 이전 신호):
+//! - 역할: 하네스 커밋 7b7c9d8, 분석기 771c99f(7b7c9d8에 포함).
+//! - 저장소 밖 경로에 작업 트리를 만든다: git worktree add --detach <저장소 밖 경로> 7b7c9d8
+//! - 그 작업 트리에서 실행한다: cargo test --release -p mdc-rig --test exp001 -- --ignored exp001_full
+//! - 출력은 그 작업 트리의 .local/001/에 쓰인다. 현재 저장소의 .local/001/과 .local/001-backup-2026-11-10/에는 영향이 없다.
+//! - 재현 결과는 백업과 파일 해시(SHA-256)로 비교한다. 기준 해시:
+//!   full-cells.csv 08ff208735d0982ef3aa6fcba579241e77b7439e79942aa68f96340527d1c211
+//!   full-markers.csv ad00f6c3968886d44897340209efe515bd5ab74859ceea478e52d04ba01bc8e1
+//!   full-failures.csv 282b3297128abfe65d30ee2586d5232ca665028d1a8008c5be8fa00cee43f66a
+//!   full-calibration.csv 8388f13d0cb2c40aa654f627db016726affb8c13ddf1f23b07398c2c55cc8e0f
+//! - 확인 기록: 2026-11-10 Windows MSVC에서 위 절차로 실행해 네 파일의 SHA-256이 백업과 같음을 확인(132초). Linux에서는 미확인.
 use mdc_rig::{
     analyze::{self, AnalysisConfig, Class, LeftClass},
     calib::{Calibration, Xtalk, calibrate_xtalk},
@@ -651,5 +663,7 @@ fn exp001_smoke() {
 #[test]
 #[ignore = "full independent experiment matrix; run in release"]
 fn exp001_full() {
-    run(true);
+    println!(
+        "exp001_full: A0 이전 신호 전용, 현재 코드에서는 실행할 수 없음. 재현은 파일 상단 주석의 절차를 따른다."
+    );
 }
