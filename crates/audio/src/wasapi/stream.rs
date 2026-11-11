@@ -34,6 +34,7 @@ pub use crate::stream_mode::Mode;
 pub struct Options {
     pub endpoint: String,
     pub mode: Mode,
+    pub mmcss: MmcssTask,
     pub seconds: u32,
     pub out: PathBuf,
 }
@@ -161,6 +162,21 @@ impl Drop for Mmcss {
         }
     }
 }
+// Setup-only diagnostic: preserve last error before formatting or another API call.
+pub(super) fn thread_priority() -> String {
+    // SAFETY: the pseudo-handle refers to this live worker thread.
+    let priority = unsafe { GetThreadPriority(GetCurrentThread()) };
+    // Win32 THREAD_PRIORITY_ERROR_RETURN (0x7fffffff); no extra API feature needed.
+    const THREAD_PRIORITY_ERROR_RETURN: i32 = i32::MAX;
+    if priority == THREAD_PRIORITY_ERROR_RETURN {
+        // SAFETY: immediately captures this thread's failed query error.
+        let error = unsafe { GetLastError() }.0;
+        format!("error=0x{error:08X}")
+    } else {
+        priority.to_string()
+    }
+}
+
 struct Started<'a> {
     client: &'a IAudioClient,
     active: bool,
@@ -234,7 +250,16 @@ pub fn run(options: Options) -> Result<Output, Box<dyn std::error::Error>> {
     let endpoint = options.endpoint;
     let worker = std::thread::Builder::new()
         .name("wasapi-probe".into())
-        .spawn(move || worker(endpoint, mode, options.seconds, producer, report))?;
+        .spawn(move || {
+            worker(
+                endpoint,
+                mode,
+                options.mmcss,
+                options.seconds,
+                producer,
+                report,
+            )
+        })?;
     while !worker.is_finished() {
         while let Some(record) = consumer.pop() {
             records.push(record);
@@ -299,12 +324,14 @@ pub fn run(options: Options) -> Result<Output, Box<dyn std::error::Error>> {
 fn worker(
     endpoint: String,
     mode: Mode,
+    mmcss: MmcssTask,
     seconds: u32,
     mut producer: Producer<ProbeEvent>,
     mut report: Report,
 ) -> Report {
     // Declared first so COM and all stream cleanup finish before signalling, also on unwind.
     let _done = WorkerDone;
+    report.put("mmcss.request", mmcss.as_str());
     // SAFETY: initializes MTA on this worker; all COM values below die before guard.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.0;
     if report.hr("CoInitializeEx", hr).is_err() {
@@ -314,7 +341,7 @@ fn worker(
         return report;
     }
     let _com = super::Com;
-    let result = prepare(&endpoint, mode, seconds, &mut producer, &mut report);
+    let result = prepare(&endpoint, mode, mmcss, seconds, &mut producer, &mut report);
     match result {
         Ok(end) => {
             report.successful = end.hresult >= 0 && end.stage == "complete";
@@ -718,6 +745,7 @@ fn initialize_exclusive(c: &IAudioClient, w: &Wave, hns: i64) -> i32 {
 fn prepare(
     endpoint: &str,
     mode: Mode,
+    mmcss: MmcssTask,
     seconds: u32,
     producer: &mut Producer<ProbeEvent>,
     r: &mut Report,
@@ -851,7 +879,7 @@ fn prepare(
             mode: mode.stream_mode(),
             period_frames: frames,
             format: mix.format(),
-            mmcss: MmcssTask::ProAudio,
+            mmcss,
         };
         r.put("StreamRequest", format!("{request:?}"));
         r.put("used.format", mix.description());
@@ -897,7 +925,7 @@ fn prepare(
         mode: mode.stream_mode(),
         period_frames: requested_frames,
         format: wave.format(),
-        mmcss: MmcssTask::ProAudio,
+        mmcss,
     };
     r.put("StreamRequest", format!("{request:?}"));
     // SAFETY: initialized client, read-only size/latency queries.
@@ -976,18 +1004,60 @@ fn prepare(
     };
     std::hint::black_box(&mut state);
     let mut task_index = 0;
-    // SAFETY: registers only this worker with fixed task name.
-    let registration = unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index) };
+    let priority_before = thread_priority();
+    // SAFETY: registers only this worker; each task name is a fixed literal.
+    // Transfer a successful HANDLE immediately, before diagnostics can fail/unwind.
+    let registration = match mmcss {
+        MmcssTask::None => None,
+        MmcssTask::Audio => Some(
+            unsafe { AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index) }
+                .map(|h| Mmcss(Some(h))),
+        ),
+        MmcssTask::ProAudio => Some(
+            unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index) }
+                .map(|h| Mmcss(Some(h))),
+        ),
+    };
+    let priority_after = thread_priority();
+    r.put("mmcss.thread_priority.before", priority_before);
+    r.put("mmcss.thread_priority.after", priority_after);
+    r.put(
+        "mmcss.thread_priority.semantics",
+        "auxiliary GetThreadPriority diagnostic; not MMCSS scheduling priority or latency evidence",
+    );
+    r.put(
+        "mmcss.registration.hresult.semantics",
+        "AVRT GetLastError converted to HRESULT by windows crate",
+    );
     let mmcss = match registration {
-        Ok(h) => {
-            r.hr("MMCSS.ProAudio", 0)?;
-            Mmcss(Some(h))
+        None => {
+            r.put("mmcss.registration", "skipped");
+            r.put("mmcss.registration.hresult", "not_applicable");
+            r.put("mmcss.task_index", "not_applicable");
+            Mmcss(None)
         }
-        Err(e) => {
+        Some(Ok(guard)) => {
+            r.put("mmcss.registration", "success");
+            r.put("mmcss.registration.hresult", "0x00000000");
+            r.put("mmcss.task_index", task_index);
+            if mmcss == MmcssTask::ProAudio {
+                r.hr("MMCSS.ProAudio", 0)?;
+            }
+            guard
+        }
+        Some(Err(e)) => {
+            r.put("mmcss.registration", "failed");
             r.put(
-                "MMCSS.ProAudio.hresult",
+                "mmcss.registration.hresult",
                 format!("0x{:08X}", e.code().0 as u32),
             );
+            r.put("mmcss.task_index", "not_applicable");
+            if mmcss == MmcssTask::ProAudio {
+                r.put(
+                    "MMCSS.ProAudio.hresult",
+                    format!("0x{:08X}", e.code().0 as u32),
+                );
+            }
             Mmcss(None)
         }
     };

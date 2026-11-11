@@ -63,11 +63,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn stream(
     mut args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use mdc_audio::MmcssTask;
     use mdc_audio::wasapi::stream::{self, Mode, Options};
     use std::{io::Write, path::PathBuf};
+    const HELP: &str = "usage: mdc-audio-probe stream --endpoint ID --mode M --seconds N [--mmcss none|audio|pro-audio] [--out DIR]; mmcss default: pro-audio";
+    let mut mmcss = None;
     let (mut endpoint, mut mode, mut seconds, mut out) = (None, None, None, None);
     while let Some(arg) = args.next() {
-        if arg == "--endpoint" && endpoint.is_none() {
+        if arg == "--help" || arg == "-h" {
+            println!("{HELP}");
+            return Ok(());
+        }
+        if arg == "--mmcss" && mmcss.is_none() {
+            let value = args.next().ok_or("--mmcss requires none|audio|pro-audio")?;
+            mmcss = Some(
+                MmcssTask::parse(
+                    value
+                        .to_str()
+                        .ok_or("--mmcss must be Unicode: none|audio|pro-audio")?,
+                )
+                .ok_or("--mmcss must be none|audio|pro-audio")?,
+            );
+        } else if arg == "--endpoint" && endpoint.is_none() {
             let value = args
                 .next()
                 .ok_or("--endpoint requires an exact endpoint ID")?;
@@ -95,13 +112,14 @@ fn stream(
             out = Some(PathBuf::from(args.next().ok_or("--out requires DIR")?));
         } else {
             return Err(format!(
-                "unknown or repeated stream argument: {}",
+                "unknown or repeated stream argument: {}\n{HELP}",
                 arg.to_string_lossy()
             )
             .into());
         }
     }
     let result = stream::run(Options {
+        mmcss: mmcss.unwrap_or(MmcssTask::ProAudio),
         endpoint: endpoint.ok_or("--endpoint is required")?,
         mode: mode.ok_or("--mode is required")?,
         seconds: seconds.ok_or("--seconds is required")?,
@@ -129,11 +147,12 @@ fn stream(
 fn loopback(
     mut args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use mdc_audio::MmcssTask;
     use mdc_audio::wasapi::{
         loopback::{self, Options},
         stream::Mode,
     };
-    const HELP: &str = "usage: mdc-audio-probe loopback --capture ID --render ID --capture-mode M --render-mode M --seconds N [--gain-db G] [--prefill-frames P] [--out DIR]\nM: shared-default|shared-min|shared-default-raw|shared-min-raw|exclusive-min; N: 1..=120; G: -60..=0 (default -20); P: 0..=16384 (default capture actual period); out: .local/p1\nexclusive-min occupies the device; other apps using it must be closed\nloopback means microphone-to-headphone direct routing, not WASAPI output capture (AUDCLNT_STREAMFLAGS_LOOPBACK).";
+    const HELP: &str = "usage: mdc-audio-probe loopback --capture ID --render ID --capture-mode M --render-mode M --seconds N [--mmcss none|audio|pro-audio] [--gain-db G] [--prefill-frames P] [--out DIR]\nM: shared-default|shared-min|shared-default-raw|shared-min-raw|exclusive-min; N: 1..=120; G: -60..=0 (default -20); P: 0..=16384 (default capture actual period); out: .local/p1; mmcss: none|audio|pro-audio (default pro-audio)\nexclusive-min occupies the device; other apps using it must be closed\nloopback means microphone-to-headphone direct routing, not WASAPI output capture (AUDCLNT_STREAMFLAGS_LOOPBACK).";
     let mut values = std::collections::BTreeMap::new();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -142,6 +161,7 @@ fn loopback(
         }
         let key = arg.into_string().map_err(|_| "invalid argument")?;
         if ![
+            "--mmcss",
             "--capture",
             "--render",
             "--capture-mode",
@@ -168,7 +188,16 @@ fn loopback(
         let m = Mode::parse(text(key)?).ok_or("invalid mode")?;
         Ok(m)
     };
+    let mmcss = if values.contains_key("--mmcss") {
+        MmcssTask::parse(
+            text("--mmcss").map_err(|_| "--mmcss must be Unicode: none|audio|pro-audio")?,
+        )
+        .ok_or("--mmcss must be none|audio|pro-audio")?
+    } else {
+        MmcssTask::ProAudio
+    };
     let result = loopback::run(Options {
+        mmcss,
         capture: text("--capture")?.into(),
         render: text("--render")?.into(),
         capture_mode: mode("--capture-mode")?,

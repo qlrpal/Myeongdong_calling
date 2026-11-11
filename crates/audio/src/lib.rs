@@ -47,6 +47,36 @@ pub enum MmcssTask {
     ProAudio,
 }
 
+impl MmcssTask {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "audio" => Some(Self::Audio),
+            "pro-audio" => Some(Self::ProAudio),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Audio => "audio",
+            Self::ProAudio => "pro-audio",
+        }
+    }
+
+    #[must_use]
+    pub const fn task_name(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Audio => Some("Audio"),
+            Self::ProAudio => Some("Pro Audio"),
+        }
+    }
+}
+
 /// 장치 믹스 형식.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {

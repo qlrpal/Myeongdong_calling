@@ -4,6 +4,7 @@ use super::stream::{
     WORKER_DONE, Wave, qpc,
 };
 use crate::{
+    MmcssTask,
     loopback_report::{self as report, *},
     spsc::{self, Consumer, Producer},
 };
@@ -43,6 +44,7 @@ pub struct Options {
     pub render: String,
     pub capture_mode: Mode,
     pub render_mode: Mode,
+    pub mmcss: MmcssTask,
     pub seconds: u32,
     pub gain_db: f32,
     pub prefill_frames: Option<u32>,
@@ -199,6 +201,7 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
             worker(
                 o.capture,
                 o.capture_mode,
+                o.mmcss,
                 Samples::Capture(p),
                 cp,
                 Sync {
@@ -214,6 +217,7 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
             worker(
                 o.render,
                 o.render_mode,
+                o.mmcss,
                 Samples::Render(c),
                 rp,
                 Sync {
@@ -444,12 +448,14 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
 fn worker(
     endpoint: String,
     mode: Mode,
+    mmcss: MmcssTask,
     mut samples: Samples,
     mut records: Producer<LoopEvent>,
     sync: Sync,
     gain: f32,
 ) -> Returned {
     let mut r = Report::default();
+    r.put("mmcss.request", mmcss.as_str());
     let mut outcome = Outcome {
         reason: "prepare_error",
         ..Outcome::default()
@@ -463,6 +469,7 @@ fn worker(
         prepare(
             &endpoint,
             mode,
+            mmcss,
             &mut samples,
             &mut records,
             &sync,
@@ -493,6 +500,7 @@ fn worker(
 fn prepare(
     endpoint: &str,
     mode: Mode,
+    mmcss: MmcssTask,
     samples: &mut Samples,
     records: &mut Producer<LoopEvent>,
     sync: &Sync,
@@ -658,11 +666,71 @@ fn prepare(
     } else {
         None
     };
-    let mut task = 0;
-    // SAFETY: register and revert on this same worker only.
-    let mmcss = Mmcss(Some(r.call("MMCSS.ProAudio", unsafe {
-        AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task)
-    })?));
+    let mut task_index = 0;
+    let priority_before = stream::thread_priority();
+    // SAFETY: registers only this worker; each task name is a fixed literal.
+    // Transfer a successful HANDLE immediately, before diagnostics can fail/unwind.
+    let registration = match mmcss {
+        MmcssTask::None => None,
+        MmcssTask::Audio => Some(
+            unsafe { AvSetMmThreadCharacteristicsW(w!("Audio"), &mut task_index) }
+                .map(|h| Mmcss(Some(h))),
+        ),
+        MmcssTask::ProAudio => Some(
+            unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index) }
+                .map(|h| Mmcss(Some(h))),
+        ),
+    };
+    let priority_after = stream::thread_priority();
+    r.put("mmcss.thread_priority.before", priority_before);
+    r.put("mmcss.thread_priority.after", priority_after);
+    r.put(
+        "mmcss.thread_priority.semantics",
+        "auxiliary GetThreadPriority diagnostic; not MMCSS scheduling priority or latency evidence",
+    );
+    r.put(
+        "mmcss.registration.hresult.semantics",
+        "AVRT GetLastError converted to HRESULT by windows crate",
+    );
+    let mmcss = match registration {
+        None => {
+            r.put("mmcss.registration", "skipped");
+            r.put("mmcss.registration.hresult", "not_applicable");
+            r.put("mmcss.task_index", "not_applicable");
+            Mmcss(None)
+        }
+        Some(Ok(guard)) => {
+            r.put("mmcss.registration", "success");
+            r.put("mmcss.registration.hresult", "0x00000000");
+            r.put("mmcss.task_index", task_index);
+            if mmcss == MmcssTask::ProAudio {
+                r.hr("MMCSS.ProAudio", 0)?;
+            }
+            guard
+        }
+        Some(Err(e)) => {
+            r.put("mmcss.registration", "failed");
+            r.put(
+                "mmcss.registration.hresult",
+                format!("0x{:08X}", e.code().0 as u32),
+            );
+            r.put("mmcss.task_index", "not_applicable");
+            if mmcss == MmcssTask::ProAudio {
+                r.put(
+                    "MMCSS.ProAudio.hresult",
+                    format!("0x{:08X}", e.code().0 as u32),
+                );
+            }
+            return Err(End::setup(
+                if mmcss == MmcssTask::ProAudio {
+                    "MMCSS.ProAudio"
+                } else {
+                    "MMCSS.Audio"
+                },
+                e.code().0,
+            ));
+        }
+    };
     if let Some(c) = &ren {
         let silence_frames = if mode.is_exclusive() { buffer } else { period };
         let mut ptr = std::ptr::null_mut();
