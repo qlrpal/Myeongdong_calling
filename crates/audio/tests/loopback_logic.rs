@@ -476,3 +476,97 @@ fn zero_padding_requires_successful_query() {
         1
     );
 }
+
+fn layout_format(pcm: bool, ext: bool) -> Vec<u8> {
+    let mut b = vec![0; if ext { 40 } else { 18 }];
+    for (o, v) in [
+        (0, if ext { 0xfffe_u16 } else { 1 }),
+        (2, 2),
+        (12, if pcm { 4 } else { 8 }),
+        (14, if pcm { 16 } else { 32 }),
+        (16, if ext { 22 } else { 0 }),
+    ] {
+        b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    b[4..8].copy_from_slice(&48000_u32.to_le_bytes());
+    b[8..12].copy_from_slice(&(if pcm { 192000_u32 } else { 384000 }).to_le_bytes());
+    if ext {
+        b[18..20].copy_from_slice(&(if pcm { 16_u16 } else { 32 }).to_le_bytes());
+        b[24..40].copy_from_slice(&[
+            if pcm { 1 } else { 3 },
+            0,
+            0,
+            0,
+            0,
+            0,
+            16,
+            0,
+            128,
+            0,
+            0,
+            170,
+            0,
+            56,
+            155,
+            113,
+        ]);
+    }
+    b
+}
+#[test]
+fn sample_layout_validation() {
+    let float = layout_format(false, true);
+    let pcm = layout_format(true, true);
+    let plain = layout_format(true, false);
+    assert_eq!(sample_layout(&float), Some(SampleLayout::F32));
+    for b in [&pcm[..], &plain[..], &plain[..16]] {
+        assert_eq!(sample_layout(b), Some(SampleLayout::I16));
+    }
+    for (o, v) in [(2, 1_u16), (12, 6), (18, 24), (24, 2)] {
+        let mut bad = pcm.clone();
+        bad[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        assert_eq!(sample_layout(&bad), None);
+    }
+    for (o, v) in [(4, 44100_u32), (8, 192001)] {
+        let mut bad = pcm.clone();
+        bad[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        assert_eq!(sample_layout(&bad), None);
+    }
+    assert_eq!(sample_layout(&pcm[..39]), None);
+    let mut bad = plain.clone();
+    bad[14..16].copy_from_slice(&32_u16.to_le_bytes());
+    assert_eq!(sample_layout(&bad), None);
+    bad = plain;
+    bad[16..18].copy_from_slice(&22_u16.to_le_bytes());
+    assert_eq!(sample_layout(&bad), None);
+    for len in 0..16 {
+        assert_eq!(sample_layout(&pcm[..len]), None);
+    }
+    assert_eq!(sample_layout(&bad[..17]), None);
+}
+#[test]
+fn pcm16_conversion_boundaries_and_roundtrip() {
+    for v in [i16::MIN, -32767, -1, 0, 1, i16::MAX] {
+        assert_eq!(i16_to_f32(v), v as f32 / 32768.0);
+    }
+    assert_eq!(i16_to_f32(i16::MIN), -1.0);
+    for (v, want) in [
+        (-1.0, -32768),
+        (1.0, 32767),
+        (0.0, 0),
+        (-0.0, 0),
+        (0.5 / 32768.0, 1),
+        (0.49 / 32768.0, 0),
+        (-0.5 / 32768.0, -1),
+        (f32::NAN, 0),
+        (f32::INFINITY, 32767),
+        (f32::NEG_INFINITY, -32768),
+        (2.0, 32767),
+        (-2.0, -32768),
+    ] {
+        assert_eq!(f32_to_i16(v), want);
+    }
+    for v in i16::MIN..=i16::MAX {
+        assert_eq!(f32_to_i16(i16_to_f32(v)), v);
+    }
+}

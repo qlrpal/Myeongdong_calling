@@ -45,7 +45,7 @@ pub struct Output {
 }
 #[derive(Clone, Copy, Debug)]
 pub(super) struct End {
-    stage: &'static str,
+    pub(super) stage: &'static str,
     api: &'static str,
     pub(super) hresult: i32,
 }
@@ -65,8 +65,8 @@ pub(super) struct Report {
     frequency: u64,
     started: u64,
     ended: u64,
-    successful: bool,
-    exclusive_attempted: bool,
+    pub(super) successful: bool,
+    pub(super) exclusive_attempted: bool,
 }
 impl Report {
     pub(super) fn put(&mut self, key: impl Into<String>, value: impl ToString) {
@@ -469,7 +469,7 @@ pub(super) fn activate(d: &IMMDevice, r: &mut Report) -> Result<IAudioClient, En
         d.Activate(CLSCTX_ALL, None)
     })
 }
-fn preflight(d: &IMMDevice, r: &mut Report) -> Result<(), End> {
+pub(super) fn preflight(d: &IMMDevice, r: &mut Report) -> Result<(), End> {
     r.put("exclusive.preflight.caveat","auxiliary refusal condition only; session enumeration is racy and does not guarantee non-interference");
     // SAFETY: read-only activation/enumeration in initialized COM apartment.
     let mgr: IAudioSessionManager2 = r.call("Activate.IAudioSessionManager2", unsafe {
@@ -545,7 +545,7 @@ fn candidate(
     }
     Wave::from_bytes(&bytes)
 }
-fn exclusive(
+pub(super) fn exclusive(
     d: &IMMDevice,
     mix: &Wave,
     r: &mut Report,
@@ -1048,7 +1048,7 @@ fn prepare(
     Ok(outcome.0)
 }
 
-fn release_check(endpoint: &str, r: &mut Report) {
+pub(super) fn release_check(endpoint: &str, r: &mut Report) {
     let result = (|| {
         let d = device(endpoint, r)?;
         let c = activate(&d, r)?;

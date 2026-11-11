@@ -1,4 +1,4 @@
-//! Microphone-to-headphone shared-mode diagnostic; not WASAPI output loopback.
+//! Microphone-to-headphone diagnostic; not WASAPI output loopback.
 use super::stream::{
     self, BUSY, E_FAIL, E_INVALID, End, Event, Mmcss, Mode, PACKET_LIMIT, Report, STOP,
     WORKER_DONE, Wave, qpc,
@@ -52,7 +52,7 @@ pub struct Options {
 struct Ready {
     period: u32,
     buffer: u32,
-    format: [u8; 40],
+    layout: SampleLayout,
 }
 enum Status {
     Ready(Ready),
@@ -94,6 +94,9 @@ struct Outcome {
     reason: &'static str,
     stop_hr: Option<i32>,
     apis: RtHresults,
+    buffer_empty_count: u64,
+    buffer_error_count: u64,
+    consecutive_buffer_errors: u32,
 }
 struct Returned {
     samples: Samples,
@@ -102,9 +105,6 @@ struct Returned {
 }
 
 pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
-    if o.capture_mode.is_exclusive() || o.render_mode.is_exclusive() {
-        return Err("loopback stage 1 supports shared modes only".into());
-    }
     let gain = gain_linear(o.gain_db).ok_or("gain-db must be -60..=0")?;
     if !(1..=120).contains(&o.seconds)
         || o.prefill_frames.is_some_and(|p| p > 16384)
@@ -125,6 +125,7 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
     // SAFETY: same static handler and lifetime guard as stream; only control sets DONE.
     let registered = unsafe { SetConsoleCtrlHandler(Some(stream::console_handler), true) };
     let _console = stream::ConsoleGuard(registered.is_ok());
+    let _done = Done;
     let (time, stamp) = super::timestamp();
     std::fs::create_dir_all(&o.out)?;
     let records_path = o.out.join(format!("loopback-{stamp}-records.csv"));
@@ -188,6 +189,10 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
     let (cg, ci) = mpsc::channel();
     let (rs, rr) = mpsc::channel();
     let (rg, ri) = mpsc::channel();
+    let capture_endpoint = o.capture.clone();
+    let render_endpoint = o.render.clone();
+    let capture_mode = o.capture_mode;
+    let render_mode = o.render_mode;
     let cap = std::thread::Builder::new()
         .name("loopback-capture".into())
         .spawn(move || {
@@ -224,7 +229,26 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
             STOP.store(true, Ordering::Release);
             let _ = cg.send(Command::Abort);
             let joined = cap.join();
-            WORKER_DONE.store(true, Ordering::Release);
+            let attempted = joined
+                .as_ref()
+                .map_or(true, |ret| ret.report.exclusive_attempted);
+            check_release(
+                "capture",
+                &capture_endpoint,
+                capture_mode,
+                attempted,
+                &mut fields,
+            );
+            if let Ok(ret) = &joined {
+                for (k, v) in &ret.report.fields {
+                    fields.put(format!("capture.{k}"), v);
+                }
+            }
+            use std::io::Write;
+            csv.write_all(report::csv(&[]).as_bytes())?;
+            csv.flush()?;
+            meta.write_all(crate::stream_report::metadata(&fields.fields).as_bytes())?;
+            meta.flush()?;
             drop(joined);
             drop(keeper);
             return Err(e.into());
@@ -245,7 +269,10 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
     let a = ready(&cr);
     let b = if a.is_some() { ready(&rr) } else { None };
     let valid = |r: Ready| {
-        is_f32_stereo_48k(&r.format) && r.period != 0 && r.buffer != 0 && r.period <= r.buffer
+        matches!(r.layout, SampleLayout::F32 | SampleLayout::I16)
+            && r.period != 0
+            && r.buffer != 0
+            && r.period <= r.buffer
     };
     let prefill = a.map(|r| o.prefill_frames.unwrap_or(r.period));
     let (qhr, now) = qpc();
@@ -300,7 +327,6 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
     // Always join both, including when the first join reports a panic.
     let a = cap.join();
     let b = ren.join();
-    WORKER_DONE.store(true, Ordering::Release);
     while let Some(e) = cc.pop() {
         events.push(e);
     }
@@ -315,10 +341,21 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
     let mut rt = RenderTotals::default();
     let mut final_frames = 0;
     let mut successful = true;
-    for (prefix, joined) in [("capture", a), ("render", b)] {
+    for (prefix, endpoint, mode, joined) in [
+        ("capture", &capture_endpoint, capture_mode, a),
+        ("render", &render_endpoint, render_mode, b),
+    ] {
+        let attempted = joined
+            .as_ref()
+            .map_or(true, |ret| ret.report.exclusive_attempted);
+        successful &= check_release(prefix, endpoint, mode, attempted, &mut fields);
         match joined {
             Ok(ret) => {
                 let end = &ret.outcome;
+                if mode.is_exclusive() && prefix == "capture" {
+                    fields.put("capture.buffer_empty_count", end.buffer_empty_count);
+                    fields.put("capture.buffer_error_count", end.buffer_error_count);
+                }
                 successful &= matches!(end.reason, "duration" | "stop_flag")
                     && end.hr >= 0
                     && end.stop_hr.is_some_and(|hr| hr >= 0)
@@ -363,7 +400,7 @@ pub fn run(o: Options) -> Result<stream::Output, Box<dyn std::error::Error>> {
                         hr.map_or_else(|| "not_called".into(), |h| format!("0x{:08X}", h as u32)),
                     );
                 }
-                fields.put(format!("{prefix}.realtime_api_status_semantics"), "last result; loop stops on first failing API; waits mapped to HRESULT, timeouts are S_OK");
+                fields.put(format!("{prefix}.realtime_api_status_semantics"), "last result; loop stops on first failing API; waits mapped to HRESULT, timeouts are S_OK; except exclusive capture AUDCLNT_E_BUFFER_ERROR, which is counted in capture.buffer_error_count and is non-fatal until 10 consecutive GetBuffer results");
                 for (k, v) in ret.report.fields {
                     fields.put(format!("{prefix}.{k}"), v);
                 }
@@ -439,6 +476,9 @@ fn worker(
     if let Err(e) = result {
         STOP.store(true, Ordering::Release);
         let _ = sync.status.send(Status::Failed);
+        if mode.is_exclusive() {
+            r.put("end.stage", e.stage);
+        }
         r.put("failure", format!("{e:?}"));
         outcome.hr = e.hresult;
     }
@@ -477,90 +517,124 @@ fn prepare(
         "endpoint.name",
         crate::probe_table::cell(&name, Clone::clone),
     );
-    let client = stream::activate(&d, r)?;
-    r.put("raw.requested", mode.is_raw());
-    if mode.is_raw() {
-        let properties = AudioClientProperties {
-            cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
-            bIsOffload: false.into(),
-            eCategory: AudioCategory_Other,
-            Options: AUDCLNT_STREAMOPTIONS_RAW,
+    if mode.is_exclusive()
+        && let Err(mut e) = stream::preflight(&d, r)
+    {
+        e.stage = "refused";
+        return Err(e);
+    }
+    let (client, _wave, period, buffer, layout, _shared_client3) = if mode.is_exclusive() {
+        let initial = stream::activate(&d, r)?;
+        // SAFETY: copy API allocation before releasing initial client.
+        let mix = Wave::from_api(r.call("GetMixFormat", unsafe { initial.GetMixFormat() })?)?;
+        r.put("mix.format", mix.description());
+        drop(initial);
+        let (client, wave, _, _) = stream::exclusive(&d, &mix, r)?;
+        r.put("used.format", wave.description());
+        let Some(layout) = sample_layout(wave.bytes()) else {
+            r.put("exclusive.format_policy", "first format that Initialize accepted is used; loopback supports only F32 or PCM16 at 48 kHz stereo and does not retry later candidates");
+            return Err(End::setup("format.unsupported", E_INVALID));
         };
-        r.put("client_properties.cbSize", properties.cbSize);
-        r.put("client_properties.bIsOffload", false);
-        r.put("client_properties.category", "AudioCategory_Other");
-        r.put(
-            "client_properties.options",
-            "AUDCLNT_STREAMOPTIONS_RAW (0x1)",
-        );
-        r.put(
-            "raw.application_verification",
-            "not_verified; acceptance does not prove processing bypass",
-        );
-        let c2 = r.call(
-            "QueryInterface.IAudioClient2",
-            client.cast::<IAudioClient2>(),
-        )?;
-        // SAFETY: complete properties and uninitialized live client; retain raw HRESULT.
-        r.hr(
-            "SetClientProperties",
-            unsafe { (c2.vtable().SetClientProperties)(c2.as_raw(), &properties) }.0,
-        )?;
-    }
-    // SAFETY: API returns owned format allocation, copied and freed by Wave.
-    let wave = Wave::from_api(r.call("GetMixFormat", unsafe { client.GetMixFormat() })?)?;
-    r.put("mix.format", wave.description());
-    if !is_f32_stereo_48k(wave.bytes()) {
-        return Err(End::setup("format.unsupported", E_INVALID));
-    }
-    let c3 = r.call(
-        "QueryInterface.IAudioClient3",
-        client.cast::<IAudioClient3>(),
-    )?;
-    let _ = stream::current(&c3, "before_initialize", r);
-    let (mut default, mut fundamental, mut min, mut max) = (0, 0, 0, 0);
-    // SAFETY: complete format and writable period outputs.
-    r.call("GetSharedModeEnginePeriod", unsafe {
-        c3.GetSharedModeEnginePeriod(
-            wave.ptr(),
-            &mut default,
-            &mut fundamental,
-            &mut min,
-            &mut max,
-        )
-    })?;
-    for (k, v) in [
-        ("default", default),
-        ("fundamental", fundamental),
-        ("min", min),
-        ("max", max),
-    ] {
-        r.put(format!("shared.{k}_frames"), v);
-    }
-    let requested = if mode.uses_default_period() {
-        default
+        // SAFETY: initialized exclusive client before Start.
+        let buffer = r.call("GetBufferSize", unsafe { client.GetBufferSize() })?;
+        r.put("actual.buffer_frames", buffer);
+        r.put("actual.period_frames", buffer);
+        r.put("exclusive.volume", "exclusive stream bypasses session volume; gain is the only software attenuation in this probe");
+        (client, wave, buffer, buffer, layout, None)
     } else {
-        min
+        let client = stream::activate(&d, r)?;
+        r.put("raw.requested", mode.is_raw());
+        if mode.is_raw() {
+            let properties = AudioClientProperties {
+                cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+                bIsOffload: false.into(),
+                eCategory: AudioCategory_Other,
+                Options: AUDCLNT_STREAMOPTIONS_RAW,
+            };
+            r.put("client_properties.cbSize", properties.cbSize);
+            r.put("client_properties.bIsOffload", false);
+            r.put("client_properties.category", "AudioCategory_Other");
+            r.put(
+                "client_properties.options",
+                "AUDCLNT_STREAMOPTIONS_RAW (0x1)",
+            );
+            r.put(
+                "raw.application_verification",
+                "not_verified; acceptance does not prove processing bypass",
+            );
+            let c2 = r.call(
+                "QueryInterface.IAudioClient2",
+                client.cast::<IAudioClient2>(),
+            )?;
+            // SAFETY: complete properties and uninitialized live client; retain raw HRESULT.
+            r.hr(
+                "SetClientProperties",
+                unsafe { (c2.vtable().SetClientProperties)(c2.as_raw(), &properties) }.0,
+            )?;
+        }
+        // SAFETY: API returns owned format allocation, copied and freed by Wave.
+        let wave = Wave::from_api(r.call("GetMixFormat", unsafe { client.GetMixFormat() })?)?;
+        r.put("mix.format", wave.description());
+        if !is_f32_stereo_48k(wave.bytes()) {
+            return Err(End::setup("format.unsupported", E_INVALID));
+        }
+        let c3 = r.call(
+            "QueryInterface.IAudioClient3",
+            client.cast::<IAudioClient3>(),
+        )?;
+        let _ = stream::current(&c3, "before_initialize", r);
+        let (mut default, mut fundamental, mut min, mut max) = (0, 0, 0, 0);
+        // SAFETY: complete format and writable period outputs.
+        r.call("GetSharedModeEnginePeriod", unsafe {
+            c3.GetSharedModeEnginePeriod(
+                wave.ptr(),
+                &mut default,
+                &mut fundamental,
+                &mut min,
+                &mut max,
+            )
+        })?;
+        for (k, v) in [
+            ("default", default),
+            ("fundamental", fundamental),
+            ("min", min),
+            ("max", max),
+        ] {
+            r.put(format!("shared.{k}_frames"), v);
+        }
+        let requested = if mode.uses_default_period() {
+            default
+        } else {
+            min
+        };
+        r.put("request.period_frames", requested);
+        // SAFETY: live client, validated mix format, queried period; no conversion flags.
+        let hr = unsafe {
+            (c3.vtable().InitializeSharedAudioStream)(
+                c3.as_raw(),
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                requested,
+                wave.ptr(),
+                std::ptr::null(),
+            )
+        }
+        .0;
+        let _ = stream::current(&c3, "after_initialize", r);
+        r.hr("InitializeSharedAudioStream", hr)?;
+        // SAFETY: initialized client.
+        let buffer = r.call("GetBufferSize", unsafe { client.GetBufferSize() })?;
+        let period = stream::current(&c3, "actual", r)?;
+        r.put("actual.buffer_frames", buffer);
+        r.put("actual.period_frames", period);
+        (client, wave, period, buffer, SampleLayout::F32, Some(c3))
     };
-    r.put("request.period_frames", requested);
-    // SAFETY: live client, validated mix format, queried period; no conversion flags.
-    let hr = unsafe {
-        (c3.vtable().InitializeSharedAudioStream)(
-            c3.as_raw(),
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            requested,
-            wave.ptr(),
-            std::ptr::null(),
-        )
-    }
-    .0;
-    let _ = stream::current(&c3, "after_initialize", r);
-    r.hr("InitializeSharedAudioStream", hr)?;
-    // SAFETY: initialized client.
-    let buffer = r.call("GetBufferSize", unsafe { client.GetBufferSize() })?;
-    let period = stream::current(&c3, "actual", r)?;
-    r.put("actual.buffer_frames", buffer);
-    r.put("actual.period_frames", period);
+    r.put(
+        "sample_layout",
+        match layout {
+            SampleLayout::F32 => "F32",
+            SampleLayout::I16 => "I16",
+        },
+    );
     if period == 0 || buffer == 0 || period > buffer {
         return Err(End::setup("period.invalid", E_INVALID));
     }
@@ -590,23 +664,20 @@ fn prepare(
         AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task)
     })?));
     if let Some(c) = &ren {
+        let silence_frames = if mode.is_exclusive() { buffer } else { period };
         let mut ptr = std::ptr::null_mut();
-        r.hr("prefill.GetBuffer", render_get(c, period, &mut ptr))?;
+        r.hr("prefill.GetBuffer", render_get(c, silence_frames, &mut ptr))?;
         r.hr(
             "prefill.ReleaseBuffer",
-            render_release(c, period, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32),
+            render_release(c, silence_frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32),
         )?;
-        r.put("prefill.silence_frames", period);
+        r.put("prefill.silence_frames", silence_frames);
     }
     sync.status
         .send(Status::Ready(Ready {
             period,
             buffer,
-            format: wave
-                .bytes()
-                .get(..40)
-                .and_then(|b| b.try_into().ok())
-                .ok_or(End::setup("format.unsupported", E_INVALID))?,
+            layout,
         }))
         .map_err(|_| End::setup("ready.disconnected", E_FAIL))?;
     let (deadline, prefill) = match sync.command.recv() {
@@ -620,6 +691,7 @@ fn prepare(
         }
     };
     let mut priming = Priming::new(prefill);
+    let exclusive = mode.is_exclusive();
     std::hint::black_box(&mut priming);
     std::hint::black_box(&mut *out);
     if STOP.load(Ordering::Acquire) {
@@ -658,6 +730,8 @@ fn prepare(
             samples,
             records,
             gain,
+            exclusive,
+            layout,
             &mut priming,
             out,
         );
@@ -707,6 +781,8 @@ fn realtime(
     samples: &mut Samples,
     records: &mut Producer<LoopEvent>,
     gain: f32,
+    exclusive: bool,
+    layout: SampleLayout,
     priming: &mut Priming,
     out: &mut Outcome,
 ) {
@@ -769,7 +845,7 @@ fn realtime(
                     && event_ready
                     && let Some(c) = cap
                 {
-                    capture_cycle(c, p, &mut w, &mut out.apis);
+                    capture_cycle(c, p, &mut w, out, exclusive, layout);
                 }
                 let (hr, done) = qpc();
                 if !out.apis.qpc.is_some_and(|previous| previous < 0) {
@@ -805,6 +881,8 @@ fn realtime(
                         period,
                         buffer,
                         gain,
+                        exclusive,
+                        layout,
                         priming,
                         &mut w,
                         &mut out.apis,
@@ -830,6 +908,11 @@ fn realtime(
             out.reason = "api_error";
             break;
         }
+        if exclusive && out.consecutive_buffer_errors >= 10 {
+            out.hr = AUDCLNT_E_BUFFER_ERROR.0;
+            out.reason = "consecutive_buffer_errors";
+            break;
+        }
         if timeouts >= 10 {
             out.hr = E_FAIL;
             out.reason = "timeout";
@@ -853,22 +936,44 @@ fn capture_cycle(
     c: &IAudioCaptureClient,
     p: &mut Producer<[f32; 2]>,
     w: &mut CaptureWake,
-    apis: &mut RtHresults,
+    out: &mut Outcome,
+    exclusive: bool,
+    layout: SampleLayout,
 ) {
+    let apis = &mut out.apis;
+    let frame_bytes = match layout {
+        SampleLayout::F32 => 8,
+        SampleLayout::I16 => 4,
+    };
     for _ in 0..PACKET_LIMIT {
-        let mut next = 0;
-        let hr = stream::raw_next(c, &mut next);
-        apis.next = Some(hr);
-        if hr < 0 {
-            w.failure_hresult = hr;
-            break;
-        }
-        if next == 0 {
-            break;
+        if !exclusive {
+            let mut next = 0;
+            let hr = stream::raw_next(c, &mut next);
+            apis.next = Some(hr);
+            if hr < 0 {
+                w.failure_hresult = hr;
+                break;
+            }
+            if next == 0 {
+                break;
+            }
         }
         let (mut ptr, mut n, mut flags, mut pos, mut time) = (std::ptr::null_mut(), 0, 0, 0, 0);
         let hr = capture_get(c, &mut ptr, &mut n, &mut flags, &mut pos, &mut time);
         apis.capture_get = Some(hr);
+        if exclusive {
+            if hr == AUDCLNT_S_BUFFER_EMPTY.0 {
+                out.buffer_empty_count = out.buffer_empty_count.saturating_add(1);
+                out.consecutive_buffer_errors = 0;
+                return;
+            }
+            if hr == AUDCLNT_E_BUFFER_ERROR.0 {
+                out.buffer_error_count = out.buffer_error_count.saturating_add(1);
+                out.consecutive_buffer_errors = out.consecutive_buffer_errors.saturating_add(1);
+                return;
+            }
+            out.consecutive_buffer_errors = 0;
+        }
         if hr < 0 {
             w.failure_hresult = hr;
             break;
@@ -888,7 +993,7 @@ fn capture_cycle(
         ));
         let bytes = usize::try_from(n)
             .ok()
-            .and_then(|n| n.checked_mul(8))
+            .and_then(|n| n.checked_mul(frame_bytes))
             .filter(|n| *n <= isize::MAX as usize);
         if bytes.is_none() || (!silent && n > 0 && ptr.is_null()) {
             w.invalid_frames = w.invalid_frames.saturating_add(n);
@@ -901,12 +1006,17 @@ fn capture_cycle(
                 let value = if silent {
                     [0.0, 0.0]
                 } else {
-                    // SAFETY: strict 8-byte frame format, checked n*8 <= isize::MAX;
+                    // SAFETY: validated 8/4-byte frame layout, checked n*frame_bytes <= isize::MAX;
                     // i<n, nonnull API buffer valid until the paired release below.
                     unsafe {
-                        ptr.add((i as usize).saturating_mul(8))
-                            .cast::<[f32; 2]>()
-                            .read_unaligned()
+                        let ptr = ptr.add((i as usize).saturating_mul(frame_bytes));
+                        match layout {
+                            SampleLayout::F32 => ptr.cast::<[f32; 2]>().read_unaligned(),
+                            SampleLayout::I16 => {
+                                let [l, r] = ptr.cast::<[i16; 2]>().read_unaligned();
+                                [i16_to_f32(l), i16_to_f32(r)]
+                            }
+                        }
                     }
                 };
                 if p.push(value) {
@@ -922,7 +1032,7 @@ fn capture_cycle(
         if hr < 0 {
             w.failure_hresult = hr;
         }
-        if w.failure_hresult < 0 {
+        if exclusive || w.failure_hresult < 0 {
             break;
         }
     }
@@ -935,20 +1045,31 @@ fn render_cycle(
     period: u32,
     buffer: u32,
     gain: f32,
+    exclusive: bool,
+    layout: SampleLayout,
     priming: &mut Priming,
     w: &mut RenderWake,
     apis: &mut RtHresults,
 ) {
-    let hr = stream::raw_padding(client, &mut w.padding_before);
-    apis.padding = Some(hr);
-    if hr < 0 {
-        w.failure_hresult = hr;
-        return;
-    }
-    w.padding_valid = true;
-    let Some(n) = render_frames(buffer, w.padding_before, period) else {
-        w.failure_hresult = E_INVALID;
-        return;
+    let frame_bytes = match layout {
+        SampleLayout::F32 => 8,
+        SampleLayout::I16 => 4,
+    };
+    let n = if exclusive {
+        buffer
+    } else {
+        let hr = stream::raw_padding(client, &mut w.padding_before);
+        apis.padding = Some(hr);
+        if hr < 0 {
+            w.failure_hresult = hr;
+            return;
+        }
+        w.padding_valid = true;
+        let Some(n) = render_frames(buffer, w.padding_before, period) else {
+            w.failure_hresult = E_INVALID;
+            return;
+        };
+        n
     };
     let before = c.len();
     w.ring_frames_before = u32::try_from(before).unwrap_or(u32::MAX);
@@ -965,7 +1086,7 @@ fn render_cycle(
     }
     let bytes = usize::try_from(n)
         .ok()
-        .and_then(|n| n.checked_mul(8))
+        .and_then(|n| n.checked_mul(frame_bytes))
         .filter(|n| *n <= isize::MAX as usize);
     if ptr.is_null() || bytes.is_none() {
         // Successful acquisition must still be released; SILENT requires no dereference.
@@ -1003,12 +1124,18 @@ fn render_cycle(
             w.priming_silence_frames = w.priming_silence_frames.saturating_add(1);
             [0.0, 0.0]
         };
-        // SAFETY: checked n*8, i<n, nonnull API-owned buffer until ReleaseBuffer;
+        // SAFETY: checked n*frame_bytes <= isize::MAX, i<n, nonnull API-owned buffer until ReleaseBuffer;
         // unaligned write does not create a Rust reference; frame protected or zero.
         unsafe {
-            ptr.add((i as usize).saturating_mul(8))
-                .cast::<[f32; 2]>()
-                .write_unaligned(frame);
+            let ptr = ptr.add((i as usize).saturating_mul(frame_bytes));
+            match layout {
+                SampleLayout::F32 => ptr.cast::<[f32; 2]>().write_unaligned(frame),
+                SampleLayout::I16 => {
+                    let [l, r] = frame;
+                    ptr.cast::<[i16; 2]>()
+                        .write_unaligned([f32_to_i16(l), f32_to_i16(r)]);
+                }
+            }
         }
     }
     w.frames_written = n;
@@ -1017,5 +1144,63 @@ fn render_cycle(
     w.submitted = hr >= 0;
     if hr < 0 {
         w.failure_hresult = hr;
+    }
+}
+
+struct Done;
+impl Drop for Done {
+    fn drop(&mut self) {
+        WORKER_DONE.store(true, Ordering::Release);
+    }
+}
+fn check_release(
+    prefix: &str,
+    endpoint: &str,
+    mode: Mode,
+    attempted: bool,
+    fields: &mut Report,
+) -> bool {
+    if !mode.is_exclusive() {
+        return true;
+    }
+    if !attempted {
+        fields.put(
+            format!("{prefix}.release_check_run.exclusive.release_check"),
+            "skipped: not attempted",
+        );
+        return true;
+    }
+    let endpoint = endpoint.to_owned();
+    let checked = std::thread::Builder::new()
+        .name("loopback-release-check".into())
+        .spawn(move || {
+            let mut r = Report::default();
+            r.successful = true;
+            // SAFETY: COM initialized and torn down on this dedicated, joined thread.
+            let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.0;
+            if r.hr("release_check.CoInitializeEx", hr).is_ok() {
+                let _com = super::Com;
+                stream::release_check(&endpoint, &mut r);
+            } else {
+                r.successful = false;
+                r.put("exclusive.release_check", "failed: COM initialization");
+            }
+            r
+        });
+    match checked.map(|h| h.join()) {
+        Ok(Ok(r)) => {
+            let success = r.successful;
+            for (k, v) in r.fields {
+                fields.put(format!("{prefix}.release_check_run.{k}"), v);
+            }
+            success
+        }
+        _ => {
+            fields.put(
+                format!("{prefix}.release_check_run.exclusive.release_check"),
+                "failed: check thread",
+            );
+            false
+        }
     }
 }

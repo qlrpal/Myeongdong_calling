@@ -133,7 +133,7 @@ fn loopback(
         loopback::{self, Options},
         stream::Mode,
     };
-    const HELP: &str = "usage: mdc-audio-probe loopback --capture ID --render ID --capture-mode M --render-mode M --seconds N [--gain-db G] [--prefill-frames P] [--out DIR]\nM: shared-default|shared-min|shared-default-raw|shared-min-raw; N: 1..=120; G: -60..=0 (default -20); P: 0..=16384 (default capture actual period); out: .local/p1\nloopback means microphone-to-headphone direct routing, not WASAPI output capture (AUDCLNT_STREAMFLAGS_LOOPBACK).";
+    const HELP: &str = "usage: mdc-audio-probe loopback --capture ID --render ID --capture-mode M --render-mode M --seconds N [--gain-db G] [--prefill-frames P] [--out DIR]\nM: shared-default|shared-min|shared-default-raw|shared-min-raw|exclusive-min; N: 1..=120; G: -60..=0 (default -20); P: 0..=16384 (default capture actual period); out: .local/p1\nexclusive-min occupies the device; other apps using it must be closed\nloopback means microphone-to-headphone direct routing, not WASAPI output capture (AUDCLNT_STREAMFLAGS_LOOPBACK).";
     let mut values = std::collections::BTreeMap::new();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -166,9 +166,6 @@ fn loopback(
     };
     let mode = |key| -> Result<Mode, Box<dyn std::error::Error>> {
         let m = Mode::parse(text(key)?).ok_or("invalid mode")?;
-        if m.is_exclusive() {
-            return Err("loopback stage 1 supports shared modes only".into());
-        }
         Ok(m)
     };
     let result = loopback::run(Options {

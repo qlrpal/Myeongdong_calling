@@ -418,3 +418,59 @@ pub fn is_f32_stereo_48k(bytes: &[u8]) -> bool {
         && word(18) == Some(32)
         && bytes.get(24..40) == Some(&[3, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113])
 }
+
+/// Validated stereo 48 kHz sample storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleLayout {
+    F32,
+    I16,
+}
+pub fn sample_layout(bytes: &[u8]) -> Option<SampleLayout> {
+    if is_f32_stereo_48k(bytes) {
+        return Some(SampleLayout::F32);
+    }
+    let word = |o: usize| {
+        bytes
+            .get(o..o.saturating_add(2))
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes)
+    };
+    let dword = |o: usize| {
+        bytes
+            .get(o..o.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes)
+    };
+    if word(2) != Some(2)
+        || dword(4) != Some(48000)
+        || dword(8) != Some(192000)
+        || word(12) != Some(4)
+        || word(14) != Some(16)
+    {
+        return None;
+    }
+    match word(0) {
+        Some(1) if bytes.len() == 16 || word(16) == Some(0) => Some(SampleLayout::I16),
+        Some(0xfffe)
+            if bytes.len() >= 40
+                && word(16).is_some_and(|n| n >= 22)
+                && word(18) == Some(16)
+                && bytes.get(24..40)
+                    == Some(&[1, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]) =>
+        {
+            Some(SampleLayout::I16)
+        }
+        _ => None,
+    }
+}
+pub fn i16_to_f32(v: i16) -> f32 {
+    v as f32 / 32768.0
+}
+/// 입력 /32768, 출력 ×32768 반올림·포화. +1.0은 32767로 포화.
+pub fn f32_to_i16(v: f32) -> i16 {
+    if v.is_nan() {
+        0
+    } else {
+        (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16
+    }
+}
