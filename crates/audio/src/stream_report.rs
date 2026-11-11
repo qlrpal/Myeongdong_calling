@@ -97,6 +97,9 @@ pub struct Summary {
     pub packets_per_wake: BTreeMap<u32, u64>,
     pub position_plus_frames_mismatches: u64,
     pub position_deltas: BTreeMap<u64, u64>,
+    pub position_span: Option<u64>,
+    pub frames_span: u64,
+    pub capture_packets: u64,
     pub discontinuity_flags: u64,
     pub silent_flags: u64,
     pub timestamp_error_flags: u64,
@@ -120,6 +123,9 @@ pub fn summarize(events: &[ProbeEvent], frequency: u64, dropped: u64) -> Summary
     let mut previous_packet = None;
     let mut expected_position = None;
     let mut previous_position: Option<u64> = None;
+    let mut first_position: Option<u64> = None;
+    let mut previous_frames: Option<u32> = None;
+    let mut position_span_valid = true;
     let interval = |before: Option<u64>, now: u64, into: &mut Vec<f64>| {
         if frequency != 0
             && let Some(delta) = before.and_then(|b| now.checked_sub(b))
@@ -151,6 +157,18 @@ pub fn summarize(events: &[ProbeEvent], frequency: u64, dropped: u64) -> Summary
                 count(&mut s.packets_per_wake, w.packets);
             }
             ProbeEvent::Capture(c) => {
+                s.capture_packets += 1;
+                if let Some(frames) = previous_frames {
+                    s.frames_span = s.frames_span.saturating_add(u64::from(frames));
+                }
+                previous_frames = Some(c.frames);
+                let first = *first_position.get_or_insert(c.device_position.0);
+                if previous_position.is_some_and(|position| c.device_position.0 < position) {
+                    position_span_valid = false;
+                }
+                s.position_span = position_span_valid
+                    .then(|| c.device_position.0.checked_sub(first))
+                    .flatten();
                 count(&mut s.packet_frames, c.frames);
                 if let Some(previous) = previous_position {
                     let delta = c.device_position.0.wrapping_sub(previous);
@@ -186,7 +204,7 @@ impl Summary {
         top.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top.truncate(8);
         let mut out = format!(
-            "wait_return_intervals_ms={:?}\nevent_wake_intervals_ms={:?}\npacket_wake_intervals_ms={:?}\nbuffer_error_count={}\nzero_frame_count={}\nempty_wakes={}\ntimeouts={}\npacket_frames={:?}\npackets_per_wake={:?}\nposition_plus_frames_mismatches={}\nposition_delta_distinct={}\nposition_deltas_top8={:?}\nflags.data_discontinuity={}\nflags.silent={}\nflags.timestamp_error={}\nrender.zero_padding={}\nrender.frames_written={:?}\n",
+            "wait_return_intervals_ms={:?}\nevent_wake_intervals_ms={:?}\npacket_wake_intervals_ms={:?}\nbuffer_error_count={}\nzero_frame_count={}\nempty_wakes={}\ntimeouts={}\npacket_frames={:?}\npackets_per_wake={:?}\nposition_plus_frames_mismatches={}\nposition_delta_distinct={}\nposition_deltas_top8={:?}\nposition_span={}\nframes_span={}\nposition_over_frames_ratio={}\nflags.data_discontinuity={}\nflags.silent={}\nflags.timestamp_error={}\nrender.zero_padding={}\nrender.frames_written={:?}\n",
             self.all_intervals_ms,
             self.event_intervals_ms,
             self.packet_intervals_ms,
@@ -199,6 +217,17 @@ impl Summary {
             self.position_plus_frames_mismatches,
             self.position_deltas.len(),
             top,
+            self.position_span
+                .map(|span| span.to_string())
+                .unwrap_or_else(|| "not_available".into()),
+            self.frames_span,
+            if self.capture_packets >= 2 && self.frames_span != 0 {
+                self.position_span
+                    .map(|span| format!("{:.6}", span as f64 / self.frames_span as f64))
+                    .unwrap_or_else(|| "not_available".into())
+            } else {
+                "not_available".into()
+            },
             self.discontinuity_flags,
             self.silent_flags,
             self.timestamp_error_flags,

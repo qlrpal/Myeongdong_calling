@@ -257,8 +257,86 @@ fn position_delta_text_top8_sorted_and_limited() {
     assert_eq!(s.position_deltas.len(), 9);
     let text = s.text();
     assert!(text.contains(&format!(
-        "position_plus_frames_mismatches={}\nposition_delta_distinct=9\nposition_deltas_top8=[(9, 3), (8, 2), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]\n",
+        "position_plus_frames_mismatches={}\nposition_delta_distinct=9\nposition_deltas_top8=[(9, 3), (8, 2), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]\nposition_span=71\nframes_span=576\nposition_over_frames_ratio=0.123264\n",
         s.position_plus_frames_mismatches
     )));
     assert!(!text.contains("continuity_violations"));
+}
+
+#[test]
+fn position_over_frames_ratio_equal_units() {
+    let s = summarize(
+        &[
+            capture_with_frames(0, 0, 480),
+            capture_with_frames(480, 1, 480),
+            capture_with_frames(960, 2, 480),
+        ],
+        1000,
+        0,
+    );
+    assert_eq!(s.capture_packets, 3);
+    assert_eq!(s.position_span, Some(960));
+    assert_eq!(s.frames_span, 960);
+    assert!(s.text().contains("position_over_frames_ratio=1.000000\n"));
+}
+
+#[test]
+fn position_over_frames_ratio_44100_to_48000() {
+    let mut events = Vec::new();
+    let mut position = 0;
+    for i in 0..=32 {
+        let frames = if i < 30 && i % 3 == 2 { 140 } else { 139 };
+        events.push(capture_with_frames(position, i, frames));
+        if i != 32 {
+            position += 128;
+        }
+    }
+    let s = summarize(&events, 1000, 0);
+    let ratio = s.position_span.unwrap() as f64 / s.frames_span as f64;
+    let expected = 44_100.0 / 48_000.0;
+    assert!((ratio - expected).abs() < 0.0001, "ratio={ratio}");
+}
+
+#[test]
+fn position_over_frames_ratio_unavailable_without_span() {
+    for events in [vec![], vec![capture_with_frames(10, 0, 48)]] {
+        let s = summarize(&events, 1000, 0);
+        assert!(
+            s.text()
+                .contains("position_over_frames_ratio=not_available\n")
+        );
+    }
+    let backwards = summarize(
+        &[
+            capture_with_frames(100, 0, 48),
+            capture_with_frames(90, 1, 48),
+        ],
+        1000,
+        0,
+    );
+    assert_eq!(backwards.position_span, None);
+    assert!(backwards.text().contains(
+        "position_span=not_available\nframes_span=48\nposition_over_frames_ratio=not_available\n"
+    ));
+}
+
+#[test]
+fn position_over_frames_ratio_exposes_gap_and_preserves_existing_lines() {
+    let s = summarize(
+        &[
+            capture_with_frames(0, 0, 48),
+            capture_with_frames(48, 1, 48),
+            capture_with_frames(144, 2, 48),
+        ],
+        1000,
+        0,
+    );
+    assert!(s.position_span.unwrap() as f64 / s.frames_span as f64 > 1.0);
+    let text = s.text();
+    assert!(
+        text.contains("position_span=144\nframes_span=96\nposition_over_frames_ratio=1.500000\n")
+    );
+    assert!(text.contains("position_plus_frames_mismatches=1\n"));
+    assert!(text.contains("position_delta_distinct=2\n"));
+    assert!(text.contains("position_deltas_top8=[(48, 1), (96, 1)]\n"));
 }

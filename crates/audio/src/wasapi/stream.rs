@@ -490,6 +490,51 @@ pub(super) fn device(endpoint: &str, r: &mut Report) -> Result<IMMDevice, End> {
     // SAFETY: wide stays alive for the synchronous call.
     r.call("GetDevice", unsafe { e.GetDevice(PCWSTR(wide.as_ptr())) })
 }
+fn record_device_format(d: &IMMDevice, r: &mut Report) {
+    // SAFETY: read-only property store; PROPVARIANT remains live while copied.
+    let property = (|| {
+        let store = unsafe { d.OpenPropertyStore(STGM_READ) }?;
+        unsafe { store.GetValue(&PKEY_AudioEngine_DeviceFormat) }
+    })();
+    let value = match property {
+        Ok(value) => value,
+        Err(e) => {
+            r.put("device_format", "not_available");
+            r.put(
+                "device_format.hresult",
+                format!("0x{:08X}", e.code().0 as u32),
+            );
+            return;
+        }
+    };
+    // SAFETY: inspect discriminant before reading the blob union member.
+    let inner = unsafe { &value.Anonymous.Anonymous };
+    if inner.vt != windows::Win32::System::Variant::VT_BLOB {
+        r.put("device_format", "not_available");
+        r.put("device_format.invalid", "expected VT_BLOB");
+        return;
+    }
+    // SAFETY: vt is VT_BLOB. Size and pointer are checked before constructing slice.
+    let blob = unsafe { inner.Anonymous.blob };
+    if blob.pBlobData.is_null() || !(18..=65553).contains(&blob.cbSize) {
+        r.put("device_format", "not_available");
+        r.put("device_format.invalid", "null pointer or invalid blob size");
+        return;
+    }
+    // SAFETY: property store owns cbSize bytes for the lifetime of value.
+    match Wave::from_bytes(unsafe {
+        std::slice::from_raw_parts(blob.pBlobData, blob.cbSize as usize)
+    }) {
+        Ok(wave) => {
+            r.put("device_format", wave.description());
+            r.put("device_format.sample_rate", wave.base().nSamplesPerSec);
+        }
+        Err(e) => {
+            r.put("device_format", "not_available");
+            r.put("device_format.invalid", format!("{e:?}"));
+        }
+    }
+}
 pub(super) fn activate(d: &IMMDevice, r: &mut Report) -> Result<IAudioClient, End> {
     // SAFETY: endpoint and COM apartment are live on the current worker.
     r.call("Activate.IAudioClient", unsafe {
@@ -779,6 +824,7 @@ fn prepare(
         },
     );
     let d = device(endpoint, r)?;
+    record_device_format(&d, r);
     // SAFETY: endpoint supports IMMEndpoint for read-only direction query.
     let ep = r.call("QueryInterface.IMMEndpoint", d.cast::<IMMEndpoint>())?;
     // SAFETY: valid endpoint.
