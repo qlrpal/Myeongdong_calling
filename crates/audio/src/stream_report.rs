@@ -95,7 +95,8 @@ pub struct Summary {
     pub timeouts: u64,
     pub packet_frames: BTreeMap<u32, u64>,
     pub packets_per_wake: BTreeMap<u32, u64>,
-    pub continuity_violations: u64,
+    pub position_plus_frames_mismatches: u64,
+    pub position_deltas: BTreeMap<u64, u64>,
     pub discontinuity_flags: u64,
     pub silent_flags: u64,
     pub timestamp_error_flags: u64,
@@ -118,6 +119,7 @@ pub fn summarize(events: &[ProbeEvent], frequency: u64, dropped: u64) -> Summary
     let mut previous = None;
     let mut previous_packet = None;
     let mut expected_position = None;
+    let mut previous_position: Option<u64> = None;
     let interval = |before: Option<u64>, now: u64, into: &mut Vec<f64>| {
         if frequency != 0
             && let Some(delta) = before.and_then(|b| now.checked_sub(b))
@@ -150,8 +152,13 @@ pub fn summarize(events: &[ProbeEvent], frequency: u64, dropped: u64) -> Summary
             }
             ProbeEvent::Capture(c) => {
                 count(&mut s.packet_frames, c.frames);
+                if let Some(previous) = previous_position {
+                    let delta = c.device_position.0.wrapping_sub(previous);
+                    *s.position_deltas.entry(delta).or_default() += 1;
+                }
+                previous_position = Some(c.device_position.0);
                 if expected_position.is_some_and(|p| p != c.device_position.0) {
-                    s.continuity_violations += 1;
+                    s.position_plus_frames_mismatches += 1;
                 }
                 expected_position = c.device_position.0.checked_add(u64::from(c.frames));
                 s.discontinuity_flags += u64::from(c.flags.data_discontinuity);
@@ -171,8 +178,15 @@ pub fn summarize(events: &[ProbeEvent], frequency: u64, dropped: u64) -> Summary
 }
 impl Summary {
     pub fn text(&self) -> String {
+        let mut top: Vec<_> = self
+            .position_deltas
+            .iter()
+            .map(|(&delta, &count)| (delta, count))
+            .collect();
+        top.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top.truncate(8);
         let mut out = format!(
-            "wait_return_intervals_ms={:?}\nevent_wake_intervals_ms={:?}\npacket_wake_intervals_ms={:?}\nbuffer_error_count={}\nzero_frame_count={}\nempty_wakes={}\ntimeouts={}\npacket_frames={:?}\npackets_per_wake={:?}\ncontinuity_violations={}\nflags.data_discontinuity={}\nflags.silent={}\nflags.timestamp_error={}\nrender.zero_padding={}\nrender.frames_written={:?}\n",
+            "wait_return_intervals_ms={:?}\nevent_wake_intervals_ms={:?}\npacket_wake_intervals_ms={:?}\nbuffer_error_count={}\nzero_frame_count={}\nempty_wakes={}\ntimeouts={}\npacket_frames={:?}\npackets_per_wake={:?}\nposition_plus_frames_mismatches={}\nposition_delta_distinct={}\nposition_deltas_top8={:?}\nflags.data_discontinuity={}\nflags.silent={}\nflags.timestamp_error={}\nrender.zero_padding={}\nrender.frames_written={:?}\n",
             self.all_intervals_ms,
             self.event_intervals_ms,
             self.packet_intervals_ms,
@@ -182,7 +196,9 @@ impl Summary {
             self.timeouts,
             self.packet_frames,
             self.packets_per_wake,
-            self.continuity_violations,
+            self.position_plus_frames_mismatches,
+            self.position_deltas.len(),
+            top,
             self.discontinuity_flags,
             self.silent_flags,
             self.timestamp_error_flags,

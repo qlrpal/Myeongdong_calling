@@ -4,7 +4,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         probe_table::{self, Metadata},
         wasapi,
     };
-    use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Command};
+    use std::{fs::OpenOptions, io::Write, path::PathBuf};
     let mut args = std::env::args_os().skip(1);
     let command = args.next();
     if command.as_deref() == Some(std::ffi::OsStr::new("stream")) {
@@ -26,13 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (executed_at, filename_time) = wasapi::timestamp();
     let devices = wasapi::devices(all)?;
-    let commit = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "None".into());
+    let commit = mdc_audio::provenance::commit_label();
     let metadata = Metadata {
         executed_at,
         os_version: wasapi::os_version(),

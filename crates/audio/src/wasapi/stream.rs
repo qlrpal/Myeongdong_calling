@@ -223,13 +223,7 @@ pub fn run(options: Options) -> Result<Output, Box<dyn std::error::Error>> {
     report.put("executed_at_utc", time);
     report.put("os", super::os_version());
     report.put("tool_version", env!("CARGO_PKG_VERSION"));
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unavailable".into());
+    let commit = crate::provenance::commit_label();
     report.put("commit", commit);
     let mut session = 0;
     // SAFETY: output points to a live u32; querying current process only.
@@ -251,6 +245,7 @@ pub fn run(options: Options) -> Result<Output, Box<dyn std::error::Error>> {
     report.put("measurement","diagnostic stream timestamps only; no mouth-to-ear latency judgment; no audio samples retained; no source sample preservation estimate");
     report.put("ring_capacity", RING_CAPACITY);
     report.put("packet_iteration_limit", PACKET_LIMIT);
+    report.put("exclusive_capture", "one GetBuffer per event wake");
     let (producer, mut consumer) = spsc::channel(RING_CAPACITY).ok_or("invalid ring capacity")?;
     let mut records = Vec::with_capacity(1_048_576);
     let mode = options.mode;
@@ -1254,7 +1249,7 @@ fn capture_cycle(
         s.seq = s.seq.wrapping_add(1);
         w.packets = w.packets.wrapping_add(1);
         w.frames = w.frames.wrapping_add(u64::from(packet.frames));
-        if w.failure_api != Api::None {
+        if exclusive || w.failure_api != Api::None {
             return;
         }
     }

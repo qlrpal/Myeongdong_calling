@@ -63,13 +63,16 @@ fn wake(time: u64, packets: u32) -> ProbeEvent {
     })
 }
 fn capture(position: u64, wake: u64) -> ProbeEvent {
+    capture_with_frames(position, wake, 48)
+}
+fn capture_with_frames(position: u64, wake: u64, frames: u32) -> ProbeEvent {
     ProbeEvent::Capture(CaptureRecord {
         seq: position,
         wake: QpcTicks(wake),
         after_get_buffer: QpcTicks(wake + 1),
         device_position: DevicePosition(position),
         first_frame_qpc: Hns(100),
-        frames: 48,
+        frames,
         flags: CaptureFlags {
             data_discontinuity: true,
             silent: false,
@@ -93,7 +96,8 @@ fn summary_empty_wakes_multiple_packets_continuity_and_flags() {
     assert_eq!(s.all_intervals_ms.as_ref().unwrap().p50, 10.0);
     assert_eq!(s.packet_intervals_ms.as_ref().unwrap().p50, 30.0);
     assert_eq!(s.empty_wakes, 2);
-    assert_eq!(s.continuity_violations, 1);
+    assert_eq!(s.position_plus_frames_mismatches, 1);
+    assert_eq!(s.position_deltas, [(48, 1), (96, 1)].into());
     assert_eq!(s.packet_frames.get(&48), Some(&3));
     assert_eq!(s.packets_per_wake.get(&2), Some(&1));
     assert_eq!(s.discontinuity_flags, 3);
@@ -182,4 +186,79 @@ fn event_intervals_skip_timeout_wait_returns() {
     assert!(text.contains("wait_return_intervals_ms="));
     assert!(text.contains("event_wake_intervals_ms="));
     assert!(text.contains("packet_wake_intervals_ms="));
+}
+
+#[test]
+fn position_deltas_empty_single_and_interleaved_events() {
+    assert!(summarize(&[], 1000, 0).position_deltas.is_empty());
+    assert!(
+        summarize(&[capture(12, 0)], 1000, 0)
+            .position_deltas
+            .is_empty()
+    );
+    let render = ProbeEvent::Render(RenderRecord {
+        seq: 0,
+        wake: QpcTicks(1),
+        padding_before: 0,
+        frames_written: 48,
+        after_release: QpcTicks(2),
+        clock_position: 0,
+        clock_qpc: Hns(0),
+        source: None,
+        work: QpcTicks(1),
+        deadline_missed: false,
+    });
+    let s = summarize(
+        &[capture(12, 0), wake(1, 0), render, capture(60, 2)],
+        1000,
+        0,
+    );
+    assert_eq!(s.position_deltas, [(48, 1)].into());
+    assert_eq!(s.position_plus_frames_mismatches, 0);
+}
+
+#[test]
+fn position_deltas_repeated_backward_and_expected_position_overflow() {
+    let s = summarize(&[capture(100, 0), capture(100, 1), capture(90, 2)], 1000, 0);
+    assert_eq!(
+        s.position_deltas,
+        [(0, 1), (90u64.wrapping_sub(100), 1)].into()
+    );
+    assert_eq!(s.position_plus_frames_mismatches, 2);
+    let s = summarize(
+        &[capture(u64::MAX, 0), capture(47, 1), capture(95, 2)],
+        1000,
+        0,
+    );
+    assert_eq!(s.position_plus_frames_mismatches, 0);
+    assert_eq!(s.position_deltas, [(48, 2)].into());
+}
+
+#[test]
+fn position_deltas_preserve_position_units_independently_of_frames() {
+    let packets = 10u64;
+    let events: Vec<_> = (0..packets)
+        .map(|i| capture_with_frames(i * 448, i, 488))
+        .collect();
+    let s = summarize(&events, 1000, 0);
+    assert_eq!(s.position_plus_frames_mismatches, packets - 1);
+    assert_eq!(s.position_deltas, [(448, packets - 1)].into());
+}
+
+#[test]
+fn position_delta_text_top8_sorted_and_limited() {
+    let mut events = vec![capture(0, 0)];
+    let mut position = 0;
+    for delta in [9, 8, 7, 6, 5, 4, 3, 2, 1, 9, 9, 8] {
+        position += delta;
+        events.push(capture(position, 0));
+    }
+    let s = summarize(&events, 1000, 0);
+    assert_eq!(s.position_deltas.len(), 9);
+    let text = s.text();
+    assert!(text.contains(&format!(
+        "position_plus_frames_mismatches={}\nposition_delta_distinct=9\nposition_deltas_top8=[(9, 3), (8, 2), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]\n",
+        s.position_plus_frames_mismatches
+    )));
+    assert!(!text.contains("continuity_violations"));
 }
