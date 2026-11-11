@@ -1,7 +1,7 @@
 //! One-stream diagnostic probe. COM objects never cross the worker boundary.
 use crate::{
     CaptureFlags, CaptureRecord, DataFlow, DevicePosition, Format, Hns, MmcssTask, QpcTicks,
-    RenderRecord, StreamActual, StreamMode, StreamRequest,
+    RenderRecord, StreamActual, StreamRequest,
     spsc::{self, Producer},
     stream_report::{self, Api, CallStatuses, ProbeEvent, WaitResult, WakeRecord},
 };
@@ -30,29 +30,7 @@ const E_FAIL: i32 = 0x80004005u32 as i32;
 const E_INVALID: i32 = 0x80070057u32 as i32;
 const RING_CAPACITY: usize = 131072;
 const PACKET_LIMIT: u32 = 64;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    SharedDefault,
-    SharedMin,
-    ExclusiveMin,
-}
-impl Mode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "shared-default" => Some(Self::SharedDefault),
-            "shared-min" => Some(Self::SharedMin),
-            "exclusive-min" => Some(Self::ExclusiveMin),
-            _ => None,
-        }
-    }
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::SharedDefault => "shared-default",
-            Self::SharedMin => "shared-min",
-            Self::ExclusiveMin => "exclusive-min",
-        }
-    }
-}
+pub use crate::stream_mode::Mode;
 pub struct Options {
     pub endpoint: String,
     pub mode: Mode,
@@ -347,7 +325,7 @@ fn worker(
         }
     }
     // prepare has returned: every stream COM object, event and MMCSS guard is gone.
-    if mode == Mode::ExclusiveMin && report.exclusive_attempted {
+    if mode.is_exclusive() && report.exclusive_attempted {
         release_check(&endpoint, &mut report);
     }
     report
@@ -757,7 +735,7 @@ fn prepare(
     );
     r.put(
         "initialization_api",
-        if mode == Mode::ExclusiveMin {
+        if mode.is_exclusive() {
             "IAudioClient::Initialize(EXCLUSIVE)"
         } else {
             "IAudioClient3::InitializeSharedAudioStream"
@@ -783,17 +761,43 @@ fn prepare(
         "endpoint.name",
         crate::probe_table::cell(&name, Clone::clone),
     );
-    if mode == Mode::ExclusiveMin
+    if mode.is_exclusive()
         && let Err(mut e) = preflight(&d, r)
     {
         e.stage = "refused";
         return Err(e);
     }
     let initial = activate(&d, r)?;
+    if mode.is_raw() {
+        let properties = AudioClientProperties {
+            cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+            bIsOffload: false.into(),
+            eCategory: AudioCategory_Other,
+            Options: AUDCLNT_STREAMOPTIONS_RAW,
+        };
+        r.put("client_properties.cbSize", properties.cbSize);
+        r.put("client_properties.bIsOffload", false);
+        r.put(
+            "client_properties.category",
+            format!("AudioCategory_Other ({})", properties.eCategory.0),
+        );
+        r.put(
+            "client_properties.options",
+            format!("AUDCLNT_STREAMOPTIONS_RAW (0x{:X})", properties.Options.0),
+        );
+        r.put("raw.application_verification", "not_verified; request accepted does not prove processing bypass; endpoint/driver/hardware processing may remain");
+        let c2 = r.call(
+            "QueryInterface.IAudioClient2",
+            initial.cast::<IAudioClient2>(),
+        )?;
+        // SAFETY: live uninitialized client and complete properties valid for this call.
+        let hr = unsafe { (c2.vtable().SetClientProperties)(c2.as_raw(), &properties) }.0;
+        r.hr("SetClientProperties", hr)?;
+    }
     // SAFETY: live uninitialized client; Wave copies and frees the returned allocation.
     let mix = Wave::from_api(r.call("GetMixFormat", unsafe { initial.GetMixFormat() })?)?;
     r.put("mix.format", mix.description());
-    let (client, wave, requested_frames, exclusive_period) = if mode == Mode::ExclusiveMin {
+    let (client, wave, requested_frames, exclusive_period) = if mode.is_exclusive() {
         drop(initial);
         exclusive(&d, &mix, r)?
     } else {
@@ -818,14 +822,14 @@ fn prepare(
         r.put("shared.fundamental_frames", fundamental);
         r.put("shared.min_frames", min);
         r.put("shared.max_frames", max);
-        let frames = if mode == Mode::SharedDefault {
+        let frames = if mode.uses_default_period() {
             default
         } else {
             min
         };
         r.put(
             "request.period_semantics",
-            if mode == Mode::SharedDefault {
+            if mode.uses_default_period() {
                 "IAudioClient3 default_frames requested"
             } else {
                 "IAudioClient3 min_frames requested"
@@ -835,7 +839,7 @@ fn prepare(
         let request = StreamRequest {
             endpoint_id: endpoint.into(),
             flow,
-            mode: StreamMode::Shared,
+            mode: mode.stream_mode(),
             period_frames: frames,
             format: mix.format(),
             mmcss: MmcssTask::ProAudio,
@@ -857,7 +861,7 @@ fn prepare(
         r.hr("InitializeSharedAudioStream", hr)?;
         (initial, mix, frames, 0)
     };
-    let c3 = if mode == Mode::ExclusiveMin {
+    let c3 = if mode.is_exclusive() {
         None
     } else {
         Some(r.call(
@@ -870,7 +874,7 @@ fn prepare(
     } else {
         hns_frames(exclusive_period, wave.base().nSamplesPerSec)?
     };
-    if mode == Mode::ExclusiveMin {
+    if mode.is_exclusive() {
         r.put("initialization_api", "IAudioClient::Initialize(EXCLUSIVE)");
     }
     r.put(
@@ -881,11 +885,7 @@ fn prepare(
     let request = StreamRequest {
         endpoint_id: endpoint.into(),
         flow,
-        mode: if mode == Mode::ExclusiveMin {
-            StreamMode::Exclusive
-        } else {
-            StreamMode::Shared
-        },
+        mode: mode.stream_mode(),
         period_frames: requested_frames,
         format: wave.format(),
         mmcss: MmcssTask::ProAudio,
@@ -919,7 +919,7 @@ fn prepare(
         u64::try_from(latency).map_err(|_| End::setup("GetStreamLatency.negative", E_FAIL))?;
     let actual = StreamActual {
         buffer_frames,
-        period_frames: if mode == Mode::ExclusiveMin {
+        period_frames: if mode.is_exclusive() {
             buffer_frames
         } else {
             period
@@ -929,10 +929,10 @@ fn prepare(
         clock_frequency,
     };
     r.put("StreamActual", format!("{actual:?}"));
-    r.put("actual.period_basis",if mode==Mode::ExclusiveMin {"GetBufferSize frames; exclusive event period; requested REFERENCE_TIME recorded separately"}else{"GetCurrentSharedModeEnginePeriod"});
+    r.put("actual.period_basis",if mode.is_exclusive() {"GetBufferSize frames; exclusive event period; requested REFERENCE_TIME recorded separately"}else{"GetCurrentSharedModeEnginePeriod"});
     r.put(
         "actual.period_hns",
-        if mode == Mode::ExclusiveMin {
+        if mode.is_exclusive() {
             exclusive_period.to_string()
         } else {
             "not applicable; engine period measured in frames".into()
@@ -1014,7 +1014,7 @@ fn prepare(
             render: render.as_ref(),
             clock: &clock,
             event: event.0,
-            exclusive: mode == Mode::ExclusiveMin,
+            exclusive: mode.is_exclusive(),
             buffer: buffer_frames,
             budget,
             start,

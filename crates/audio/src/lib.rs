@@ -238,6 +238,7 @@ mod tests {
 pub mod probe_table;
 pub mod provenance;
 pub mod spsc;
+pub mod stream_mode;
 pub mod stream_report;
 #[cfg(windows)]
 pub mod wasapi;

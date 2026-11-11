@@ -79,7 +79,7 @@ fn stream(
             let value = args.next().ok_or("--mode requires a value")?;
             mode = Some(
                 Mode::parse(value.to_str().ok_or("invalid mode")?)
-                    .ok_or("mode must be shared-default|shared-min|exclusive-min")?,
+                    .ok_or("mode must be shared-default|shared-min|shared-default-raw|shared-min-raw|exclusive-min")?,
             );
         } else if arg == "--seconds" && seconds.is_none() {
             let value = args.next().ok_or("--seconds requires N")?;
