@@ -28,6 +28,22 @@ pub struct Consumer<T: Copy> {
     unique: PhantomData<Cell<()>>,
 }
 
+/// Retain on the control thread until both realtime workers have joined.
+/// Dropping this owner last keeps ring storage destruction off those workers.
+pub struct Keeper<T: Copy> {
+    _ring: Arc<Ring<T>>,
+}
+
+pub fn channel_with_keeper<T: Copy>(
+    capacity: usize,
+) -> Option<(Producer<T>, Consumer<T>, Keeper<T>)> {
+    let (producer, consumer) = channel(capacity)?;
+    let keeper = Keeper {
+        _ring: Arc::clone(&producer.ring),
+    };
+    Some((producer, consumer, keeper))
+}
+
 /// Allocates and touches every slot once. Invalid capacities return None.
 pub fn channel<T: Copy>(capacity: usize) -> Option<(Producer<T>, Consumer<T>)> {
     channel_at(capacity, 0)
@@ -85,6 +101,17 @@ impl<T: Copy> Producer<T> {
     }
 }
 impl<T: Copy> Consumer<T> {
+    /// Instantaneous snapshot; the producer may publish more values immediately.
+    pub fn len(&self) -> usize {
+        let r = self.ring.read.load(Ordering::Relaxed);
+        let w = self.ring.write.load(Ordering::Acquire);
+        w.wrapping_sub(r)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn pop(&mut self) -> Option<T> {
         let r = self.ring.read.load(Ordering::Relaxed);
         if r == self.ring.write.load(Ordering::Acquire) {
@@ -101,16 +128,40 @@ impl<T: Copy> Consumer<T> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn len_across_cursor_wrap() {
+        let (mut p, mut c) = super::channel_at(4, usize::MAX - 1).unwrap();
+        assert_eq!(c.len(), 0);
+        for i in 0..4 {
+            assert!(p.push(i));
+            assert_eq!(c.len(), i + 1);
+        }
+        for i in 0..2 {
+            assert_eq!(c.pop(), Some(i));
+            assert_eq!(c.len(), 3 - i);
+        }
+        for i in 4..6 {
+            assert!(p.push(i));
+        }
+        assert_eq!(c.len(), 4);
+        for i in 2..6 {
+            assert_eq!(c.pop(), Some(i));
+            assert_eq!(c.len(), 5 - i);
+        }
+    }
+
+    #[test]
     fn integer_cursor_wrap() {
         let (mut p, mut c) = super::channel_at(4, usize::MAX - 1).unwrap();
         for i in 0..100 {
             assert!(p.push(i));
+            assert_eq!(c.len(), 1);
             assert_eq!(c.pop(), Some(i));
         }
         for i in 0..4 {
             assert!(p.push(i));
         }
         assert!(!p.push(99));
+        assert_eq!(c.len(), 4);
         for i in 0..4 {
             assert_eq!(c.pop(), Some(i));
         }

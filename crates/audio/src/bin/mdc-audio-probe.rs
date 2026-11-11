@@ -7,6 +7,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::{fs::OpenOptions, io::Write, path::PathBuf};
     let mut args = std::env::args_os().skip(1);
     let command = args.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("loopback")) {
+        return loopback(args);
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("stream")) {
         return stream(args);
     }
@@ -119,6 +122,89 @@ fn stream(
             "stream did not complete normally; see metadata for raw HRESULT and termination reason"
                 .into(),
         )
+    }
+}
+
+#[cfg(windows)]
+fn loopback(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mdc_audio::wasapi::{
+        loopback::{self, Options},
+        stream::Mode,
+    };
+    const HELP: &str = "usage: mdc-audio-probe loopback --capture ID --render ID --capture-mode M --render-mode M --seconds N [--gain-db G] [--prefill-frames P] [--out DIR]\nM: shared-default|shared-min|shared-default-raw|shared-min-raw; N: 1..=120; G: -60..=0 (default -20); P: 0..=16384 (default capture actual period); out: .local/p1\nloopback means microphone-to-headphone direct routing, not WASAPI output capture (AUDCLNT_STREAMFLAGS_LOOPBACK).";
+    let mut values = std::collections::BTreeMap::new();
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("{HELP}");
+            return Ok(());
+        }
+        let key = arg.into_string().map_err(|_| "invalid argument")?;
+        if ![
+            "--capture",
+            "--render",
+            "--capture-mode",
+            "--render-mode",
+            "--seconds",
+            "--gain-db",
+            "--prefill-frames",
+            "--out",
+        ]
+        .contains(&key.as_str())
+            || values.contains_key(&key)
+        {
+            return Err(format!("unknown or repeated loopback argument: {key}\n{HELP}").into());
+        }
+        values.insert(key, args.next().ok_or(HELP)?);
+    }
+    let text = |key: &str| -> Result<&str, Box<dyn std::error::Error>> {
+        values
+            .get(key)
+            .ok_or_else(|| format!("{key} is required\n{HELP}").into())
+            .and_then(|v| v.to_str().ok_or_else(|| "argument must be Unicode".into()))
+    };
+    let mode = |key| -> Result<Mode, Box<dyn std::error::Error>> {
+        let m = Mode::parse(text(key)?).ok_or("invalid mode")?;
+        if m.is_exclusive() {
+            return Err("loopback stage 1 supports shared modes only".into());
+        }
+        Ok(m)
+    };
+    let result = loopback::run(Options {
+        capture: text("--capture")?.into(),
+        render: text("--render")?.into(),
+        capture_mode: mode("--capture-mode")?,
+        render_mode: mode("--render-mode")?,
+        seconds: text("--seconds")?.parse()?,
+        gain_db: if values.contains_key("--gain-db") {
+            text("--gain-db")?.parse()?
+        } else {
+            -20.0
+        },
+        prefill_frames: if values.contains_key("--prefill-frames") {
+            Some(text("--prefill-frames")?.parse()?)
+        } else {
+            None
+        },
+        out: values
+            .get("--out")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ".local/p1".into()),
+    })?;
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    write!(stdout, "{}", result.summary)?;
+    writeln!(
+        stdout,
+        "CSV: {}\nMetadata: {}",
+        result.records.display(),
+        result.metadata.display()
+    )?;
+    if result.successful {
+        Ok(())
+    } else {
+        Err("loopback did not complete normally; see metadata".into())
     }
 }
 

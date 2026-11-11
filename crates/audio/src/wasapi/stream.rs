@@ -23,13 +23,13 @@ use windows::{
     core::{GUID, Interface, PCWSTR, w},
 };
 
-static STOP: AtomicBool = AtomicBool::new(false);
-static WORKER_DONE: AtomicBool = AtomicBool::new(false);
-static BUSY: AtomicBool = AtomicBool::new(false);
-const E_FAIL: i32 = 0x80004005u32 as i32;
-const E_INVALID: i32 = 0x80070057u32 as i32;
+pub(super) static STOP: AtomicBool = AtomicBool::new(false);
+pub(super) static WORKER_DONE: AtomicBool = AtomicBool::new(false);
+pub(super) static BUSY: AtomicBool = AtomicBool::new(false);
+pub(super) const E_FAIL: i32 = 0x80004005u32 as i32;
+pub(super) const E_INVALID: i32 = 0x80070057u32 as i32;
 const RING_CAPACITY: usize = 131072;
-const PACKET_LIMIT: u32 = 64;
+pub(super) const PACKET_LIMIT: u32 = 64;
 pub use crate::stream_mode::Mode;
 pub struct Options {
     pub endpoint: String,
@@ -44,13 +44,13 @@ pub struct Output {
     pub successful: bool,
 }
 #[derive(Clone, Copy, Debug)]
-struct End {
+pub(super) struct End {
     stage: &'static str,
     api: &'static str,
-    hresult: i32,
+    pub(super) hresult: i32,
 }
 impl End {
-    fn setup(api: &'static str, hresult: i32) -> Self {
+    pub(super) fn setup(api: &'static str, hresult: i32) -> Self {
         Self {
             stage: "prepare",
             api,
@@ -59,8 +59,8 @@ impl End {
     }
 }
 #[derive(Default)]
-struct Report {
-    fields: Vec<(String, String)>,
+pub(super) struct Report {
+    pub(super) fields: Vec<(String, String)>,
     dropped: u64,
     frequency: u64,
     started: u64,
@@ -69,7 +69,7 @@ struct Report {
     exclusive_attempted: bool,
 }
 impl Report {
-    fn put(&mut self, key: impl Into<String>, value: impl ToString) {
+    pub(super) fn put(&mut self, key: impl Into<String>, value: impl ToString) {
         let key = key.into();
         let mut unique = key.clone();
         let mut occurrence = 2u64;
@@ -79,7 +79,7 @@ impl Report {
         }
         self.fields.push((unique, value.to_string()));
     }
-    fn hr(&mut self, api: &'static str, hr: i32) -> Result<(), End> {
+    pub(super) fn hr(&mut self, api: &'static str, hr: i32) -> Result<(), End> {
         self.put(format!("{api}.hresult"), format!("0x{:08X}", hr as u32));
         if hr < 0 {
             Err(End::setup(api, hr))
@@ -87,7 +87,11 @@ impl Report {
             Ok(())
         }
     }
-    fn call<T>(&mut self, api: &'static str, r: windows::core::Result<T>) -> Result<T, End> {
+    pub(super) fn call<T>(
+        &mut self,
+        api: &'static str,
+        r: windows::core::Result<T>,
+    ) -> Result<T, End> {
         match r {
             Ok(v) => {
                 self.hr(api, 0)?;
@@ -101,7 +105,7 @@ impl Report {
         }
     }
 }
-unsafe extern "system" fn console_handler(kind: u32) -> windows::core::BOOL {
+pub(super) unsafe extern "system" fn console_handler(kind: u32) -> windows::core::BOOL {
     if kind == CTRL_C_EVENT
         || kind == CTRL_BREAK_EVENT
         || kind == CTRL_CLOSE_EVENT
@@ -131,7 +135,7 @@ impl Drop for WorkerDone {
         WORKER_DONE.store(true, Ordering::Release);
     }
 }
-struct ConsoleGuard(bool);
+pub(super) struct ConsoleGuard(pub(super) bool);
 impl Drop for ConsoleGuard {
     fn drop(&mut self) {
         if self.0 {
@@ -141,14 +145,14 @@ impl Drop for ConsoleGuard {
         BUSY.store(false, Ordering::Release);
     }
 }
-struct Event(HANDLE);
+pub(super) struct Event(pub(super) HANDLE);
 impl Drop for Event {
     fn drop(&mut self) {
         // SAFETY: Event uniquely owns a successfully created kernel handle.
         let _ = unsafe { CloseHandle(self.0) };
     }
 }
-struct Mmcss(Option<HANDLE>);
+pub(super) struct Mmcss(pub(super) Option<HANDLE>);
 impl Drop for Mmcss {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
@@ -332,11 +336,16 @@ fn worker(
 }
 
 /// Owns an API-allocated WAVEFORMATEX including arbitrary trailing bytes.
-struct Wave {
+pub(super) struct Wave {
     storage: Vec<u64>,
     length: usize,
 }
 impl Wave {
+    pub(super) fn bytes(&self) -> &[u8] {
+        // SAFETY: constructors initialize length bytes in owned storage.
+        unsafe { std::slice::from_raw_parts(self.ptr().cast(), self.length) }
+    }
+
     fn from_bytes(bytes: &[u8]) -> Result<Self, End> {
         if bytes.len() < 18 {
             return Err(End::setup("waveformat.length", E_INVALID));
@@ -355,14 +364,14 @@ impl Wave {
             length: bytes.len(),
         })
     }
-    fn ptr(&self) -> *const WAVEFORMATEX {
+    pub(super) fn ptr(&self) -> *const WAVEFORMATEX {
         self.storage.as_ptr().cast()
     }
     fn base(&self) -> WAVEFORMATEX {
         // SAFETY: constructors validate the base header and own the backing allocation.
         unsafe { self.ptr().read_unaligned() }
     }
-    fn from_api(p: *mut WAVEFORMATEX) -> Result<Self, End> {
+    pub(super) fn from_api(p: *mut WAVEFORMATEX) -> Result<Self, End> {
         if p.is_null() {
             return Err(End::setup("waveformat.null", E_FAIL));
         }
@@ -372,7 +381,7 @@ impl Wave {
         // SAFETY: same API allocation remains alive while copied.
         Self::from_bytes(unsafe { std::slice::from_raw_parts(p.cast(), length) })
     }
-    fn description(&self) -> String {
+    pub(super) fn description(&self) -> String {
         let f = self.base();
         let tag = f.wFormatTag;
         let ch = f.nChannels;
@@ -422,7 +431,7 @@ impl Wave {
         }
     }
 }
-fn current(c: &IAudioClient3, label: &str, r: &mut Report) -> Result<u32, End> {
+pub(super) fn current(c: &IAudioClient3, label: &str, r: &mut Report) -> Result<u32, End> {
     let mut p = std::ptr::null_mut();
     let mut frames = 0;
     // SAFETY: valid interface and writable output locations; the returned allocation is freed below.
@@ -445,7 +454,7 @@ fn current(c: &IAudioClient3, label: &str, r: &mut Report) -> Result<u32, End> {
     }
     Ok(frames)
 }
-fn device(endpoint: &str, r: &mut Report) -> Result<IMMDevice, End> {
+pub(super) fn device(endpoint: &str, r: &mut Report) -> Result<IMMDevice, End> {
     // SAFETY: caller owns an initialized COM apartment; exact ID is nul-terminated.
     let e: IMMDeviceEnumerator = r.call("CoCreateInstance", unsafe {
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -454,7 +463,7 @@ fn device(endpoint: &str, r: &mut Report) -> Result<IMMDevice, End> {
     // SAFETY: wide stays alive for the synchronous call.
     r.call("GetDevice", unsafe { e.GetDevice(PCWSTR(wide.as_ptr())) })
 }
-fn activate(d: &IMMDevice, r: &mut Report) -> Result<IAudioClient, End> {
+pub(super) fn activate(d: &IMMDevice, r: &mut Report) -> Result<IAudioClient, End> {
     // SAFETY: endpoint and COM apartment are live on the current worker.
     r.call("Activate.IAudioClient", unsafe {
         d.Activate(CLSCTX_ALL, None)
@@ -1080,7 +1089,7 @@ mod raw_qpc {
         pub fn QueryPerformanceCounter(value: *mut i64) -> i32;
     }
 }
-fn qpc() -> (i32, u64) {
+pub(super) fn qpc() -> (i32, u64) {
     let mut value = 0;
     // SAFETY: writable stack output; kernel function has no allocation or COM error wrapper.
     if unsafe { raw_qpc::QueryPerformanceCounter(&mut value) } == 0 {
@@ -1091,7 +1100,7 @@ fn qpc() -> (i32, u64) {
         Err(_) => (E_FAIL, 0),
     }
 }
-fn last_error() -> i32 {
+pub(super) fn last_error() -> i32 {
     // SAFETY: retrieves calling thread's Win32 error without constructing Error.
     let e = unsafe { GetLastError() }.0;
     if e == 0 {
@@ -1100,7 +1109,7 @@ fn last_error() -> i32 {
         windows::core::HRESULT::from_win32(e).0
     }
 }
-fn raw_next(c: &IAudioCaptureClient, n: &mut u32) -> i32 {
+pub(super) fn raw_next(c: &IAudioCaptureClient, n: &mut u32) -> i32 {
     // SAFETY: live worker-owned interface, writable output; caller checks HRESULT.
     unsafe { (c.vtable().GetNextPacketSize)(c.as_raw(), n) }.0
 }
@@ -1126,11 +1135,11 @@ fn raw_capture_get(c: &IAudioCaptureClient, p: &mut Packet) -> i32 {
     }
     .0
 }
-fn raw_capture_release(c: &IAudioCaptureClient, frames: u32) -> i32 {
+pub(super) fn raw_capture_release(c: &IAudioCaptureClient, frames: u32) -> i32 {
     // SAFETY: caller pairs each acquired GetBuffer exactly once, including zero frames.
     unsafe { (c.vtable().ReleaseBuffer)(c.as_raw(), frames) }.0
 }
-fn raw_padding(c: &IAudioClient, n: &mut u32) -> i32 {
+pub(super) fn raw_padding(c: &IAudioClient, n: &mut u32) -> i32 {
     // SAFETY: initialized shared render client, writable output; caller checks HRESULT.
     unsafe { (c.vtable().GetCurrentPadding)(c.as_raw(), n) }.0
 }

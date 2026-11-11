@@ -234,6 +234,7 @@ mod tests {
         assert_eq!(fine.smallest_aligned(120), Some(240));
     }
 }
+pub mod loopback_report;
 /// Read-only device probe records and presentation, outside realtime paths.
 pub mod probe_table;
 pub mod provenance;
