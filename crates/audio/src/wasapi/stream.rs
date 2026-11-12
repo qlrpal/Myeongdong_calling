@@ -394,7 +394,7 @@ impl Wave {
     pub(super) fn ptr(&self) -> *const WAVEFORMATEX {
         self.storage.as_ptr().cast()
     }
-    fn base(&self) -> WAVEFORMATEX {
+    pub(super) fn base(&self) -> WAVEFORMATEX {
         // SAFETY: constructors validate the base header and own the backing allocation.
         unsafe { self.ptr().read_unaligned() }
     }
@@ -490,7 +490,29 @@ pub(super) fn device(endpoint: &str, r: &mut Report) -> Result<IMMDevice, End> {
     // SAFETY: wide stays alive for the synchronous call.
     r.call("GetDevice", unsafe { e.GetDevice(PCWSTR(wide.as_ptr())) })
 }
-fn record_device_format(d: &IMMDevice, r: &mut Report) {
+pub(super) fn parse_device_format(
+    value: &windows::Win32::System::Com::StructuredStorage::PROPVARIANT,
+) -> Result<Option<Wave>, String> {
+    // SAFETY: inspect discriminant before reading the blob union member.
+    let inner = unsafe { &value.Anonymous.Anonymous };
+    if inner.vt == windows::Win32::System::Variant::VT_EMPTY {
+        return Ok(None);
+    }
+    if inner.vt != windows::Win32::System::Variant::VT_BLOB {
+        return Err("expected VT_BLOB".into());
+    }
+    // SAFETY: vt is VT_BLOB. Size and pointer are checked before constructing slice.
+    let blob = unsafe { inner.Anonymous.blob };
+    if blob.pBlobData.is_null() || !(18..=65553).contains(&blob.cbSize) {
+        return Err("null pointer or invalid blob size".into());
+    }
+    // SAFETY: property store owns cbSize bytes for the lifetime of value.
+    Wave::from_bytes(unsafe { std::slice::from_raw_parts(blob.pBlobData, blob.cbSize as usize) })
+        .map(Some)
+        .map_err(|e| format!("{e:?}"))
+}
+
+pub(super) fn record_device_format(d: &IMMDevice, r: &mut Report) {
     // SAFETY: read-only property store; PROPVARIANT remains live while copied.
     let property = (|| {
         let store = unsafe { d.OpenPropertyStore(STGM_READ) }?;
@@ -507,31 +529,18 @@ fn record_device_format(d: &IMMDevice, r: &mut Report) {
             return;
         }
     };
-    // SAFETY: inspect discriminant before reading the blob union member.
-    let inner = unsafe { &value.Anonymous.Anonymous };
-    if inner.vt != windows::Win32::System::Variant::VT_BLOB {
-        r.put("device_format", "not_available");
-        r.put("device_format.invalid", "expected VT_BLOB");
-        return;
-    }
-    // SAFETY: vt is VT_BLOB. Size and pointer are checked before constructing slice.
-    let blob = unsafe { inner.Anonymous.blob };
-    if blob.pBlobData.is_null() || !(18..=65553).contains(&blob.cbSize) {
-        r.put("device_format", "not_available");
-        r.put("device_format.invalid", "null pointer or invalid blob size");
-        return;
-    }
-    // SAFETY: property store owns cbSize bytes for the lifetime of value.
-    match Wave::from_bytes(unsafe {
-        std::slice::from_raw_parts(blob.pBlobData, blob.cbSize as usize)
-    }) {
-        Ok(wave) => {
+    match parse_device_format(&value) {
+        Ok(Some(wave)) => {
             r.put("device_format", wave.description());
             r.put("device_format.sample_rate", wave.base().nSamplesPerSec);
         }
+        Ok(None) => {
+            r.put("device_format", "not_available");
+            r.put("device_format.invalid", "expected VT_BLOB");
+        }
         Err(e) => {
             r.put("device_format", "not_available");
-            r.put("device_format.invalid", format!("{e:?}"));
+            r.put("device_format.invalid", e);
         }
     }
 }

@@ -24,6 +24,9 @@ pub struct DeviceProbe {
     pub mix_format: Query<Format>,
     /// Raw WAVEFORMATEX details, including extensible subtype and valid bits.
     pub mix_details: Query<String>,
+    pub device_format: Query<Format>,
+    /// Raw default-device WAVEFORMATEX details, including extensible fields.
+    pub device_format_details: Query<String>,
     pub shared: Query<SharedPeriods>,
     pub exclusive: Query<ExclusivePeriods>,
     pub raw_supported: Query<bool>,
@@ -80,18 +83,16 @@ fn text(q: &Query<String>) -> String {
 fn boolean(q: &Query<bool>) -> String {
     cell(q, ToString::to_string)
 }
-fn format(q: &Query<Format>) -> String {
+fn format(q: &Query<Format>, details_column: &str) -> String {
     cell(q, |f| {
+        let kind = if f.float {
+            "float".into()
+        } else {
+            format!("PCM/other (see {details_column})")
+        };
         format!(
             "{} Hz / {} ch / {} bit / {}",
-            f.sample_rate,
-            f.channels,
-            f.bits_per_sample,
-            if f.float {
-                "float"
-            } else {
-                "PCM/other (see mix_details)"
-            }
+            f.sample_rate, f.channels, f.bits_per_sample, kind
         )
     })
 }
@@ -122,19 +123,20 @@ fn shared_ms(d: &DeviceProbe, select: impl FnOnce(&SharedPeriods) -> u32) -> Str
 
 pub fn table(devices: &[DeviceProbe]) -> String {
     let mut out = String::from(
-        "FLOW | NAME | STATE | DEFAULT console/communications | DRIVER\n  MIX | SHARED min/fundamental ms | EXCLUSIVE min ms | RAW | EFX\n",
+        "FLOW | NAME | STATE | DEFAULT console/communications | DRIVER\n  MIX | DEVFMT | SHARED min/fundamental ms | EXCLUSIVE min ms | RAW | EFX\n",
     );
     for d in devices {
         let clean = |s: String| s.replace(['\r', '\n', '\t'], " ");
         out.push_str(&format!(
-            "{:?} | {} | {} | {}/{} | {}\n  {} | {}/{} | {} | {} | {}\n",
+            "{:?} | {} | {} | {}/{} | {}\n  {} | {} | {}/{} | {} | {} | {}\n",
             d.flow,
             clean(text(&d.friendly_name)),
             text(&d.state),
             boolean(&d.default_console),
             boolean(&d.default_communications),
             clean(text(&d.driver)),
-            format(&d.mix_format),
+            format(&d.mix_format, "mix_details"),
+            format(&d.device_format, "device_format_details"),
             shared_ms(d, |p| p.min_frames),
             shared_ms(d, |p| p.fundamental_frames),
             cell(&d.exclusive, |p| std::format!("{:.6}", hns_ms(p.minimum))),
@@ -164,6 +166,8 @@ pub fn csv(meta: &Metadata, devices: &[DeviceProbe]) -> String {
         "driver",
         "mix_format",
         "mix_details",
+        "device_format",
+        "device_format_details",
         "shared_default_frames",
         "shared_fundamental_frames",
         "shared_min_frames",
@@ -211,8 +215,10 @@ pub fn csv(meta: &Metadata, devices: &[DeviceProbe]) -> String {
             boolean(&d.default_console),
             boolean(&d.default_communications),
             text(&d.driver),
-            format(&d.mix_format),
+            format(&d.mix_format, "mix_details"),
             text(&d.mix_details),
+            format(&d.device_format, "device_format_details"),
+            text(&d.device_format_details),
         ]);
         for select in [
             |p: &SharedPeriods| p.default_frames,
@@ -247,8 +253,12 @@ pub fn csv(meta: &Metadata, devices: &[DeviceProbe]) -> String {
                 std::format!("{:?}", d.flow),
                 text(&d.endpoint_id),
             ]);
-            v.resize(29, String::new());
-            v.extend([
+            v.resize(headers.len(), String::new());
+            let effect_source = headers
+                .iter()
+                .position(|header| *header == "effect_source")
+                .expect("effect_source header");
+            v[effect_source..effect_source + 4].clone_from_slice(&[
                 effect.source.clone(),
                 effect.key.clone(),
                 effect.endpoint.to_string(),

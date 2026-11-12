@@ -440,6 +440,56 @@ fn inspect(
     let shared;
     let mix_format;
     let mix_details;
+    let device_format_query = store
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|store| unsafe { store.GetValue(&PKEY_AudioEngine_DeviceFormat) }.map_err(error))
+        .and_then(|value| {
+            stream::parse_device_format(&value)
+                .map_err(|reason| format!("{reason} (HRESULT 0x{:08X})", 0x80070057u32))
+        })
+        .map(|wave| {
+            wave.map(|wave| {
+                let f = wave.base();
+                let tag = f.wFormatTag;
+                let extra = f.cbSize;
+                let align = f.nBlockAlign;
+                let byte_rate = f.nAvgBytesPerSec;
+                let mut is_float = tag == 3;
+                let mut detail = format!(
+                    "tag={tag:#06x}; cbSize={extra}; block_align={align}; bytes_per_sec={byte_rate}"
+                );
+                if tag == 0xfffe && extra >= 22 {
+                    // SAFETY: parse_device_format validated the full cbSize payload.
+                    let ext = unsafe { wave.ptr().cast::<WAVEFORMATEXTENSIBLE>().read_unaligned() };
+                    let subtype = ext.SubFormat;
+                    let mask = ext.dwChannelMask;
+                    let valid = unsafe { ext.Samples.wValidBitsPerSample };
+                    is_float = subtype
+                        == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+                    detail.push_str(&format!(
+                        "; subtype={subtype:?}; valid_bits={valid}; channel_mask={mask:#x}"
+                    ));
+                }
+                (
+                    Format {
+                        sample_rate: f.nSamplesPerSec,
+                        channels: f.nChannels,
+                        bits_per_sample: f.wBitsPerSample,
+                        float: is_float,
+                    },
+                    detail,
+                )
+            })
+        });
+    let device_format = device_format_query
+        .as_ref()
+        .map(|value| value.as_ref().map(|(format, _)| *format))
+        .map_err(Clone::clone);
+    let device_format_details = device_format_query
+        .as_ref()
+        .map(|value| value.as_ref().map(|(_, details)| details.clone()))
+        .map_err(Clone::clone);
     match &client {
         Err(e) => {
             shared = Err(e.clone());
@@ -540,6 +590,8 @@ fn inspect(
         driver: Ok(Some(driver_parts.join("; "))),
         mix_format,
         mix_details,
+        device_format,
+        device_format_details,
         shared,
         exclusive,
         raw_supported: store.as_ref().map_err(Clone::clone).and_then(raw),

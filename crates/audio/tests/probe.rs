@@ -16,6 +16,13 @@ fn fixture() -> DeviceProbe {
             float: true,
         })),
         mix_details: Ok(None),
+        device_format: Ok(Some(Format {
+            sample_rate: 44100,
+            channels: 2,
+            bits_per_sample: 16,
+            float: false,
+        })),
+        device_format_details: Ok(Some("tag=0x0001; cbSize=0".into())),
         shared: Ok(Some(SharedPeriods {
             default_frames: 480,
             fundamental_frames: 48,
@@ -34,6 +41,31 @@ fn fixture() -> DeviceProbe {
             clsids: Ok(Some("{clsid}".into())),
         }],
     }
+}
+
+fn csv_rows(csv: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = csv.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => row.push(std::mem::take(&mut field)),
+            '\r' if !quoted && chars.peek() == Some(&'\n') => {
+                chars.next();
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            _ => field.push(ch),
+        }
+    }
+    rows
 }
 fn metadata() -> Metadata {
     Metadata {
@@ -67,11 +99,88 @@ fn milliseconds_and_table_warning() {
     let output = table(&[d.clone()]);
     assert_eq!(output.lines().count(), 4);
     assert!(output.contains("2.000000/1.000000"));
+    assert!(output.contains("48000 Hz / 2 ch / 32 bit / float"));
+    assert!(output.contains("44100 Hz / 2 ch / 16 bit / PCM/other"));
     assert!(output.contains("WARNING: endpoint FX registered"));
     d.flow = DataFlow::Capture;
     assert!(!endpoint_warning(&d).starts_with("WARNING"));
     d.effects[0].clsids = Err("HRESULT 0x80070005".into());
     assert!(endpoint_warning(&d).contains("unknown"));
+}
+
+#[test]
+fn device_format_query_cells_and_csv_layout() {
+    let output = csv(&metadata(), &[fixture()]);
+    let rows = csv_rows(&output);
+    let headers = &rows[0];
+    let record = headers.iter().position(|v| v == "record").unwrap();
+    let mix_details = headers.iter().position(|v| v == "mix_details").unwrap();
+    let device_format = headers.iter().position(|v| v == "device_format").unwrap();
+    assert_eq!(headers[mix_details + 1], "device_format");
+    assert_eq!(headers[mix_details + 2], "device_format_details");
+    assert!(rows.iter().all(|row| row.len() == headers.len()));
+
+    let effect_source = headers.iter().position(|v| v == "effect_source").unwrap();
+    let effect = rows.iter().find(|row| row[record] == "effect").unwrap();
+    assert_eq!(effect[effect_source], "registry");
+
+    let empty_rows = csv_rows(&csv(&metadata(), &[]));
+    assert!(
+        empty_rows
+            .iter()
+            .all(|row| row.len() == empty_rows[0].len())
+    );
+
+    let mut d = fixture();
+    d.device_format = Ok(None);
+    let output = csv(&metadata(), &[d.clone()]);
+    let rows = csv_rows(&output);
+    let device = rows.iter().find(|row| row[record] == "device").unwrap();
+    assert_eq!(device[device_format], "None");
+    let output = table(&[d.clone()]);
+    let cells: Vec<_> = output.lines().nth(3).unwrap().split(" | ").collect();
+    assert_eq!(cells[1], "None");
+
+    d.device_format = Err("invalid blob (HRESULT 0x80070057)".into());
+    let output = csv(&metadata(), &[d.clone()]);
+    let rows = csv_rows(&output);
+    let device = rows.iter().find(|row| row[record] == "device").unwrap();
+    assert_eq!(
+        device[device_format],
+        "ERROR: invalid blob (HRESULT 0x80070057)"
+    );
+    let output = table(&[d.clone()]);
+    let cells: Vec<_> = output.lines().nth(3).unwrap().split(" | ").collect();
+    assert_eq!(cells[1], "ERROR: invalid blob (HRESULT 0x80070057)");
+
+    d.mix_format = Ok(Some(Format {
+        sample_rate: 48000,
+        channels: 2,
+        bits_per_sample: 16,
+        float: false,
+    }));
+    d.device_format = Ok(Some(Format {
+        sample_rate: 48000,
+        channels: 2,
+        bits_per_sample: 16,
+        float: false,
+    }));
+    let output = table(&[d.clone()]);
+    let cells: Vec<_> = output.lines().nth(3).unwrap().split(" | ").collect();
+    assert!(cells[0].contains("PCM/other (see mix_details)"));
+    assert!(cells[1].contains("PCM/other (see device_format_details)"));
+    let output = csv(&metadata(), &[d]);
+    let rows = csv_rows(&output);
+    let mix_format = headers.iter().position(|v| v == "mix_format").unwrap();
+    let device = rows.iter().find(|row| row[record] == "device").unwrap();
+    assert_eq!(
+        device[mix_format],
+        "48000 Hz / 2 ch / 16 bit / PCM/other (see mix_details)"
+    );
+    assert_eq!(
+        device[device_format],
+        "48000 Hz / 2 ch / 16 bit / PCM/other (see device_format_details)"
+    );
 }
 #[test]
 fn empty_csv_preserves_metadata_and_shared_error() {

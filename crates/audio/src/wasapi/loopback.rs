@@ -511,6 +511,7 @@ fn prepare(
     // Event declared first: all clients/services die before its handle closes.
     let event;
     let d = stream::device(endpoint, r)?;
+    stream::record_device_format(&d, r);
     let ep = r.call("QueryInterface.IMMEndpoint", d.cast::<IMMEndpoint>())?;
     // SAFETY: initialized apartment and live endpoint; read-only property queries.
     let flow = r.call("GetDataFlow", unsafe { ep.GetDataFlow() })?;

@@ -138,6 +138,15 @@
   - [사실] 적용 뒤 양쪽 라우팅 표에서 Tailscale 쪽 `172.30.1.0/24` 경로가 사라졌고, 상대 LAN IP의 경로가 이더넷 어댑터로 잡혔다. Tailscale 연결 자체는 유지됐다.
   - 사전 점검: `mdc-rig-route-check --remote <호스트명.local | LAN IP>`. 이름을 해석해 나온 주소마다 경로를 조회하고, 해석된 주소를 `resolved=`로 출력한다. 경로가 Tailscale 인터페이스거나 해석 결과에 Tailscale 주소가 섞여 있으면 이유를 출력하고 0이 아닌 코드로 끝난다. 해석·조회에 실패해도 통과시키지 않는다. 링크 로컬 IPv6 주소는 점검하지 않고 표시만 한다. 두 PC에서 수신을 켠 상태(차단), 끈 상태(통과), 짧은 이름(차단)을 확인했다. 두 PC 사이 측정은 시작 전에 양쪽에서 이 점검을 통과해야 하고, 측정에는 점검이 출력한 주소를 쓴다.
   - 미확인: 수신 PC는 Wi-Fi(`172.30.1.33`)도 같은 대역에 붙어 있어 `.local` 이름이 Wi-Fi 주소로 해석될 수 있다(이번에는 이더넷 주소였다). 점검은 경로의 인터페이스만 보며 유선·무선은 구분하지 않는다. `--accept-routes=false`가 재부팅 뒤에도 유지되는지는 확인하지 않았다.
+- 장치 열거의 기본 형식과 endpoint 효과(EFX) 감지 확인(2026-11-12, P1 프로브 `devices`).
+  - [사실] 조건: 읽기 전용 열거(스트림을 열지 않음), `d59ebdb-dirty` 빌드, PC마다 1회. `devices` 표·CSV와 `loopback` 메타에 Windows 기본 형식(`PKEY_AudioEngine_DeviceFormat`)을 추가했다(`stream` 메타에는 이미 있었다).
+  - [사실] 수신 PC 9개 장치: 기본 형식 레이트와 믹스 형식 레이트 모두 48kHz. 기본 형식 비트는 Realtek 헤드폰 32, fifine 마이크 24, Realtek 마이크 16(모두 PCM). endpoint 효과 경고는 없었다.
+  - [사실] 노트북 5개 장치: Realtek 스피커와 마이크 배열은 기본·믹스 형식 모두 48kHz. Steam Streaming Microphone(캡처)만 44.1kHz였다.
+  - [사실] 노트북 `스피커(Realtek(R) Audio)`에서 "endpoint FX registered" 경고가 나왔다. `FxProperties`의 `CompositeFX_EndpointEffectClsid`에 두 개가 등록돼 있고, 노트북 레지스트리 조회로 이름을 확인했다: `{599C2638-CC15-4FFE-B16A-9246260D2DF7}` = DTS EFX APO(`dtsapo64.dll`), `{90705486-CFCC-4D2F-9671-B62846279A2C}` = Realtek `CRtkAPOEFX2`. 같은 endpoint에 스트림·모드 효과(오프로드 포함)도 등록돼 있다.
+  - [사실] 노트북 마이크 배열(캡처)에도 endpoint 효과 하나(Realtek `CRtkRecEFX2`)와 모드 효과 세 개가 등록돼 있다. 경고는 설계대로 출력 장치에만 낸다(CSV의 effect 행에는 캡처 쪽도 남는다).
+  - [추정] 이 감지는 등록 여부만 본다. 효과가 실제로 켜져 있는지, 지연을 얼마나 더하는지는 알 수 없다. 지연은 외부 리그로 본다.
+  - 미확인: 이어폰을 꽂았을 때 노트북 출력 endpoint가 달라지는지(이번에는 꽂지 않은 상태로 보이며 출력 endpoint는 스피커 하나였다).
+  - 원본: `.local/p1/pc/devices-devfmt/`, `.local/p1/laptop/devices-devfmt/`.
 
 ## 기존 앱 기록에서 얻은 가설 (R1: 판정 근거 아님)
 
