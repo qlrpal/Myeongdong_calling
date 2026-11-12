@@ -9,6 +9,7 @@ mod chirp;
 pub use chirp::*;
 pub mod detect;
 pub mod fft;
+pub mod load;
 pub mod wav_in;
 pub use detect::*;
 pub use fft::*;
