@@ -268,6 +268,8 @@ pub mod loopback_report;
 /// Read-only device probe records and presentation, outside realtime paths.
 pub mod probe_table;
 pub mod provenance;
+mod render_target;
+pub use render_target::{RenderTarget, RenderTargetError};
 pub mod spsc;
 pub mod stream_mode;
 pub mod stream_report;
